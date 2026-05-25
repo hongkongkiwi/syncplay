@@ -89,6 +89,47 @@ describe('TransferSocket', () => {
     expect(transfer.getCompletedPath()).toBe('/downloads/movie.mkv');
   });
 
+  it('rejects out-of-order data frames', () => {
+    const sink = new Sink();
+    const socket = {
+      write: jest.fn(() => true),
+      destroy: jest.fn()
+    };
+    const transfer = new TransferSocket(socket, sink);
+
+    expect(() => transfer.handleData(encodeTransferFrame({ frameType: 1, offset: 4, payload: new Uint8Array([1]) })))
+      .toThrow('Unexpected transfer frame offset');
+    expect(sink.chunks).toEqual([]);
+  });
+
+  it('rejects completion before the expected file size is received', () => {
+    const sink = new Sink();
+    const socket = {
+      write: jest.fn(() => true),
+      destroy: jest.fn()
+    };
+    const transfer = new TransferSocket(socket, sink, undefined, 4);
+
+    transfer.handleData(encodeTransferFrame({ frameType: 1, offset: 0, payload: new Uint8Array([1, 2]) }));
+
+    expect(() => transfer.handleData(encodeTransferFrame({ frameType: 3, offset: 2, payload: new Uint8Array() })))
+      .toThrow('Transfer completed at 2 bytes, expected 4');
+    expect(sink.finalized).toBe(false);
+  });
+
+  it('rejects frames that exceed the expected file size', () => {
+    const sink = new Sink();
+    const socket = {
+      write: jest.fn(() => true),
+      destroy: jest.fn()
+    };
+    const transfer = new TransferSocket(socket, sink, undefined, 1);
+
+    expect(() => transfer.handleData(encodeTransferFrame({ frameType: 1, offset: 0, payload: new Uint8Array([1, 2]) })))
+      .toThrow('Transfer frame exceeds expected size');
+    expect(sink.chunks).toEqual([]);
+  });
+
   it('buffers partial data frames until the payload arrives', () => {
     const sink = new Sink();
     const socket = {

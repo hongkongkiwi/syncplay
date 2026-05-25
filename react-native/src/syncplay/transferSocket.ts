@@ -76,14 +76,17 @@ export function decodeTransferFrame(bufferLike: Uint8Array): { frame: TransferFr
 export class TransferSocket {
   private buffer = Buffer.alloc(0);
   private completedPath: string | null = null;
+  private expectedReceiveOffset = 0;
 
   constructor(
     private socket: TransferSocketLike,
     private sink: TransferFileSink,
-    private onControl?: (message: string) => void
+    private onControl?: (message: string) => void,
+    private expectedSize?: number | null
   ) {}
 
   connect(args: TransferConnectArgs): void {
+    this.expectedReceiveOffset = Math.max(0, args.offset ?? 0);
     this.socket.write(encodeTransferConnect(args));
   }
 
@@ -96,12 +99,20 @@ export class TransferSocket {
       }
       const decoded = decodeTransferFrame(this.buffer);
       if (decoded.frame.frameType === 1) {
+        this.assertExpectedOffset(decoded.frame.offset);
+        this.assertWithinExpectedSize(decoded.frame.offset + decoded.frame.payload.length);
         this.sink.write(decoded.frame.payload);
+        this.expectedReceiveOffset += decoded.frame.payload.length;
       }
       if (decoded.frame.frameType === 2) {
         this.onControl?.(Buffer.from(decoded.frame.payload).toString('utf8'));
       }
       if (decoded.frame.frameType === 3) {
+        this.assertExpectedOffset(decoded.frame.offset);
+        this.assertWithinExpectedSize(decoded.frame.offset);
+        if (typeof this.expectedSize === 'number' && decoded.frame.offset !== this.expectedSize) {
+          throw new Error(`Transfer completed at ${decoded.frame.offset} bytes, expected ${this.expectedSize}`);
+        }
         const destinationPath = this.sink.finalize?.();
         this.completedPath = typeof destinationPath === 'string' ? destinationPath : null;
       }
@@ -140,6 +151,18 @@ export class TransferSocket {
 
   getCompletedPath(): string | null {
     return this.completedPath;
+  }
+
+  private assertExpectedOffset(offset: number): void {
+    if (offset !== this.expectedReceiveOffset) {
+      throw new Error(`Unexpected transfer frame offset: ${offset}, expected ${this.expectedReceiveOffset}`);
+    }
+  }
+
+  private assertWithinExpectedSize(offset: number): void {
+    if (typeof this.expectedSize === 'number' && offset > this.expectedSize) {
+      throw new Error(`Transfer frame exceeds expected size: ${offset} > ${this.expectedSize}`);
+    }
   }
 }
 

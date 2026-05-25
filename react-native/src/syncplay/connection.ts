@@ -56,6 +56,7 @@ export type TransferTicket = {
   host?: string | null;
   port?: number | null;
   offset?: number;
+  file?: { size?: number | null } | null;
 };
 
 export class SyncplayConnection {
@@ -234,7 +235,8 @@ export class SyncplayConnection {
         void transfer
           .upload(ticket.transferId, source, ticket.offset ?? 0, chunkSize)
           .catch(error => onError?.(error instanceof Error ? error : new Error(String(error))));
-      }
+      },
+      ticket.file?.size
     );
     socket.on('data', data => transfer.handleData(typeof data === 'string' ? new Uint8Array(Buffer.from(data, 'binary')) : data));
     socket.on('error', error => {

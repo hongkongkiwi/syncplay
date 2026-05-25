@@ -244,6 +244,40 @@ def test_transfer_limits_reject_excess_active_or_user_sessions():
     assert other_receiver.errors[-1]["code"] == "too-many-active-transfers"
 
 
+def test_transfer_limit_allows_new_session_after_completion():
+    receiver = Watcher("receiver")
+    other_receiver = Watcher("other")
+    source = Watcher("source", file_=media())
+    transfers = TransferManager(
+        TransferServerConfig(enabled=True, max_active=1, max_per_user=2),
+        [receiver, other_receiver, source],
+    )
+    session = transfers.request_transfer(receiver, {"source": "source"})
+    transfers.accept_transfer(source, session.transfer_id, fingerprint="fp")
+    transfers.report_progress(session.transfer_id, session.size)
+
+    replacement = transfers.request_transfer(other_receiver, {"source": "source"})
+
+    assert replacement is not None
+    assert replacement.transfer_id != session.transfer_id
+    assert transfers.get_session(session.transfer_id) is None
+
+
+def test_transfer_limit_rejects_per_user_overflow_when_global_limit_allows_more():
+    receiver = Watcher("receiver")
+    other_receiver = Watcher("other")
+    source = Watcher("source", file_=media())
+    transfers = TransferManager(
+        TransferServerConfig(enabled=True, max_active=4, max_per_user=1),
+        [receiver, other_receiver, source],
+    )
+
+    transfers.request_transfer(receiver, {"source": "source"})
+    transfers.request_transfer(other_receiver, {"source": "source"})
+
+    assert other_receiver.errors[-1]["code"] == "too-many-user-transfers"
+
+
 def test_cleanup_expired_sessions_removes_tokens_and_session():
     now = [1000]
     receiver = Watcher("receiver")
