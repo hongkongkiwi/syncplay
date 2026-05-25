@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "Syncplay Mobile",
+    "slug": "syncplay-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "syncplay",
+    "userInterfaceStyle": "automatic",
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "pl.syncplay.mobile"
+    },
+    "android": {
+      "package": "pl.syncplay.mobile"
+    },
+    "plugins": [
+      "expo-document-picker",
+      [
+        "expo-video",
+        {
+          "supportsPictureInPicture": true
+        }
+      ]
+    ]
+  }
+}

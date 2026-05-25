@@ -32,6 +32,12 @@ https://syncplay.pl
 ## Download
 https://syncplay.pl/download/
 
+## Mobile client
+
+An Expo React Native mobile client lives in [`react-native/`](react-native/README.md). It can connect to a Syncplay server, join rooms, pick local media or stream URLs, use shared playlists, chat, and apply playback sync through the native mobile player.
+
+The mobile app needs a native development build. Expo Go cannot run it because the TCP socket, file-system, video, and local storage pieces use native modules.
+
 ## What does it do
 
 Syncplay synchronises the position and play state of multiple media players so that the viewers can watch the same thing at the same time.

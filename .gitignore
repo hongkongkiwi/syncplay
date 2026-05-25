@@ -14,4 +14,9 @@ dist.7z
 .*
 !.appveyor.yml
 !.github
+!.gitignore
+!react-native/.gitignore
+!react-native/android/.gitignore
+!react-native/ios/.gitignore
+!react-native/ios/.xcode.env
 __pycache__
