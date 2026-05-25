@@ -51,5 +51,8 @@ export function createExpoTransferSource(uri: string): TransferFileSource {
 
 function sanitizeFilename(filename: string): string {
   const trimmed = filename.trim().split(/[\\/]/).filter(Boolean).at(-1);
-  return trimmed || 'syncplay-download';
+  if (!trimmed || trimmed === '.' || trimmed === '..') {
+    return 'syncplay-download';
+  }
+  return trimmed;
 }

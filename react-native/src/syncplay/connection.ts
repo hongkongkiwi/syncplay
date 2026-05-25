@@ -193,6 +193,7 @@ export class SyncplayConnection {
     onError?: (error: Error) => void
   ): TransferSocket {
     let transfer: TransferSocket;
+    let uploadStarted = false;
     const socket = this.createSocket(
       {
         host: (ticket.host ?? '').trim() || this.lastConfig?.host.trim() || 'localhost',
@@ -206,28 +207,35 @@ export class SyncplayConnection {
           role: ticket.role,
           offset: ticket.offset ?? 0
         });
-        if (ticket.role === 'sender') {
-          if (!source) {
-            onError?.(new Error(`Missing transfer source for ${ticket.transferId}`));
-            socket.destroy();
-            return;
-          }
-          void transfer
-            .upload(ticket.transferId, source, ticket.offset ?? 0, chunkSize)
-            .catch(error => onError?.(error instanceof Error ? error : new Error(String(error))));
-        }
       }
     );
-    transfer = new TransferSocket(socket as TransferSocketLike, {
-      write: chunk => sink.write(chunk),
-      finalize: () => {
-        const destinationPath = sink.finalize?.() ?? null;
-        if (typeof destinationPath === 'string') {
-          onComplete?.(destinationPath);
+    transfer = new TransferSocket(
+      socket as TransferSocketLike,
+      {
+        write: chunk => sink.write(chunk),
+        finalize: () => {
+          const destinationPath = sink.finalize?.() ?? null;
+          if (typeof destinationPath === 'string') {
+            onComplete?.(destinationPath);
+          }
+          return destinationPath;
         }
-        return destinationPath;
+      },
+      message => {
+        if (message !== 'ready' || ticket.role !== 'sender' || uploadStarted) {
+          return;
+        }
+        uploadStarted = true;
+        if (!source) {
+          onError?.(new Error(`Missing transfer source for ${ticket.transferId}`));
+          socket.destroy();
+          return;
+        }
+        void transfer
+          .upload(ticket.transferId, source, ticket.offset ?? 0, chunkSize)
+          .catch(error => onError?.(error instanceof Error ? error : new Error(String(error))));
       }
-    });
+    );
     socket.on('data', data => transfer.handleData(typeof data === 'string' ? new Uint8Array(Buffer.from(data)) : data));
     socket.on('error', error => {
       onError?.(error);

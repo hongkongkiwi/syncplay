@@ -193,6 +193,21 @@ describe('Syncplay app state', () => {
       size: 123
     });
 
+    const badOffer = syncplayReducer(createInitialSyncplayState(), {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          offer: {
+            transferId: 'bad',
+            file: { name: 'bad.mkv', duration: Number.NaN, size: -1 },
+            offset: Number.POSITIVE_INFINITY
+          }
+        }
+      }
+    });
+
+    expect(badOffer.transfers.bad).toMatchObject({ file: null, size: null, offset: 0 });
+
     const ticketed = syncplayReducer(offered, {
       type: 'server-message',
       message: {

@@ -48,6 +48,8 @@ def decode_frame(buffer, max_payload_size=262144):
         raise TransferFrameError("bad transfer frame magic")
     if version != VERSION:
         raise TransferFrameError("unsupported transfer frame version")
+    if frame_type not in (FRAME_DATA, FRAME_CONTROL, FRAME_COMPLETE):
+        raise TransferFrameError("unsupported transfer frame type")
     if payload_length > max_payload_size:
         raise TransferFrameError("transfer frame payload is too large")
 
@@ -94,6 +96,10 @@ class TransferSocketRelay(object):
             raise TransferFrameError("invalid transfer role")
 
         self._pairs[ticket.transfer_id] = pair
+        if pair.sender and pair.receiver:
+            ready = encode_frame(TransferFrame(frame_type=FRAME_CONTROL, offset=0, payload=b"ready"))
+            pair.sender.write(ready)
+            pair.receiver.write(ready)
         return ticket
 
     def get_pair(self, transfer_id):
@@ -130,7 +136,15 @@ class TransferSocketRelay(object):
             pair = pair._replace(sender=None, paused=True)
         elif role == "receiver":
             pair = pair._replace(receiver=None, paused=True)
+        if not pair.sender and not pair.receiver:
+            self._cleanup(transfer_id)
+            return
         self._pairs[transfer_id] = pair
+
+    def _cleanup(self, transfer_id):
+        self._pairs.pop(transfer_id, None)
+        self._progress.pop(transfer_id, None)
+        self._send_after.pop(transfer_id, None)
 
     def _write_or_throttle(self, transfer_id, role, target, frame):
         encoded = encode_frame(frame)
@@ -162,6 +176,8 @@ class TransferSocketRelay(object):
             self._progress[transfer_id] = transferred
             if self._progress_callback:
                 self._progress_callback(transfer_id, transferred)
+        if role == "sender" and frame.frame_type == FRAME_COMPLETE:
+            self._cleanup(transfer_id)
 
     def _seconds(self):
         if self._clock and hasattr(self._clock, "seconds"):

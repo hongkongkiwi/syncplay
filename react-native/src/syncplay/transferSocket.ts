@@ -28,6 +28,7 @@ export type TransferFileSource = {
 };
 
 const HEADER_LENGTH = 24;
+const MAX_PAYLOAD_LENGTH = 262144;
 const MAGIC = 'SPFT';
 
 export function encodeTransferConnect(args: TransferConnectArgs): string {
@@ -52,26 +53,19 @@ export function decodeTransferFrame(bufferLike: Uint8Array): { frame: TransferFr
   if (buffer.length < HEADER_LENGTH) {
     throw new Error('Incomplete transfer frame');
   }
-  if (buffer.toString('ascii', 0, 4) !== MAGIC) {
-    throw new Error('Bad transfer frame magic');
-  }
-  const version = buffer.readUInt16BE(4);
-  if (version !== 1) {
-    throw new Error(`Unsupported transfer frame version: ${version}`);
-  }
-  const payloadLength = buffer.readUInt32BE(16);
-  const expectedCrc = headerCrc(buffer.subarray(0, HEADER_LENGTH - 4));
-  if (buffer.readUInt32BE(20) !== expectedCrc) {
-    throw new Error('Bad transfer frame header crc');
-  }
+  const payloadLength = readValidatedPayloadLength(buffer);
   const end = HEADER_LENGTH + payloadLength;
   if (buffer.length < end) {
     throw new Error('Incomplete transfer frame');
   }
+  const frameType = buffer.readUInt16BE(6);
+  if (![1, 2, 3].includes(frameType)) {
+    throw new Error(`Unsupported transfer frame type: ${frameType}`);
+  }
 
   return {
     frame: {
-      frameType: buffer.readUInt16BE(6),
+      frameType,
       offset: readUInt64BE(buffer, 8),
       payload: new Uint8Array(buffer.subarray(HEADER_LENGTH, end))
     },
@@ -85,7 +79,8 @@ export class TransferSocket {
 
   constructor(
     private socket: TransferSocketLike,
-    private sink: TransferFileSink
+    private sink: TransferFileSink,
+    private onControl?: (message: string) => void
   ) {}
 
   connect(args: TransferConnectArgs): void {
@@ -95,13 +90,16 @@ export class TransferSocket {
   handleData(chunk: Uint8Array): void {
     this.buffer = Buffer.from(concat(this.buffer, chunk));
     while (this.buffer.length >= HEADER_LENGTH) {
-      const payloadLength = this.buffer.readUInt32BE(16);
+      const payloadLength = readValidatedPayloadLength(this.buffer);
       if (this.buffer.length < HEADER_LENGTH + payloadLength) {
         break;
       }
       const decoded = decodeTransferFrame(this.buffer);
       if (decoded.frame.frameType === 1) {
         this.sink.write(decoded.frame.payload);
+      }
+      if (decoded.frame.frameType === 2) {
+        this.onControl?.(Buffer.from(decoded.frame.payload).toString('utf8'));
       }
       if (decoded.frame.frameType === 3) {
         const destinationPath = this.sink.finalize?.();
@@ -118,8 +116,8 @@ export class TransferSocket {
     this.socket.destroy();
   }
 
-  resume(transferId: string, token: string, role: 'sender' | 'receiver', offset: number): void {
-    this.connect({ transferId, token, role, offset });
+  resume(_transferId: string, _token: string, _role: 'sender' | 'receiver', _offset: number): void {
+    throw new Error('Paused transfer sockets cannot be reused. Open a new transfer socket to resume.');
   }
 
   async upload(transferId: string, source: TransferFileSource, offset = 0, chunkSize = 262144): Promise<number> {
@@ -161,6 +159,25 @@ function writeUInt64BE(buffer: Buffer, value: number, offset: number): void {
 
 function readUInt64BE(buffer: Buffer, offset: number): number {
   return buffer.readUInt32BE(offset) * 0x100000000 + buffer.readUInt32BE(offset + 4);
+}
+
+function readValidatedPayloadLength(buffer: Buffer): number {
+  if (buffer.toString('ascii', 0, 4) !== MAGIC) {
+    throw new Error('Bad transfer frame magic');
+  }
+  const version = buffer.readUInt16BE(4);
+  if (version !== 1) {
+    throw new Error(`Unsupported transfer frame version: ${version}`);
+  }
+  const expectedCrc = headerCrc(buffer.subarray(0, HEADER_LENGTH - 4));
+  if (buffer.readUInt32BE(20) !== expectedCrc) {
+    throw new Error('Bad transfer frame header crc');
+  }
+  const payloadLength = buffer.readUInt32BE(16);
+  if (payloadLength > MAX_PAYLOAD_LENGTH) {
+    throw new Error('Transfer frame payload is too large');
+  }
+  return payloadLength;
 }
 
 function headerCrc(buffer: Uint8Array): number {

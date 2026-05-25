@@ -38,7 +38,11 @@ class JSONCommandProtocol(LineReceiver):
             elif command == "Transfer":
                 self.handleTransfer(message[1])
             elif command == "TransferConnect":
-                self.handleTransferConnect(message[1])
+                handler = getattr(self, "handleTransferConnect", None)
+                if handler:
+                    handler(message[1])
+                else:
+                    self.dropWithError(getMessage("unknown-command-server-error").format(message[1]))
             else:
                 self.dropWithError(getMessage("unknown-command-server-error").format(message[1]))  # TODO: log, not drop
 
@@ -634,6 +638,8 @@ class SyncServerProtocol(JSONCommandProtocol):
             self.transport.loseConnection()
             return
         try:
+            if not isinstance(payload, dict):
+                raise TransferFrameError("invalid transfer connect payload")
             ticket = self._factory.transferRelay.connect(payload.get("token"), self.transport)
         except TransferFrameError as error:
             print("Transfer socket rejected: {}".format(error))

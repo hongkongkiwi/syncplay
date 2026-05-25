@@ -3,6 +3,8 @@
 import pytest
 
 from syncplay.filetransfer_wire import (
+    FRAME_COMPLETE,
+    FRAME_CONTROL,
     FRAME_DATA,
     TransferFrame,
     TransferFrameError,
@@ -77,6 +79,13 @@ def test_decode_rejects_payload_larger_than_chunk_limit():
         decode_frame(encoded, max_payload_size=3)
 
 
+def test_decode_rejects_unknown_frame_type():
+    encoded = encode_frame(TransferFrame(frame_type=99, offset=0, payload=b"abc"))
+
+    with pytest.raises(TransferFrameError):
+        decode_frame(encoded)
+
+
 def test_relay_pairs_sender_and_receiver_by_valid_token():
     relay = TransferSocketRelay()
     sender = Sink()
@@ -91,6 +100,8 @@ def test_relay_pairs_sender_and_receiver_by_valid_token():
 
     assert pair.sender is sender
     assert pair.receiver is receiver
+    assert sender.writes == [encode_frame(TransferFrame(frame_type=FRAME_CONTROL, offset=0, payload=b"ready"))]
+    assert receiver.writes == sender.writes
 
 
 def test_relay_forwards_data_frame_from_sender_to_receiver():
@@ -101,6 +112,7 @@ def test_relay_forwards_data_frame_from_sender_to_receiver():
     relay.register_token("receiver-token", "tx1", "receiver")
     relay.connect("sender-token", sender)
     relay.connect("receiver-token", receiver)
+    receiver.writes = []
     frame = TransferFrame(frame_type=FRAME_DATA, offset=0, payload=b"abc")
 
     relay.relay_frame("tx1", "sender", frame)
@@ -117,6 +129,7 @@ def test_relay_reports_data_progress_for_sender_frames():
     relay.register_token("receiver-token", "tx1", "receiver")
     relay.connect("sender-token", sender)
     relay.connect("receiver-token", receiver)
+    receiver.writes = []
 
     relay.relay_frame("tx1", "sender", TransferFrame(frame_type=FRAME_DATA, offset=0, payload=b"abc"))
     relay.relay_frame("tx1", "sender", TransferFrame(frame_type=FRAME_DATA, offset=3, payload=b"de"))
@@ -133,6 +146,7 @@ def test_relay_throttles_sender_frames_when_rate_limit_is_set():
     relay.register_token("receiver-token", "tx1", "receiver")
     relay.connect("sender-token", sender)
     relay.connect("receiver-token", receiver)
+    receiver.writes = []
     first = TransferFrame(frame_type=FRAME_DATA, offset=0, payload=b"ab")
     second = TransferFrame(frame_type=FRAME_DATA, offset=2, payload=b"cd")
 
@@ -154,6 +168,7 @@ def test_relay_drops_scheduled_frame_after_pause():
     relay.register_token("receiver-token", "tx1", "receiver")
     relay.connect("sender-token", sender)
     relay.connect("receiver-token", receiver)
+    receiver.writes = []
 
     relay.relay_frame("tx1", "sender", TransferFrame(frame_type=FRAME_DATA, offset=0, payload=b"ab"))
     relay.relay_frame("tx1", "sender", TransferFrame(frame_type=FRAME_DATA, offset=2, payload=b"cd"))
@@ -171,6 +186,7 @@ def test_pause_stops_relay_without_losing_session():
     relay.register_token("receiver-token", "tx1", "receiver")
     relay.connect("sender-token", sender)
     relay.connect("receiver-token", receiver)
+    receiver.writes = []
     relay.pause("tx1")
 
     relay.relay_frame("tx1", "sender", TransferFrame(frame_type=FRAME_DATA, offset=0, payload=b"abc"))
@@ -187,7 +203,22 @@ def test_socket_close_pauses_session():
     relay.register_token("receiver-token", "tx1", "receiver")
     relay.connect("sender-token", sender)
     relay.connect("receiver-token", receiver)
+    receiver.writes = []
 
     relay.disconnect("tx1", "sender")
 
     assert relay.get_pair("tx1").paused is True
+
+
+def test_complete_frame_cleans_relay_session():
+    relay = TransferSocketRelay()
+    sender = Sink()
+    receiver = Sink()
+    relay.register_token("sender-token", "tx1", "sender")
+    relay.register_token("receiver-token", "tx1", "receiver")
+    relay.connect("sender-token", sender)
+    relay.connect("receiver-token", receiver)
+
+    relay.relay_frame("tx1", "sender", TransferFrame(frame_type=FRAME_COMPLETE, offset=0, payload=b""))
+
+    assert relay.get_pair("tx1") is None

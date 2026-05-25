@@ -465,10 +465,9 @@ export default function App() {
           },
           undefined,
           undefined,
-          error => {
+          _error => {
             openedTransferSocketsRef.current.delete(transfer.transferId);
             dispatch({ type: 'transfer-failed', transferId: transfer.transferId });
-            dispatch({ type: 'connection-status', status: 'error', error: error.message });
           }
         );
       } else if (transfer.role === 'sender') {
@@ -488,10 +487,9 @@ export default function App() {
           undefined,
           createExpoTransferSource(sourceItem.uri),
           undefined,
-          error => {
+          _error => {
             openedTransferSocketsRef.current.delete(transfer.transferId);
             dispatch({ type: 'transfer-failed', transferId: transfer.transferId });
-            dispatch({ type: 'connection-status', status: 'error', error: error.message });
           }
         );
       }

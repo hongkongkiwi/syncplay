@@ -45,6 +45,9 @@ export function createIncomingTransfer(payload: Record<string, unknown>): Transf
   if (!transferId) {
     return null;
   }
+  const offset = typeof payload.offset === 'number' && Number.isFinite(payload.offset) && payload.offset >= 0
+    ? payload.offset
+    : 0;
   return {
     transferId,
     role: 'sender',
@@ -54,7 +57,7 @@ export function createIncomingTransfer(payload: Record<string, unknown>): Transf
     file: isSyncplayFile(payload.file) ? payload.file : null,
     transferred: 0,
     size: isSyncplayFile(payload.file) ? payload.file.size : null,
-    offset: typeof payload.offset === 'number' ? payload.offset : 0
+    offset
   };
 }
 
@@ -87,10 +90,16 @@ export function statusFromTransferError(code: string): TransferStatus {
 }
 
 function isSyncplayFile(file: unknown): file is SyncplayFile {
+  const duration = (file as SyncplayFile | null)?.duration;
+  const size = (file as SyncplayFile | null)?.size;
   return (
     !!file &&
     typeof (file as SyncplayFile).name === 'string' &&
-    typeof (file as SyncplayFile).duration === 'number' &&
-    typeof (file as SyncplayFile).size === 'number'
+    typeof duration === 'number' &&
+    Number.isFinite(duration) &&
+    duration >= 0 &&
+    typeof size === 'number' &&
+    Number.isFinite(size) &&
+    size >= 0
   );
 }

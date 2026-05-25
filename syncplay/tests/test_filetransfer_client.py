@@ -4,7 +4,7 @@ import os
 
 import syncplay.filetransfer_client as filetransfer_client
 from syncplay.filetransfer_client import FileTransferClient, fingerprint_file
-from syncplay.filetransfer_wire import FRAME_COMPLETE, FRAME_DATA, TransferFrame, decode_frame, encode_frame
+from syncplay.filetransfer_wire import FRAME_COMPLETE, FRAME_CONTROL, FRAME_DATA, TransferFrame, decode_frame, encode_frame
 
 
 class Protocol(object):
@@ -217,6 +217,8 @@ def test_transfer_socket_handler_sends_handshake_and_uploads_for_sender(tmp_path
     client.transfer_socket_requests[0][1].connectionMade(transport)
 
     assert transport.writes[0] == b'{"TransferConnect":{"transferId":"tx1","token":"secret","role":"sender","offset":2}}\r\n'
+    assert transport.writes[1:] == []
+    client.transfer_socket_requests[0][1].dataReceived(transport_frame(FRAME_CONTROL, 0, b"ready"))
     frames = _decode_all(transport.writes[1:])
     assert frames[0] == TransferFrame(frame_type=FRAME_DATA, offset=2, payload=b"cd")
 
@@ -246,7 +248,9 @@ def test_transfer_socket_handler_can_upload_sender_from_thread(tmp_path, monkeyp
     transfers.handleTicket({"transferId": "tx1", "role": "sender", "token": "secret", "chunkSize": 3})
     transport = Transport()
 
-    client.transfer_socket_requests[0][1].connectionMade(transport)
+    handler = client.transfer_socket_requests[0][1]
+    handler.connectionMade(transport)
+    handler.dataReceived(transport_frame(FRAME_CONTROL, 0, b"ready"))
 
     assert reactor.thread_calls
     assert reactor.scheduled
@@ -297,9 +301,13 @@ def test_cancel_keeps_completed_file(tmp_path):
 class Transport(object):
     def __init__(self):
         self.writes = []
+        self.tls_options = None
 
     def write(self, data):
         self.writes.append(data)
+
+    def startTLS(self, options):
+        self.tls_options = options
 
 
 def _decode_all(chunks):
@@ -336,6 +344,42 @@ def test_sender_streams_loaded_file_as_data_frames(tmp_path):
     ]
     assert transfers.get("tx1").bytes_transferred == 6
     assert transfers.get("tx1").status == "complete"
+
+
+def test_sender_stream_stops_without_complete_when_paused(tmp_path):
+    path = tmp_path / "movie.mkv"
+    path.write_bytes(b"abcdef")
+    client = Client({"name": "movie.mkv", "size": 6, "path": str(path)})
+    transfers = FileTransferClient(client)
+    transfers.handleOffer({"transferId": "tx1", "file": {"name": "movie.mkv", "size": 6}})
+    transfers.acceptOffer("tx1")
+    transport = Transport()
+
+    class PausingTransport(object):
+        def write(self, data):
+            transport.write(data)
+            transfers.pauseTransfer("tx1")
+
+    transfers.streamUpload("tx1", PausingTransport(), chunkSize=2)
+
+    frames = _decode_all(transport.writes)
+    assert frames == [TransferFrame(frame_type=FRAME_DATA, offset=0, payload=b"ab")]
+
+
+def test_transfer_socket_starts_tls_before_transfer_connect(tmp_path):
+    client = Client()
+    transfers = FileTransferClient(client, download_directory=str(tmp_path))
+    transfers.handleTicket({"transferId": "tx1", "role": "receiver", "token": "secret", "file": {"name": "movie.mkv", "size": 1}})
+    handler = client.transfer_socket_requests[0][1]
+    handler._tls_options = object()
+    transport = Transport()
+
+    handler.connectionMade(transport)
+    handler.dataReceived(b'{"TLS":{"startTLS":"true"}}\r\n')
+
+    assert transport.writes[0] == b'{"TLS":{"startTLS":"send"}}\r\n'
+    assert transport.tls_options is handler._tls_options
+    assert transport.writes[1] == b'{"TransferConnect":{"transferId":"tx1","token":"secret","role":"receiver","offset":0}}\r\n'
 
 
 def test_receiver_writes_frames_to_part_file_and_renames_on_complete(tmp_path):

@@ -1,3 +1,5 @@
+import { Buffer } from 'buffer';
+
 import {
   TransferSocket,
   decodeTransferFrame,
@@ -36,6 +38,12 @@ describe('TransferSocket', () => {
     expect(decoded.remaining).toHaveLength(0);
   });
 
+  it('rejects unsupported frame types', () => {
+    const encoded = encodeTransferFrame({ frameType: 99, offset: 0, payload: new Uint8Array() });
+
+    expect(() => decodeTransferFrame(encoded)).toThrow('Unsupported transfer frame type');
+  });
+
   it('writes file chunks to sink and supports pause/resume offsets', () => {
     const sink = new Sink();
     const writes: Array<string | Uint8Array> = [];
@@ -51,13 +59,20 @@ describe('TransferSocket', () => {
     transfer.connect({ transferId: 'tx1', token: 'secret', role: 'receiver' });
     transfer.handleData(encodeTransferFrame({ frameType: 1, offset: 0, payload: new Uint8Array([5, 6]) }));
     transfer.pause();
-    transfer.resume('tx1', 'secret', 'receiver', 2);
 
     expect(sink.chunks).toEqual([new Uint8Array([5, 6])]);
     expect(socket.destroy).toHaveBeenCalledTimes(1);
-    expect(writes.at(-1)).toBe(
-      '{"TransferConnect":{"transferId":"tx1","token":"secret","role":"receiver","offset":2}}\r\n'
-    );
+    expect(() => transfer.resume('tx1', 'secret', 'receiver', 2)).toThrow('Open a new transfer socket');
+  });
+
+  it('reports ready control frames', () => {
+    const socket = { write: jest.fn(() => true), destroy: jest.fn() };
+    const controls: string[] = [];
+    const transfer = new TransferSocket(socket, new Sink(), message => controls.push(message));
+
+    transfer.handleData(encodeTransferFrame({ frameType: 2, offset: 0, payload: Buffer.from('ready') }));
+
+    expect(controls).toEqual(['ready']);
   });
 
   it('records the completed destination path after the complete frame', () => {

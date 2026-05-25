@@ -172,6 +172,8 @@ class SyncplayClient(object):
         port = int(ticket.get("port") or self._config["port"])
         if '[' in host:
             host = host.strip('[]')
+        if self._clientSupportsTLS and self._serverSupportsTLS:
+            handler._tls_options = self.protocolFactory.options
         endpoint = HostnameEndpoint(reactor, host, port)
         d = connectProtocol(endpoint, handler)
         d.addErrback(lambda failure: self.ui.showErrorMessage(str(failure.value)))

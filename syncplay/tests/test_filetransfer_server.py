@@ -149,6 +149,19 @@ def test_progress_is_sent_to_both_transfer_participants():
     assert receiver.progress[-1] == source.progress[-1]
 
 
+def test_complete_progress_removes_session_from_active_map():
+    receiver = Watcher("receiver")
+    source = Watcher("source", file_=media())
+    transfers = manager(watchers=[receiver, source])
+    session = transfers.request_transfer(receiver, {"source": "source"})
+    transfers.accept_transfer(source, session.transfer_id, fingerprint="fp")
+
+    transfers.report_progress(session.transfer_id, 1024)
+
+    assert receiver.progress[-1]["status"] == "complete"
+    assert transfers.get_session(session.transfer_id) is None
+
+
 def test_cancel_notifies_both_sides_and_removes_session():
     receiver = Watcher("receiver")
     source = Watcher("source", file_=media())

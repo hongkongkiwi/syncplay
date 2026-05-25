@@ -175,7 +175,7 @@ class TransferManager(object):
         for participant in self._participants(session):
             participant.sendTransferProgress(payload)
         if payload["status"] == TransferStatus.COMPLETE:
-            self._sessions[transfer_id] = session._replace(status=TransferStatus.COMPLETE, offset=session.size)
+            self._sessions.pop(transfer_id, None)
         else:
             self._sessions[transfer_id] = session._replace(status=TransferStatus.DOWNLOADING, offset=payload["transferred"])
         return payload

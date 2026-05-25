@@ -33,6 +33,7 @@ Receiver-side states:
 - `paused-source-offline`
 - `paused-source-changed-media`
 - `paused-receiver-offline`
+- `paused-by-sender`
 - `verifying`
 - `complete`
 - `failed`
@@ -118,6 +119,8 @@ The server-created offer carries sanitized media metadata:
 }}}
 ```
 
+The server ticket is authoritative for `chunkSize`; clients may request a preferred value in the decision, but the sender and receiver must use the ticket value.
+
 ```json
 {"Transfer": {"progress": {
   "transferId": "uuid",
@@ -143,7 +146,7 @@ Transfer socket:
 {"TransferConnect": {"transferId": "uuid", "token": "opaque-server-token", "role": "sender"}}
 ```
 
-3. Server validates token, pairs sender and receiver transfer sockets, and switches to length-prefixed binary frames.
+3. Server validates token, pairs sender and receiver transfer sockets, sends a `ready` control frame to both sockets, and then relays length-prefixed binary frames. Senders must wait for `ready` before uploading.
 4. Frame header is 24 bytes:
 
 ```text

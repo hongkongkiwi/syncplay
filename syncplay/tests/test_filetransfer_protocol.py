@@ -53,6 +53,14 @@ def test_json_command_protocol_routes_transfer_messages():
     assert protocol.error is None
 
 
+def test_json_command_protocol_rejects_transfer_connect_without_handler():
+    protocol = RoutingProtocol()
+
+    protocol.handleMessages({"TransferConnect": {"transferId": "abc"}})
+
+    assert protocol.error
+
+
 def test_client_protocol_can_send_transfer_request_without_file_metadata():
     protocol = SyncClientProtocol(FakeClient())
     sent = capture_messages(protocol)
@@ -187,5 +195,24 @@ def test_bad_transfer_connect_token_closes_socket_without_crashing():
     protocol.setRawMode = lambda: None
 
     protocol.handleTransferConnect({"transferId": "tx1", "token": "bad", "role": "receiver"})
+
+    assert protocol.transport.closed is True
+
+
+def test_bad_transfer_connect_payload_closes_socket_without_crashing():
+    class Transport(object):
+        def __init__(self):
+            self.closed = False
+
+        def loseConnection(self):
+            self.closed = True
+
+    factory = FakeFactory()
+    factory.transferRelay = object()
+    protocol = SyncServerProtocol(factory)
+    protocol.transport = Transport()
+    protocol.setRawMode = lambda: None
+
+    protocol.handleTransferConnect("bad")
 
     assert protocol.transport.closed is True

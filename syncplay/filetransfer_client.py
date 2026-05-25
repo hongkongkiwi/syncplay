@@ -3,12 +3,13 @@
 import hashlib
 import json
 import os
+import threading
 from collections import namedtuple
 
 from twisted.internet import reactor
 from twisted.internet.protocol import Protocol
 
-from syncplay.filetransfer_wire import FRAME_COMPLETE, FRAME_DATA, TransferFrame, TransferFrameError, decode_frame, encode_frame
+from syncplay.filetransfer_wire import FRAME_COMPLETE, FRAME_CONTROL, FRAME_DATA, TransferFrame, TransferFrameError, decode_frame, encode_frame
 
 
 TransferClientSession = namedtuple(
@@ -209,7 +210,14 @@ class FileTransferClient(object):
 
         def write_frame(data):
             if schedule:
-                schedule(lambda data=data: transport.write(data))
+                written = threading.Event()
+                def scheduled_write(data=data, written=written):
+                    try:
+                        transport.write(data)
+                    finally:
+                        written.set()
+                schedule(scheduled_write)
+                written.wait()
             else:
                 transport.write(data)
 
@@ -217,6 +225,9 @@ class FileTransferClient(object):
         with open(path, "rb") as handle:
             handle.seek(position)
             while True:
+                current = self._sessions.get(transferId, session)
+                if current.status in ("paused-local", "cancelled", "failed"):
+                    return position
                 chunk = handle.read(chunk_size)
                 if not chunk:
                     break
@@ -224,8 +235,10 @@ class FileTransferClient(object):
                 position += len(chunk)
                 current = self._sessions.get(transferId, session)
                 set_session(current._replace(bytes_transferred=position))
-        write_frame(encode_frame(TransferFrame(frame_type=FRAME_COMPLETE, offset=position, payload=b"")))
         current = self._sessions.get(transferId, session)
+        if current.status in ("paused-local", "cancelled", "failed"):
+            return position
+        write_frame(encode_frame(TransferFrame(frame_type=FRAME_COMPLETE, offset=position, payload=b"")))
         set_session(current._replace(status="complete", bytes_transferred=position))
         return position
 
@@ -320,22 +333,27 @@ def _encode_transfer_connect(ticket, offset):
 
 
 class TransferSocketClientProtocol(Protocol):
-    def __init__(self, transfers, ticket, threaded_upload=False):
+    def __init__(self, transfers, ticket, threaded_upload=False, tls_options=None):
         self._transfers = transfers
         self._ticket = ticket
         self._buffer = b""
         self._threaded_upload = threaded_upload
+        self._tls_options = tls_options
+        self._transfer_connected = False
+        self._upload_started = False
 
     def connectionMade(self, transport=None):
         if transport is not None:
             self.transport = transport
+        if self._tls_options:
+            self.transport.write(b'{"TLS":{"startTLS":"send"}}\r\n')
+            return
+        self._send_transfer_connect()
+
+    def _send_transfer_connect(self):
         offset = self._connection_offset()
         self.transport.write(_encode_transfer_connect(self._ticket, offset))
-        if self._ticket.get("role") == "sender":
-            if self._threaded_upload:
-                reactor.callInThread(self._stream_upload, offset, reactor.callFromThread)
-                return
-            self._stream_upload(offset)
+        self._transfer_connected = True
 
     def _stream_upload(self, offset, schedule=None):
         try:
@@ -353,12 +371,38 @@ class TransferSocketClientProtocol(Protocol):
                 self.transport.loseConnection()
 
     def dataReceived(self, data):
+        if not self._transfer_connected:
+            self._buffer += data
+            if b"\n" not in self._buffer:
+                return
+            line, self._buffer = self._buffer.split(b"\n", 1)
+            try:
+                message = json.loads(line.decode("utf-8").strip())
+            except (TypeError, ValueError):
+                self.transport.loseConnection()
+                return
+            answer = message.get("TLS", {}).get("startTLS") if isinstance(message, dict) else None
+            if answer == "true":
+                self.transport.startTLS(self._tls_options)
+                self._send_transfer_connect()
+            elif answer == "false":
+                self._send_transfer_connect()
+            else:
+                self.transport.loseConnection()
+                return
+            if not self._buffer:
+                return
+            data = self._buffer
+            self._buffer = b""
         self._buffer += data
         try:
             while self._buffer:
                 frame, self._buffer = decode_frame(self._buffer)
                 if frame is None:
                     return
+                if frame.frame_type == FRAME_CONTROL and frame.payload == b"ready":
+                    self._start_upload_once()
+                    continue
                 self._transfers.receiveFrame(self._ticket.get("transferId"), frame)
         except (TransferFrameError, ValueError):
             self.transport.loseConnection()
@@ -368,3 +412,13 @@ class TransferSocketClientProtocol(Protocol):
         if self._ticket.get("role") == "receiver" and session and session.part_path and os.path.exists(session.part_path):
             return os.path.getsize(session.part_path)
         return int(self._ticket.get("offset") or 0)
+
+    def _start_upload_once(self):
+        if self._ticket.get("role") != "sender" or self._upload_started:
+            return
+        self._upload_started = True
+        offset = self._connection_offset()
+        if self._threaded_upload:
+            reactor.callInThread(self._stream_upload, offset, reactor.callFromThread)
+            return
+        self._stream_upload(offset)
