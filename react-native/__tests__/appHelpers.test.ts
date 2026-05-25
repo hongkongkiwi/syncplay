@@ -10,6 +10,7 @@ import {
   statusLabel,
   stripManagedRoomName
 } from '../src/app/appHelpers';
+import type { TransferSession } from '../src/syncplay/fileTransfer';
 
 describe('app helper functions', () => {
   it('detects stream URIs by scheme', () => {
@@ -59,55 +60,146 @@ describe('app helper functions', () => {
   });
 
   it('builds readable transfer labels, progress, and retry hints', () => {
-    expect(
-      getTransferDisplay({
-        transferId: 'tx1',
-        role: 'receiver',
-        status: 'downloading',
-        transferred: 25,
-        size: 100,
-        offset: 0
-      })
-    ).toMatchObject({
-      label: 'Downloading',
-      detail: '25% · 0.0 MB / 0.0 MB',
-      progress: 0.25,
-      canRetry: false
-    });
+    const baseTransfer: TransferSession = {
+      transferId: 'tx1',
+      role: 'receiver',
+      status: 'downloading',
+      transferred: 25,
+      size: 100,
+      offset: 0
+    };
+    const cases: Array<{ name: string; session: TransferSession; expected: ReturnType<typeof getTransferDisplay> }> = [
+      {
+        name: 'incoming approval request',
+        session: {
+          ...baseTransfer,
+          status: 'incoming-request',
+          transferred: 0,
+          receiver: 'Alice',
+          file: { name: 'movie.mkv', duration: 100, size: 100 }
+        },
+        expected: {
+          label: 'Approval needed',
+          detail: 'Alice wants movie.mkv.',
+          progress: 0,
+          canRetry: false
+        }
+      },
+      {
+        name: 'receiver socket opening',
+        session: { ...baseTransfer, status: 'approved' },
+        expected: {
+          label: 'Connecting',
+          detail: 'Opening the download socket.',
+          progress: 0.25,
+          canRetry: false
+        }
+      },
+      {
+        name: 'sender socket waiting',
+        session: { ...baseTransfer, role: 'sender', status: 'approved' },
+        expected: {
+          label: 'Connecting',
+          detail: 'Waiting for the receiver socket.',
+          progress: 0.25,
+          canRetry: false
+        }
+      },
+      {
+        name: 'active download',
+        session: baseTransfer,
+        expected: {
+          label: 'Downloading',
+          detail: '25% · 0.0 MB / 0.0 MB',
+          progress: 0.25,
+          canRetry: false
+        }
+      },
+      {
+        name: 'local pause',
+        session: { ...baseTransfer, status: 'paused-local', transferred: 64, size: 128, offset: 64 },
+        expected: {
+          label: 'Paused',
+          detail: 'Stopped at 50% · 0.0 MB / 0.0 MB.',
+          progress: 0.5,
+          canRetry: true
+        }
+      },
+      {
+        name: 'sender offline pause',
+        session: { ...baseTransfer, status: 'paused-source-offline', transferred: 64, size: 128, offset: 64 },
+        expected: {
+          label: 'Paused',
+          detail: 'The sender left. Retry after they reconnect.',
+          progress: 0.5,
+          canRetry: true
+        }
+      },
+      {
+        name: 'sender changed media pause',
+        session: { ...baseTransfer, status: 'paused-source-changed-media', transferred: 64, size: 128, offset: 64 },
+        expected: {
+          label: 'Paused',
+          detail: 'The sender changed files. Retry after they switch back.',
+          progress: 0.5,
+          canRetry: true
+        }
+      },
+      {
+        name: 'receiver offline pause',
+        session: { ...baseTransfer, status: 'paused-receiver-offline', transferred: 64, size: 128, offset: 64 },
+        expected: {
+          label: 'Paused',
+          detail: 'The receiver left. Retry after they reconnect.',
+          progress: 0.5,
+          canRetry: true
+        }
+      },
+      {
+        name: 'completed transfer',
+        session: { ...baseTransfer, status: 'complete', completedPath: 'file:///downloads/movie.mkv' },
+        expected: {
+          label: 'Saved',
+          detail: 'Saved to file:///downloads/movie.mkv',
+          progress: 1,
+          canRetry: false
+        }
+      },
+      {
+        name: 'cancelled transfer',
+        session: { ...baseTransfer, status: 'cancelled', errorMessage: 'User stopped transfer.' },
+        expected: {
+          label: 'Cancelled',
+          detail: 'User stopped transfer.',
+          progress: 0.25,
+          canRetry: false
+        }
+      },
+      {
+        name: 'failed transfer',
+        session: { ...baseTransfer, status: 'failed', transferred: 64, size: 128, offset: 64, token: 'ticket', errorMessage: 'Bad transfer frame magic' },
+        expected: {
+          label: 'Failed',
+          detail: 'Bad transfer frame magic',
+          progress: 0.5,
+          canRetry: true
+        }
+      },
+      {
+        name: 'unknown transfer status',
+        session: { ...baseTransfer, status: 'mystery-status' } as unknown as TransferSession,
+        expected: {
+          label: 'mystery-status',
+          detail: '25% · 0.0 MB / 0.0 MB',
+          progress: 0.25,
+          canRetry: false
+        }
+      }
+    ];
 
-    expect(
-      getTransferDisplay({
-        transferId: 'tx2',
-        role: 'receiver',
-        status: 'paused-source-offline',
-        transferred: 64,
-        size: 128,
-        offset: 64,
-        token: 'ticket'
-      })
-    ).toMatchObject({
-      label: 'Paused',
-      detail: 'The sender left. Retry after they reconnect.',
-      canRetry: true
-    });
-
-    expect(
-      getTransferDisplay({
-        transferId: 'tx3',
-        role: 'receiver',
-        status: 'failed',
-        transferred: 64,
-        size: 128,
-        offset: 64,
-        token: 'ticket',
-        errorMessage: 'Bad transfer frame magic'
-      })
-    ).toMatchObject({
-      label: 'Failed',
-      detail: 'Bad transfer frame magic',
-      progress: 0.5,
-      canRetry: true
-    });
+    for (const { session, expected } of cases) {
+      expect(getTransferDisplay(session)).toMatchObject(expected);
+    }
   });
 
   it('announces already selected media when a socket connects', () => {

@@ -105,28 +105,28 @@ export function getTransferDisplay(session: TransferSession): TransferDisplay {
         label: 'Paused',
         detail: `Stopped at ${progressLabel}.`,
         progress,
-        canRetry: Boolean(session.token)
+        canRetry: true
       };
     case 'paused-source-offline':
       return {
         label: 'Paused',
         detail: 'The sender left. Retry after they reconnect.',
         progress,
-        canRetry: Boolean(session.token)
+        canRetry: true
       };
     case 'paused-source-changed-media':
       return {
         label: 'Paused',
         detail: 'The sender changed files. Retry after they switch back.',
         progress,
-        canRetry: Boolean(session.token)
+        canRetry: true
       };
     case 'paused-receiver-offline':
       return {
         label: 'Paused',
         detail: 'The receiver left. Retry after they reconnect.',
         progress,
-        canRetry: Boolean(session.token)
+        canRetry: true
       };
     case 'complete':
       return {

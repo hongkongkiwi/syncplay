@@ -173,6 +173,7 @@ export function syncplayReducer(state: SyncplayState, action: SyncplayAction): S
           [action.transferId]: {
             ...previous,
             status: 'failed',
+            errorCode: null,
             errorMessage: action.error ?? previous.errorMessage ?? 'Transfer failed.'
           }
         }

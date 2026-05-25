@@ -468,7 +468,7 @@ export default function App() {
           undefined,
           error => {
             openedTransferSocketsRef.current.delete(transfer.transferId);
-            dispatch({ type: 'transfer-failed', transferId: transfer.transferId, error: error.message });
+            dispatch({ type: 'transfer-failed', transferId: transfer.transferId, error: getTransferFailureMessage(error) });
           }
         );
       } else if (transfer.role === 'sender') {
@@ -490,7 +490,7 @@ export default function App() {
           undefined,
           error => {
             openedTransferSocketsRef.current.delete(transfer.transferId);
-            dispatch({ type: 'transfer-failed', transferId: transfer.transferId, error: error.message });
+            dispatch({ type: 'transfer-failed', transferId: transfer.transferId, error: getTransferFailureMessage(error) });
           }
         );
       }
@@ -1552,6 +1552,10 @@ function SummaryItem({ label, value }: { label: string; value: string }) {
       </Text>
     </View>
   );
+}
+
+function getTransferFailureMessage(error: Error): string {
+  return error.message.trim() || String(error).trim() || 'Transfer failed. Retry if both devices are still online.';
 }
 
 function BottomTabs({

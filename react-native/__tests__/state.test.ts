@@ -341,7 +341,7 @@ describe('Syncplay app state', () => {
 
     expect(serverPaused.transfers.tx1?.status).toBe('paused-local');
 
-    const locallyFailed = syncplayReducer(ticketed, {
+    const locallyFailed = syncplayReducer(paused, {
       type: 'transfer-failed',
       transferId: 'tx1',
       error: 'Socket closed before the download finished.'
@@ -349,6 +349,7 @@ describe('Syncplay app state', () => {
 
     expect(locallyFailed.transfers.tx1).toMatchObject({
       status: 'failed',
+      errorCode: null,
       errorMessage: 'Socket closed before the download finished.'
     });
 
