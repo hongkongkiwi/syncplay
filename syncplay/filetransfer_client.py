@@ -53,6 +53,12 @@ class FileTransferClient(object):
             self.handleTicket(payload["ticket"])
         elif "progress" in payload:
             self.handleProgress(payload["progress"])
+        elif "pause" in payload:
+            self.handlePause(payload["pause"])
+        elif "resume" in payload:
+            self.handleResume(payload["resume"])
+        elif "cancel" in payload:
+            self.handleCancel(payload["cancel"])
         elif "error" in payload:
             self.handleError(payload["error"])
 
@@ -145,6 +151,25 @@ class FileTransferClient(object):
             status = "paused-source-changed-media"
         session = self._sessions.get(payload["transferId"]) or TransferClientSession(transfer_id=payload["transferId"])
         self._sessions[payload["transferId"]] = session._replace(status=status)
+
+    def handlePause(self, payload):
+        transfer_id = payload["transferId"]
+        session = self._sessions.get(transfer_id) or TransferClientSession(transfer_id=transfer_id)
+        offset = payload.get("offset", session.bytes_transferred)
+        self._sessions[transfer_id] = session._replace(status="paused-local", bytes_transferred=offset)
+
+    def handleResume(self, payload):
+        transfer_id = payload["transferId"]
+        session = self._sessions.get(transfer_id) or TransferClientSession(transfer_id=transfer_id)
+        self._sessions[transfer_id] = session._replace(
+            status="approved",
+            bytes_transferred=payload.get("offset", session.bytes_transferred),
+        )
+
+    def handleCancel(self, payload):
+        transfer_id = payload["transferId"]
+        session = self._sessions.get(transfer_id) or TransferClientSession(transfer_id=transfer_id)
+        self._sessions[transfer_id] = session._replace(status="cancelled")
 
     def _role_reason(self, transferId):
         session = self._sessions.get(transferId)

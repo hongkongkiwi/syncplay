@@ -118,9 +118,15 @@ class TransferSocketRelay(object):
         if target:
             self._write_or_throttle(transfer_id, role, target, frame)
 
-    def pause(self, transfer_id):
+    def pause(self, transfer_id, close=False):
         pair = self._pairs.get(transfer_id)
         if pair:
+            if close:
+                for transport in (pair.sender, pair.receiver):
+                    if transport and hasattr(transport, "loseConnection"):
+                        transport.loseConnection()
+                self._cleanup(transfer_id)
+                return
             self._pairs[transfer_id] = pair._replace(paused=True)
 
     def resume(self, transfer_id):

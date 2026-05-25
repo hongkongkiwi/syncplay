@@ -195,6 +195,22 @@ def test_pause_stops_relay_without_losing_session():
     assert relay.get_pair("tx1") is not None
 
 
+def test_pause_can_close_transfer_sockets_and_remove_session():
+    relay = TransferSocketRelay()
+    sender = Sink()
+    receiver = Sink()
+    relay.register_token("sender-token", "tx1", "sender")
+    relay.register_token("receiver-token", "tx1", "receiver")
+    relay.connect("sender-token", sender)
+    relay.connect("receiver-token", receiver)
+
+    relay.pause("tx1", close=True)
+
+    assert sender.closed is True
+    assert receiver.closed is True
+    assert relay.get_pair("tx1") is None
+
+
 def test_socket_close_pauses_session():
     relay = TransferSocketRelay()
     sender = Sink()

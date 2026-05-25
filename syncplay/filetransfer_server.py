@@ -128,14 +128,29 @@ class TransferManager(object):
         if not session:
             self._send_error(watcher, transfer_id, "not-found", "Transfer was not found.")
             return None
-        return self._pause(session, TransferStatus.PAUSED_LOCAL, watcher, "paused", reason or "Transfer paused.")
+        if not self._is_participant(watcher, session):
+            self._send_error(watcher, transfer_id, "not-participant", "Only transfer participants can pause this transfer.")
+            return None
+        session = session._replace(status=TransferStatus.PAUSED_LOCAL)
+        self._sessions[transfer_id] = session
+        for participant in self._participants(session):
+            if hasattr(participant, "sendTransferPause"):
+                participant.sendTransferPause(transfer_id, reason or "Transfer paused.", session.offset)
+        return session
 
     def resume_transfer(self, watcher, transfer_id, offset, fingerprint):
         session = self._sessions.get(transfer_id)
         if not session:
             self._send_error(watcher, transfer_id, "not-found", "Transfer was not found.")
             return None
+        if not self._is_participant(watcher, session):
+            self._send_error(watcher, transfer_id, "not-participant", "Only transfer participants can resume this transfer.")
+            return None
         source = self._find_watcher(session.source)
+        receiver = self._find_watcher(session.receiver)
+        if not receiver:
+            self._pause(session, TransferStatus.PAUSED_RECEIVER_OFFLINE, source, "receiver-offline", "Receiver is offline.")
+            return session
         if not source or not source.getFile() or int(source.getFile().get("size", -1)) != session.size or fingerprint != session.fingerprint:
             self._send_error(watcher, transfer_id, "source-changed-media", "Source changed media.")
             session = session._replace(status=TransferStatus.PAUSED_SOURCE_CHANGED_MEDIA)
@@ -148,6 +163,12 @@ class TransferManager(object):
             return session
         session = session._replace(offset=int(offset), status=TransferStatus.APPROVED)
         self._sessions[transfer_id] = session
+        sender_ticket = self._ticket(session, "sender")
+        receiver_ticket = self._ticket(session, "receiver")
+        source.sendTransferResume(transfer_id, session.offset, session.fingerprint)
+        receiver.sendTransferResume(transfer_id, session.offset, session.fingerprint)
+        source.sendTransferTicket(sender_ticket)
+        receiver.sendTransferTicket(receiver_ticket)
         return session
 
     def cancel_transfer(self, watcher, transfer_id, reason):
@@ -241,6 +262,9 @@ class TransferManager(object):
 
     def _participants(self, session):
         return [watcher for watcher in (self._find_watcher(session.source), self._find_watcher(session.receiver)) if watcher]
+
+    def _is_participant(self, watcher, session):
+        return watcher and watcher.getName() in (session.source, session.receiver)
 
     def _active_count_for(self, username):
         return len([session for session in self._sessions.values() if session.source == username or session.receiver == username])

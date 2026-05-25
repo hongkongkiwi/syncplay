@@ -230,7 +230,7 @@ class SyncFactory(Factory):
             pause = payload["pause"]
             session = self.fileTransfers.pause_transfer(watcher, pause.get("transferId"), pause.get("reason"))
             if session:
-                self.transferRelay.pause(session.transfer_id)
+                self.transferRelay.pause(session.transfer_id, close=True)
         elif "resume" in payload:
             resume = payload["resume"]
             session = self.fileTransfers.resume_transfer(watcher, resume.get("transferId"), resume.get("offset", 0), resume.get("fingerprint"))
@@ -872,6 +872,15 @@ class Watcher(object):
 
     def sendTransferProgress(self, payload):
         self._connector.sendTransferProgress(payload)
+
+    def sendTransferPause(self, transferId, reason, offset=None):
+        self._connector.sendTransferPause(transferId, reason, offset)
+
+    def sendTransferResume(self, transferId, offset, fingerprint=None):
+        self._connector.sendTransferResume(transferId, offset, fingerprint)
+
+    def sendTransferCancel(self, transferId, reason):
+        self._connector.sendTransferCancel(transferId, reason)
 
     def sendTransferError(self, transferId, code, message):
         self._connector.sendTransferError(transferId, code, message)

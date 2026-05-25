@@ -23,6 +23,9 @@ class Watcher(object):
         self.tickets = []
         self.errors = []
         self.progress = []
+        self.pauses = []
+        self.resumes = []
+        self.cancels = []
 
     def getName(self):
         return self._name
@@ -47,6 +50,15 @@ class Watcher(object):
 
     def sendTransferProgress(self, payload):
         self.progress.append(payload)
+
+    def sendTransferPause(self, transferId, reason, offset=None):
+        self.pauses.append({"transferId": transferId, "reason": reason, "offset": offset})
+
+    def sendTransferResume(self, transferId, offset, fingerprint=None):
+        self.resumes.append({"transferId": transferId, "offset": offset, "fingerprint": fingerprint})
+
+    def sendTransferCancel(self, transferId, reason):
+        self.cancels.append({"transferId": transferId, "reason": reason})
 
 
 def media(name="movie.mkv", size=1024):
@@ -188,6 +200,43 @@ def test_cancel_rejects_non_participants():
     assert transfers.get_session(session.transfer_id) is session
 
 
+def test_pause_and_resume_reject_non_participants():
+    receiver = Watcher("receiver")
+    source = Watcher("source", file_=media())
+    stranger = Watcher("stranger")
+    transfers = manager(watchers=[receiver, source, stranger])
+    session = transfers.request_transfer(receiver, {"source": "source"})
+    transfers.accept_transfer(source, session.transfer_id, fingerprint="fp")
+
+    transfers.pause_transfer(stranger, session.transfer_id, "stranger")
+    transfers.resume_transfer(stranger, session.transfer_id, offset=0, fingerprint="fp")
+
+    assert [error["code"] for error in stranger.errors[-2:]] == ["not-participant", "not-participant"]
+    assert transfers.get_session(session.transfer_id).status == "approved"
+
+
+def test_pause_notifies_both_participants_and_resume_issues_new_tickets():
+    receiver = Watcher("receiver")
+    source = Watcher("source", file_=media())
+    transfers = manager(watchers=[receiver, source])
+    session = transfers.request_transfer(receiver, {"source": "source"})
+    transfers.accept_transfer(source, session.transfer_id, fingerprint="fp")
+    first_source_ticket = source.tickets[-1]["token"]
+    first_receiver_ticket = receiver.tickets[-1]["token"]
+
+    transfers.pause_transfer(receiver, session.transfer_id, "receiver paused")
+    transfers.resume_transfer(receiver, session.transfer_id, offset=10, fingerprint="fp")
+
+    assert receiver.pauses[-1] == {"transferId": session.transfer_id, "reason": "receiver paused", "offset": 0}
+    assert source.pauses[-1] == receiver.pauses[-1]
+    assert receiver.resumes[-1] == {"transferId": session.transfer_id, "offset": 10, "fingerprint": "fp"}
+    assert source.resumes[-1] == receiver.resumes[-1]
+    assert source.tickets[-1]["token"] != first_source_ticket
+    assert receiver.tickets[-1]["token"] != first_receiver_ticket
+    assert source.tickets[-1]["offset"] == 10
+    assert receiver.tickets[-1]["offset"] == 10
+
+
 @pytest.mark.parametrize(
     "handler, code",
     [
@@ -308,8 +357,8 @@ def test_factory_pause_and_resume_updates_transfer_relay():
             self.paused = []
             self.resumed = []
 
-        def pause(self, transfer_id):
-            self.paused.append(transfer_id)
+        def pause(self, transfer_id, close=False):
+            self.paused.append((transfer_id, close))
 
         def resume(self, transfer_id):
             self.resumed.append(transfer_id)
@@ -326,5 +375,5 @@ def test_factory_pause_and_resume_updates_transfer_relay():
     SyncFactory.handleTransfer(factory, receiver, {"pause": {"transferId": session.transfer_id, "reason": "receiver"}})
     SyncFactory.handleTransfer(factory, receiver, {"resume": {"transferId": session.transfer_id, "offset": 0, "fingerprint": "fp"}})
 
-    assert factory.transferRelay.paused == [session.transfer_id]
+    assert factory.transferRelay.paused == [(session.transfer_id, True)]
     assert factory.transferRelay.resumed == [session.transfer_id]

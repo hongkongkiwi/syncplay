@@ -718,6 +718,21 @@ class SyncServerProtocol(JSONCommandProtocol):
     def sendTransferProgress(self, payload):
         self.sendTransfer({"progress": payload})
 
+    def sendTransferPause(self, transferId, reason, offset=None):
+        pause = {"transferId": transferId, "reason": reason}
+        if offset is not None:
+            pause["offset"] = int(offset)
+        self.sendTransfer({"pause": pause})
+
+    def sendTransferResume(self, transferId, offset, fingerprint=None):
+        resume = {"transferId": transferId, "offset": int(offset)}
+        if fingerprint:
+            resume["fingerprint"] = fingerprint
+        self.sendTransfer({"resume": resume})
+
+    def sendTransferCancel(self, transferId, reason):
+        self.sendTransfer({"cancel": {"transferId": transferId, "reason": reason}})
+
     def sendTransferError(self, transferId, code, message):
         self.sendTransfer({
             "error": {
