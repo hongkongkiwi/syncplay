@@ -42,6 +42,7 @@ from syncplay import utils, constants, version
 from syncplay.constants import PRIVACY_SENDHASHED_MODE, PRIVACY_DONTSEND_MODE, \
     PRIVACY_HIDDENFILENAME
 from syncplay.messages import getMissingStrings, getMessage, isNoOSDMessage
+from syncplay.filetransfer_client import FileTransferClient
 from syncplay.protocols import SyncClientProtocol
 from syncplay.utils import isMacOS
 class SyncClientFactory(ClientFactory):
@@ -141,6 +142,7 @@ class SyncplayClient(object):
         self._warnings = self._WarningManager(self._player, self.userlist, self.ui, self)
         self.fileSwitch = FileSwitchManager(self)
         self.playlist = SyncplayPlaylist(self)
+        self.fileTransfer = FileTransferClient(self)
         self.playlistMayNeedRestoring = False
 
         self._serverSupportsTLS = True
@@ -161,6 +163,9 @@ class SyncplayClient(object):
         if self._protocol:
             self._protocol.drop()
         self._protocol = None
+
+    def handleTransfer(self, payload):
+        self.fileTransfer.handleTransfer(payload)
 
     def initPlayer(self, player):
         self._player = player
@@ -744,6 +749,8 @@ class SyncplayClient(object):
         features["managedRooms"] = True
         features["persistentRooms"] = True
         features["setOthersReadiness"] = True
+        features["fileTransfer"] = True
+        features["fileTransferVersion"] = 1
 
         return features
 
