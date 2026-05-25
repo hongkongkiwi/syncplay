@@ -205,6 +205,46 @@ describe('Syncplay app state', () => {
     expect(state.rooms.lobby?.[0]?.isReady).toBe(true);
   });
 
+  it('preserves user flags when Set.user sends a partial update', () => {
+    const listed = syncplayReducer(createInitialSyncplayState(), {
+      type: 'server-message',
+      message: {
+        List: {
+          lobby: {
+            Aki: {
+              file: { name: 'movie.mkv', duration: 100, size: 123 },
+              isReady: true,
+              controller: true,
+              features: { chat: true }
+            }
+          }
+        }
+      }
+    });
+
+    const updated = syncplayReducer(listed, {
+      type: 'server-message',
+      message: {
+        Set: {
+          user: {
+            Aki: {
+              room: { name: 'lobby' },
+              file: { name: 'movie-2.mkv', duration: 200, size: 456 }
+            }
+          }
+        }
+      }
+    });
+
+    expect(updated.rooms.lobby?.[0]).toMatchObject({
+      username: 'Aki',
+      file: { name: 'movie-2.mkv', duration: 200, size: 456 },
+      isReady: true,
+      isController: true,
+      features: { chat: true }
+    });
+  });
+
   it('keeps only the latest 120 messages', () => {
     const state = Array.from({ length: 125 }).reduce<SyncplayState>(
       current =>

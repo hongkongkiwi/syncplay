@@ -1,6 +1,7 @@
 import type { DocumentPickerAsset } from 'expo-document-picker';
 
 import type { IncomingMediaLibraryItem } from '../syncplay/mediaLibrary';
+import type { SyncplayFile } from '../syncplay/protocol';
 
 export function isStreamUri(value: string): boolean {
   return /^[a-z][a-z\d+.-]*:\/\//i.test(value);
@@ -38,6 +39,14 @@ export function statusLabel(status: string): string {
     default:
       return 'Idle';
   }
+}
+
+export function shouldAnnounceMediaOnConnection(
+  wasConnected: boolean,
+  isConnected: boolean,
+  media: SyncplayFile | null
+): media is SyncplayFile {
+  return !wasConnected && isConnected && media !== null;
 }
 
 export function formatTime(seconds: number): string {

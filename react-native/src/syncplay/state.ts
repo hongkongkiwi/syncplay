@@ -331,6 +331,7 @@ function applyUserUpdates(
   const next = cloneRooms(rooms);
 
   for (const [username, payload] of Object.entries(updates)) {
+    const previous = findUser(next, username);
     for (const users of Object.values(next)) {
       const index = users.findIndex(user => user.username === username);
       if (index >= 0) {
@@ -342,13 +343,24 @@ function applyUserUpdates(
       continue;
     }
 
-    const room = payload.room?.name ?? 'default';
+    const room = payload.room?.name ?? previous?.room ?? 'default';
     const users = next[room] ?? [];
-    users.push(normalizeUser(username, room, payload));
+    users.push(normalizeUser(username, room, payload, previous));
     next[room] = users.sort(compareUsers);
   }
 
   return next;
+}
+
+function findUser(rooms: Record<string, RoomUser[]>, username: string): RoomUser | null {
+  for (const users of Object.values(rooms)) {
+    const user = users.find(candidate => candidate.username === username);
+    if (user) {
+      return user;
+    }
+  }
+
+  return null;
 }
 
 function setUserReady(
@@ -385,16 +397,26 @@ function setUserController(
   return next;
 }
 
-function normalizeUser(username: string, room: string, payload: ServerUserPayload): RoomUser {
-  const file = isSyncplayFile(payload.file) ? payload.file : null;
+function normalizeUser(
+  username: string,
+  room: string,
+  payload: ServerUserPayload,
+  previous?: RoomUser | null
+): RoomUser {
+  const hasFile = Object.prototype.hasOwnProperty.call(payload, 'file');
+  const file = hasFile
+    ? isSyncplayFile(payload.file)
+      ? payload.file
+      : null
+    : previous?.file ?? null;
 
   return {
     username,
     room,
     file,
-    isReady: payload.isReady ?? null,
-    isController: payload.controller ?? false,
-    features: payload.features ?? null
+    isReady: payload.isReady ?? previous?.isReady ?? null,
+    isController: payload.controller ?? previous?.isController ?? false,
+    features: payload.features ?? previous?.features ?? null
   };
 }
 

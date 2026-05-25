@@ -64,6 +64,7 @@ import {
   formatBytes,
   formatTime,
   isManagedRoomName,
+  shouldAnnounceMediaOnConnection,
   shuffleFiles,
   statusLabel,
   stripManagedRoomName
@@ -146,6 +147,7 @@ export default function App() {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAppliedPlaylistKeyRef = useRef<string | null>(null);
   const lastAutoFileSwitchRef = useRef<string | null>(null);
+  const wasConnectedRef = useRef(false);
 
   const player = useVideoPlayer(mediaUri, instance => {
     instance.timeUpdateEventInterval = 0.5;
@@ -372,6 +374,13 @@ export default function App() {
   const visibleRoomNames = filterVisibleRooms(state.rooms, hideEmptyRooms);
   const roomOptions = buildRoomOptions(savedRooms, visibleRoomNames);
   const mediaDirectoryLabels = buildDirectoryLabels(mediaLibrary);
+
+  useEffect(() => {
+    if (shouldAnnounceMediaOnConnection(wasConnectedRef.current, connected, state.media)) {
+      connection.sendFile(state.media);
+    }
+    wasConnectedRef.current = connected;
+  }, [connected, connection, state.media]);
 
   useEffect(() => {
     const index = state.playlist.index;
