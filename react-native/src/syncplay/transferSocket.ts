@@ -24,7 +24,7 @@ export type TransferFileSink = {
 };
 
 export type TransferFileSource = {
-  readAll(): Uint8Array | Promise<Uint8Array>;
+  read(offset: number, length: number): Uint8Array | Promise<Uint8Array>;
 };
 
 const HEADER_LENGTH = 24;
@@ -54,6 +54,10 @@ export function decodeTransferFrame(bufferLike: Uint8Array): { frame: TransferFr
   }
   if (buffer.toString('ascii', 0, 4) !== MAGIC) {
     throw new Error('Bad transfer frame magic');
+  }
+  const version = buffer.readUInt16BE(4);
+  if (version !== 1) {
+    throw new Error(`Unsupported transfer frame version: ${version}`);
   }
   const payloadLength = buffer.readUInt32BE(16);
   const expectedCrc = headerCrc(buffer.subarray(0, HEADER_LENGTH - 4));
@@ -91,6 +95,10 @@ export class TransferSocket {
   handleData(chunk: Uint8Array): void {
     this.buffer = Buffer.from(concat(this.buffer, chunk));
     while (this.buffer.length >= HEADER_LENGTH) {
+      const payloadLength = this.buffer.readUInt32BE(16);
+      if (this.buffer.length < HEADER_LENGTH + payloadLength) {
+        break;
+      }
       const decoded = decodeTransferFrame(this.buffer);
       if (decoded.frame.frameType === 1) {
         this.sink.write(decoded.frame.payload);
@@ -115,16 +123,18 @@ export class TransferSocket {
   }
 
   async upload(transferId: string, source: TransferFileSource, offset = 0, chunkSize = 262144): Promise<number> {
-    const bytes = await source.readAll();
     let position = Math.max(0, offset);
-    while (position < bytes.length) {
-      const end = Math.min(position + chunkSize, bytes.length);
+    while (true) {
+      const chunk = await source.read(position, chunkSize);
+      if (!chunk.length) {
+        break;
+      }
       this.socket.write(encodeTransferFrame({
         frameType: 1,
         offset: position,
-        payload: bytes.slice(position, end)
+        payload: chunk
       }));
-      position = end;
+      position += chunk.length;
     }
     this.socket.write(encodeTransferFrame({ frameType: 3, offset: position, payload: new Uint8Array() }));
     return position;

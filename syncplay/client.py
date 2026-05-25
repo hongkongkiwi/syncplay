@@ -142,7 +142,7 @@ class SyncplayClient(object):
         self._warnings = self._WarningManager(self._player, self.userlist, self.ui, self)
         self.fileSwitch = FileSwitchManager(self)
         self.playlist = SyncplayPlaylist(self)
-        self.fileTransfer = FileTransferClient(self)
+        self.fileTransfer = FileTransferClient(self, threaded_upload=True)
         self.playlistMayNeedRestoring = False
 
         self._serverSupportsTLS = True
@@ -759,8 +759,9 @@ class SyncplayClient(object):
         features["managedRooms"] = True
         features["persistentRooms"] = True
         features["setOthersReadiness"] = True
-        features["fileTransfer"] = True
-        features["fileTransferVersion"] = 1
+        features["fileTransfer"] = self.ui.canHandleFileTransfers()
+        if features["fileTransfer"]:
+            features["fileTransferVersion"] = 1
 
         return features
 
@@ -1736,6 +1737,9 @@ class UiManager(object):
         if chooser:
             return chooser(session)
         return None
+
+    def canHandleFileTransfers(self):
+        return callable(getattr(self.__ui, "promptFileTransferOffer", None)) and callable(getattr(self.__ui, "chooseFileTransferDestination", None))
 
     def showDebugMessage(self, message):
         if constants.DEBUG_MODE and message.rstrip():

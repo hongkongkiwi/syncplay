@@ -1,4 +1,4 @@
-import { Directory, File, Paths } from 'expo-file-system';
+import { Directory, File, FileMode, Paths } from 'expo-file-system';
 
 import type { TransferFileSink, TransferFileSource } from '../syncplay/transferSocket';
 
@@ -36,8 +36,14 @@ export function createExpoTransferSink(filename: string, directory: Directory = 
 export function createExpoTransferSource(uri: string): TransferFileSource {
   const file = new File(uri);
   return {
-    readAll() {
-      return file.bytes();
+    read(offset: number, length: number) {
+      const handle = file.open(FileMode.ReadOnly);
+      try {
+        handle.offset = offset;
+        return handle.readBytes(length);
+      } finally {
+        handle.close();
+      }
     }
   };
 }

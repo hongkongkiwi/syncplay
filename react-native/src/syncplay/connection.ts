@@ -189,7 +189,8 @@ export class SyncplayConnection {
     sink: TransferFileSink,
     onComplete?: (path: string) => void,
     source?: TransferFileSource,
-    chunkSize?: number
+    chunkSize?: number,
+    onError?: (error: Error) => void
   ): TransferSocket {
     let transfer: TransferSocket;
     const socket = this.createSocket(
@@ -205,8 +206,15 @@ export class SyncplayConnection {
           role: ticket.role,
           offset: ticket.offset ?? 0
         });
-        if (ticket.role === 'sender' && source) {
-          void transfer.upload(ticket.transferId, source, ticket.offset ?? 0, chunkSize);
+        if (ticket.role === 'sender') {
+          if (!source) {
+            onError?.(new Error(`Missing transfer source for ${ticket.transferId}`));
+            socket.destroy();
+            return;
+          }
+          void transfer
+            .upload(ticket.transferId, source, ticket.offset ?? 0, chunkSize)
+            .catch(error => onError?.(error instanceof Error ? error : new Error(String(error))));
         }
       }
     );
@@ -221,7 +229,10 @@ export class SyncplayConnection {
       }
     });
     socket.on('data', data => transfer.handleData(typeof data === 'string' ? new Uint8Array(Buffer.from(data)) : data));
-    socket.on('error', () => socket.destroy());
+    socket.on('error', error => {
+      onError?.(error);
+      socket.destroy();
+    });
     socket.on('close', () => socket.removeAllListeners?.());
     return transfer;
   }

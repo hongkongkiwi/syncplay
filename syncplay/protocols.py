@@ -627,14 +627,17 @@ class SyncServerProtocol(JSONCommandProtocol):
         self._watcher = watcher
 
     def handleTransferConnect(self, payload):
-        self._transferId = payload.get("transferId")
-        self._transferRole = payload.get("role")
+        if self._logged:
+            self.transport.loseConnection()
+            return
         try:
             self._factory.transferRelay.connect(payload.get("token"), self.transport)
-        except Exception as error:
+        except TransferFrameError as error:
             print("Transfer socket rejected: {}".format(error))
             self.transport.loseConnection()
             return
+        self._transferId = payload.get("transferId")
+        self._transferRole = payload.get("role")
         self.setRawMode()
 
     def rawDataReceived(self, data):

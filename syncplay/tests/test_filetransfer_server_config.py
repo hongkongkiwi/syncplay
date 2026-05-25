@@ -26,3 +26,4 @@ def test_file_transfer_feature_advertises_limits_when_enabled():
     assert features["fileTransferVersion"] == 1
     assert features["fileTransferMaxSize"] == 1234
     assert features["fileTransferChunkSize"] == constants.FILE_TRANSFER_CHUNK_SIZE
+    assert "fileTransferRateLimit" not in features

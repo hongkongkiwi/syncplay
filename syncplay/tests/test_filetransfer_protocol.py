@@ -1,5 +1,6 @@
 # coding:utf8
 
+from syncplay.filetransfer_wire import TransferFrameError
 from syncplay.protocols import JSONCommandProtocol, SyncClientProtocol, SyncServerProtocol
 
 
@@ -142,7 +143,7 @@ def test_server_protocol_accepts_transfer_connect_without_login():
 def test_bad_transfer_connect_token_closes_socket_without_crashing():
     class Relay(object):
         def connect(self, token, transport):
-            raise ValueError("bad token")
+            raise TransferFrameError("bad token")
 
     class Transport(object):
         def __init__(self):

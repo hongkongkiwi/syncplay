@@ -47,6 +47,7 @@ TransferSession = namedtuple(
         "receiver",
         "room",
         "filename",
+        "duration",
         "size",
         "chunk_size",
         "offset",

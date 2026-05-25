@@ -201,7 +201,7 @@ describe('Syncplay app state', () => {
             transferId: 'tx1',
             role: 'receiver',
             token: 'secret',
-            file: { name: 'movie.mkv', size: 123 },
+            file: { name: 'movie.mkv', duration: 100, size: 123 },
             offset: 0
           }
         }
@@ -213,6 +213,20 @@ describe('Syncplay app state', () => {
       role: 'receiver',
       file: { name: 'movie.mkv', size: 123 }
     });
+
+    const ignoredBadTicket = syncplayReducer(ticketed, {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          ticket: {
+            role: 'receiver',
+            token: 'bad'
+          }
+        }
+      }
+    });
+
+    expect(ignoredBadTicket.transfers.undefined).toBeUndefined();
 
     const progressed = syncplayReducer(ticketed, {
       type: 'server-message',
@@ -278,6 +292,35 @@ describe('Syncplay app state', () => {
     });
 
     expect(paused.transfers.tx1?.status).toBe('paused-source-changed-media');
+
+    const receiverOffline = syncplayReducer(completed, {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          error: {
+            transferId: 'tx1',
+            code: 'receiver-offline',
+            message: 'Receiver is offline.'
+          }
+        }
+      }
+    });
+
+    expect(receiverOffline.transfers.tx1?.status).toBe('paused-receiver-offline');
+
+    const serverPaused = syncplayReducer(progressed, {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          pause: {
+            transferId: 'tx1',
+            reason: 'paused'
+          }
+        }
+      }
+    });
+
+    expect(serverPaused.transfers.tx1?.status).toBe('paused-local');
   });
 
   it('updates room and readiness from Set messages', () => {

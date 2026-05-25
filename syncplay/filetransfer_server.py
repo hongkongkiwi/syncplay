@@ -42,13 +42,20 @@ class TransferManager(object):
         return self._sessions.get(transfer_id)
 
     def request_transfer(self, receiver, payload):
+        self.cleanup_expired_sessions()
         if not self.config.enabled:
             self._send_error(receiver, None, "file-transfer-disabled", "File transfers are disabled on this server.")
+            return None
+        if len(self._sessions) >= self.config.max_active:
+            self._send_error(receiver, None, "too-many-active-transfers", "Too many file transfers are active.")
             return None
 
         source = self._find_watcher(payload.get("source"))
         if not source:
             self._send_error(receiver, None, "source-not-found", "Source user is not available.")
+            return None
+        if self._active_count_for(source.getName()) >= self.config.max_per_user or self._active_count_for(receiver.getName()) >= self.config.max_per_user:
+            self._send_error(receiver, None, "too-many-user-transfers", "Too many file transfers are active for this user.")
             return None
         if self._room_name(source) != self._room_name(receiver):
             self._send_error(receiver, None, "not-same-room", "Source and receiver must be in the same room.")
@@ -77,6 +84,7 @@ class TransferManager(object):
             receiver=receiver.getName(),
             room=self._room_name(receiver),
             filename=normalize_transfer_filename(file_["name"]),
+            duration=file_.get("duration"),
             size=size,
             chunk_size=self.config.chunk_size,
             offset=offset,
@@ -104,7 +112,7 @@ class TransferManager(object):
 
         receiver = self._find_watcher(session.receiver)
         if not receiver:
-            self._pause(session, "paused-receiver-offline", source, "receiver-offline", "Receiver is offline.")
+            self._pause(session, TransferStatus.PAUSED_RECEIVER_OFFLINE, source, "receiver-offline", "Receiver is offline.")
             return None
 
         session = session._replace(fingerprint=fingerprint, status=TransferStatus.APPROVED)
@@ -123,7 +131,7 @@ class TransferManager(object):
         if not session:
             self._send_error(watcher, transfer_id, "not-found", "Transfer was not found.")
             return None
-        return self._pause(session, "paused-local", watcher, "paused", reason or "Transfer paused.")
+        return self._pause(session, TransferStatus.PAUSED_LOCAL, watcher, "paused", reason or "Transfer paused.")
 
     def resume_transfer(self, watcher, transfer_id, offset, fingerprint):
         session = self._sessions.get(transfer_id)
@@ -194,8 +202,13 @@ class TransferManager(object):
     def cleanup_expired_sessions(self, now=None):
         now = self._now() if now is None else now
         expired = [token for token, details in self._tokens.items() if details["expires"] <= now]
+        expired_transfer_ids = set()
         for token in expired:
+            expired_transfer_ids.add(self._tokens[token]["transferId"])
             del self._tokens[token]
+        for transfer_id in expired_transfer_ids:
+            if not any(details["transferId"] == transfer_id for details in self._tokens.values()):
+                self._sessions.pop(transfer_id, None)
 
     def _ticket(self, session, role):
         token = self._token_factory()
@@ -214,7 +227,7 @@ class TransferManager(object):
             "token": token,
             "offset": session.offset,
             "chunkSize": session.chunk_size,
-            "file": {"name": session.filename, "size": session.size},
+            "file": {"name": session.filename, "duration": session.duration or 0, "size": session.size},
             "fingerprint": session.fingerprint,
         }
 
@@ -227,6 +240,9 @@ class TransferManager(object):
 
     def _participants(self, session):
         return [watcher for watcher in (self._find_watcher(session.source), self._find_watcher(session.receiver)) if watcher]
+
+    def _active_count_for(self, username):
+        return len([session for session in self._sessions.values() if session.source == username or session.receiver == username])
 
     def _find_watcher(self, username):
         watchers = self._watchers() if callable(self._watchers) else self._watchers

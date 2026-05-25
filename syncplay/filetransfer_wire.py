@@ -101,7 +101,12 @@ class TransferSocketRelay(object):
         pair = self._pairs.get(transfer_id)
         if not pair or pair.paused:
             return
-        target = pair.receiver if role == "sender" else pair.sender
+        if role == "sender":
+            target = pair.receiver
+        elif role == "receiver":
+            target = pair.sender
+        else:
+            raise TransferFrameError("invalid transfer role")
         if target:
             target.write(encode_frame(frame))
         if role == "sender" and frame.frame_type == FRAME_DATA:

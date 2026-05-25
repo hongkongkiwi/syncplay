@@ -2,6 +2,7 @@
 
 import os
 
+import syncplay.filetransfer_client as filetransfer_client
 from syncplay.filetransfer_client import FileTransferClient, fingerprint_file
 from syncplay.filetransfer_wire import FRAME_COMPLETE, FRAME_DATA, TransferFrame, decode_frame, encode_frame
 
@@ -120,6 +121,35 @@ def test_accept_offer_sends_fingerprint_for_current_file(tmp_path):
     assert client._protocol.calls[-1][4].startswith("sha256-first-last-size-v1:")
 
 
+def test_sender_streams_approved_file_even_if_current_file_changes(tmp_path):
+    approved = tmp_path / "approved.mkv"
+    other = tmp_path / "other.mkv"
+    approved.write_bytes(b"approved")
+    other.write_bytes(b"other")
+    client = Client({"name": "movie.mkv", "size": 8, "path": str(approved)})
+    transfers = FileTransferClient(client)
+    transfers.handleOffer({"transferId": "tx1", "file": {"name": "movie.mkv", "size": 8}})
+    transfers.acceptOffer("tx1")
+    client.userlist.currentUser.file = {"name": "movie.mkv", "size": 5, "path": str(other)}
+    transport = Transport()
+
+    transfers.streamUpload("tx1", transport, chunkSize=20)
+
+    frames = _decode_all(transport.writes)
+    assert frames[0] == TransferFrame(frame_type=FRAME_DATA, offset=0, payload=b"approved")
+
+
+def test_fingerprint_covers_bytes_between_one_and_two_megabytes(tmp_path):
+    first = tmp_path / "first.mkv"
+    second = tmp_path / "second.mkv"
+    data = bytearray(b"a" * (1024 * 1024 + 10))
+    first.write_bytes(data)
+    data[-1] = ord("b")
+    second.write_bytes(data)
+
+    assert fingerprint_file(str(first), "movie.mkv", len(data)) != fingerprint_file(str(second), "movie.mkv", len(data))
+
+
 def test_download_writes_part_file_and_resume_uses_partial_size(tmp_path):
     client = Client()
     transfers = FileTransferClient(client)
@@ -176,6 +206,38 @@ def test_transfer_socket_handler_sends_handshake_and_uploads_for_sender(tmp_path
     assert transport.writes[0] == b'{"TransferConnect":{"transferId":"tx1","token":"secret","role":"sender","offset":2}}\r\n'
     frames = _decode_all(transport.writes[1:])
     assert frames[0] == TransferFrame(frame_type=FRAME_DATA, offset=2, payload=b"cd")
+
+
+def test_transfer_socket_handler_can_upload_sender_from_thread(tmp_path, monkeypatch):
+    class ImmediateReactor(object):
+        def __init__(self):
+            self.thread_calls = []
+            self.scheduled = []
+
+        def callInThread(self, fn, *args):
+            self.thread_calls.append((fn, args))
+            fn(*args)
+
+        def callFromThread(self, fn, *args):
+            self.scheduled.append((fn, args))
+            fn(*args)
+
+    path = tmp_path / "movie.mkv"
+    path.write_bytes(b"abcdef")
+    reactor = ImmediateReactor()
+    monkeypatch.setattr(filetransfer_client, "reactor", reactor)
+    client = Client({"name": "movie.mkv", "size": 6, "path": str(path)})
+    transfers = FileTransferClient(client, threaded_upload=True)
+    transfers.handleOffer({"transferId": "tx1", "file": {"name": "movie.mkv", "size": 6}})
+    transfers.acceptOffer("tx1")
+    transfers.handleTicket({"transferId": "tx1", "role": "sender", "token": "secret", "chunkSize": 3})
+    transport = Transport()
+
+    client.transfer_socket_requests[0][1].connectionMade(transport)
+
+    assert reactor.thread_calls
+    assert reactor.scheduled
+    assert _decode_all(transport.writes[1:])[-1] == TransferFrame(frame_type=FRAME_COMPLETE, offset=6, payload=b"")
 
 
 def test_transfer_socket_handler_writes_receiver_frames(tmp_path):

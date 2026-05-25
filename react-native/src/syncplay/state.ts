@@ -1,5 +1,7 @@
 import {
   createIncomingTransfer,
+  isTransferStatus,
+  parseTransferId,
   statusFromTransferError,
   type TransferSession
 } from './fileTransfer';
@@ -65,6 +67,7 @@ export type SyncplayAction =
   | { type: 'media-updated'; media: SyncplayFile | null }
   | { type: 'local-playback-updated'; position: number; paused: boolean }
   | { type: 'transfer-completed'; transferId: string; completedPath: string }
+  | { type: 'transfer-failed'; transferId: string }
   | { type: 'server-message'; message: SyncplayServerMessage };
 
 let nextMessageId = 0;
@@ -153,6 +156,22 @@ export function syncplayReducer(state: SyncplayState, action: SyncplayAction): S
             ...previous,
             status: 'complete',
             completedPath: action.completedPath
+          }
+        }
+      };
+    }
+    case 'transfer-failed': {
+      const previous = state.transfers[action.transferId];
+      if (!previous) {
+        return state;
+      }
+      return {
+        ...state,
+        transfers: {
+          ...state.transfers,
+          [action.transferId]: {
+            ...previous,
+            status: 'failed'
           }
         }
       };
@@ -249,6 +268,9 @@ function reduceServerMessage(state: SyncplayState, message: SyncplayServerMessag
 function reduceTransferMessage(state: SyncplayState, payload: NonNullable<SyncplayServerMessage['Transfer']>): SyncplayState {
   if (payload.offer) {
     const session = createIncomingTransfer(payload.offer);
+    if (!session) {
+      return state;
+    }
     return {
       ...state,
       transfers: {
@@ -259,7 +281,10 @@ function reduceTransferMessage(state: SyncplayState, payload: NonNullable<Syncpl
   }
 
   if (payload.ticket) {
-    const transferId = String(payload.ticket.transferId);
+    const transferId = parseTransferId(payload.ticket.transferId);
+    if (!transferId) {
+      return state;
+    }
     const previous = state.transfers[transferId];
     return {
       ...state,
@@ -286,21 +311,25 @@ function reduceTransferMessage(state: SyncplayState, payload: NonNullable<Syncpl
   }
 
   if (payload.progress) {
-    const previous = state.transfers[payload.progress.transferId];
+    const transferId = parseTransferId(payload.progress.transferId);
+    if (!transferId || !isTransferStatus(payload.progress.status)) {
+      return state;
+    }
+    const previous = state.transfers[transferId];
     return {
       ...state,
       transfers: {
         ...state.transfers,
-        [payload.progress.transferId]: {
+        [transferId]: {
           ...(previous ?? {
-            transferId: payload.progress.transferId,
+            transferId,
             role: null,
             file: null,
             source: null,
             receiver: null,
             offset: 0
           }),
-          status: payload.progress.status as TransferSession['status'],
+          status: payload.progress.status,
           transferred: payload.progress.transferred,
           size: payload.progress.size,
           completedPath: payload.progress.status === 'complete'
@@ -312,14 +341,18 @@ function reduceTransferMessage(state: SyncplayState, payload: NonNullable<Syncpl
   }
 
   if (payload.error) {
-    const previous = state.transfers[payload.error.transferId];
+    const transferId = parseTransferId(payload.error.transferId);
+    if (!transferId) {
+      return state;
+    }
+    const previous = state.transfers[transferId];
     return {
       ...state,
       transfers: {
         ...state.transfers,
-        [payload.error.transferId]: {
+        [transferId]: {
           ...(previous ?? {
-            transferId: payload.error.transferId,
+            transferId,
             role: null,
             file: null,
             source: null,
@@ -334,6 +367,18 @@ function reduceTransferMessage(state: SyncplayState, payload: NonNullable<Syncpl
     };
   }
 
+  if (payload.pause) {
+    return reduceTransferControl(state, payload.pause.transferId, 'paused-local', payload.pause.offset);
+  }
+
+  if (payload.resume) {
+    return reduceTransferControl(state, payload.resume.transferId, 'downloading', payload.resume.offset);
+  }
+
+  if (payload.cancel) {
+    return reduceTransferControl(state, payload.cancel.transferId, 'cancelled');
+  }
+
   return state;
 }
 
@@ -341,8 +386,42 @@ function isTicketFile(file: unknown): file is SyncplayFile {
   return (
     !!file &&
     typeof (file as SyncplayFile).name === 'string' &&
+    typeof (file as SyncplayFile).duration === 'number' &&
     typeof (file as SyncplayFile).size === 'number'
   );
+}
+
+function reduceTransferControl(
+  state: SyncplayState,
+  transferIdValue: unknown,
+  status: TransferSession['status'],
+  offset?: number
+): SyncplayState {
+  const transferId = parseTransferId(transferIdValue);
+  if (!transferId) {
+    return state;
+  }
+  const previous = state.transfers[transferId];
+  return {
+    ...state,
+    transfers: {
+      ...state.transfers,
+      [transferId]: {
+        ...(previous ?? {
+          transferId,
+          role: null,
+          file: null,
+          source: null,
+          receiver: null,
+          transferred: 0,
+          size: null,
+          offset: 0
+        }),
+        status,
+        offset: typeof offset === 'number' ? offset : previous?.offset ?? 0
+      }
+    }
+  };
 }
 
 function reduceSetMessage(state: SyncplayState, payload: Record<string, unknown>): SyncplayState {

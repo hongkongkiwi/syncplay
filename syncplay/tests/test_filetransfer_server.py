@@ -112,7 +112,7 @@ def test_accept_sends_transfer_tickets_to_both_clients():
     assert receiver.tickets[0]["role"] == "receiver"
     assert source.tickets[0]["transferId"] == session.transfer_id
     assert source.tickets[0]["token"] != receiver.tickets[0]["token"]
-    assert receiver.tickets[0]["file"] == {"name": "movie.mkv", "size": 1024}
+    assert receiver.tickets[0]["file"] == {"name": "movie.mkv", "duration": 60.0, "size": 1024}
     assert receiver.tickets[0]["fingerprint"] == "fp"
 
 
@@ -186,6 +186,39 @@ def test_malformed_request_and_resume_offsets_return_errors():
 
     assert transfers.request_transfer(receiver, {"source": "source", "offset": "bad"}) is None
     assert receiver.errors[-1]["code"] == "bad-offset"
+
+
+def test_transfer_limits_reject_excess_active_or_user_sessions():
+    receiver = Watcher("receiver")
+    other_receiver = Watcher("other")
+    source = Watcher("source", file_=media())
+    transfers = TransferManager(
+        TransferServerConfig(enabled=True, max_active=1, max_per_user=1),
+        [receiver, other_receiver, source],
+    )
+
+    transfers.request_transfer(receiver, {"source": "source"})
+    transfers.request_transfer(other_receiver, {"source": "source"})
+
+    assert other_receiver.errors[-1]["code"] == "too-many-active-transfers"
+
+
+def test_cleanup_expired_sessions_removes_tokens_and_session():
+    now = [1000]
+    receiver = Watcher("receiver")
+    source = Watcher("source", file_=media())
+    transfers = TransferManager(
+        TransferServerConfig(enabled=True, token_ttl=10),
+        [receiver, source],
+        now=lambda: now[0],
+    )
+    session = transfers.request_transfer(receiver, {"source": "source"})
+    transfers.accept_transfer(source, session.transfer_id, fingerprint="fp")
+    now[0] = 1011
+
+    transfers.cleanup_expired_sessions()
+
+    assert transfers.get_session(session.transfer_id) is None
 
     session = transfers.request_transfer(receiver, {"source": "source"})
     transfers.accept_transfer(source, session.transfer_id, fingerprint="fp")

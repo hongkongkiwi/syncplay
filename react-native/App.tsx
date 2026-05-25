@@ -150,7 +150,7 @@ export default function App() {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAppliedPlaylistKeyRef = useRef<string | null>(null);
   const lastAutoFileSwitchRef = useRef<string | null>(null);
-  const openedTransferSocketsRef = useRef<Set<string>>(new Set());
+  const openedTransferSocketsRef = useRef<Map<string, string>>(new Map());
   const wasConnectedRef = useRef(false);
 
   const player = useVideoPlayer(mediaUri, instance => {
@@ -438,15 +438,18 @@ export default function App() {
     }
 
     for (const transfer of transfers) {
+      if (transfer.status !== 'approved') {
+        openedTransferSocketsRef.current.delete(transfer.transferId);
+      }
       if (
         transfer.status !== 'approved' ||
         !transfer.token ||
-        openedTransferSocketsRef.current.has(transfer.transferId)
+        openedTransferSocketsRef.current.get(transfer.transferId) === transfer.token
       ) {
         continue;
       }
       if (transfer.role === 'receiver') {
-        openedTransferSocketsRef.current.add(transfer.transferId);
+        openedTransferSocketsRef.current.set(transfer.transferId, transfer.token);
         const sink = createExpoTransferSink(transfer.file?.name ?? transfer.transferId, transferDirectory ?? undefined);
         connection.openTransferSocket(
           {
@@ -456,14 +459,24 @@ export default function App() {
             offset: sink.getOffset()
           },
           sink,
-          completedPath => dispatch({ type: 'transfer-completed', transferId: transfer.transferId, completedPath })
+          completedPath => {
+            openedTransferSocketsRef.current.delete(transfer.transferId);
+            dispatch({ type: 'transfer-completed', transferId: transfer.transferId, completedPath });
+          },
+          undefined,
+          undefined,
+          error => {
+            openedTransferSocketsRef.current.delete(transfer.transferId);
+            dispatch({ type: 'transfer-failed', transferId: transfer.transferId });
+            dispatch({ type: 'connection-status', status: 'error', error: error.message });
+          }
         );
       } else if (transfer.role === 'sender') {
         const sourceItem = findMediaByName(mediaLibrary, transfer.file?.name ?? state.media?.name);
         if (!sourceItem) {
           continue;
         }
-        openedTransferSocketsRef.current.add(transfer.transferId);
+        openedTransferSocketsRef.current.set(transfer.transferId, transfer.token);
         connection.openTransferSocket(
           {
             transferId: transfer.transferId,
@@ -473,7 +486,13 @@ export default function App() {
           },
           { write: () => undefined },
           undefined,
-          createExpoTransferSource(sourceItem.uri)
+          createExpoTransferSource(sourceItem.uri),
+          undefined,
+          error => {
+            openedTransferSocketsRef.current.delete(transfer.transferId);
+            dispatch({ type: 'transfer-failed', transferId: transfer.transferId });
+            dispatch({ type: 'connection-status', status: 'error', error: error.message });
+          }
         );
       }
     }
@@ -1250,7 +1269,7 @@ export default function App() {
                 </Pressable>
               ) : null}
               {item.status.startsWith('paused') ? (
-                <Pressable style={styles.userReadyButton} onPress={() => connection.resumeTransfer(item.transferId, item.offset)}>
+                <Pressable style={styles.userReadyButton} onPress={() => connection.resumeTransfer(item.transferId, item.transferred || item.offset)}>
                   <Play color="#d7e5ef" size={16} />
                 </Pressable>
               ) : null}

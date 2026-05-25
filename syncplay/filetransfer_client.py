@@ -5,6 +5,7 @@ import json
 import os
 from collections import namedtuple
 
+from twisted.internet import reactor
 from twisted.internet.protocol import Protocol
 
 from syncplay.filetransfer_wire import FRAME_COMPLETE, FRAME_DATA, TransferFrame, TransferFrameError, decode_frame, encode_frame
@@ -25,16 +26,18 @@ TransferClientSession = namedtuple(
         "fingerprint",
         "bytes_transferred",
         "chunk_size",
+        "approved_local_path",
     ],
 )
-TransferClientSession.__new__.__defaults__ = (None, None, None, None, None, None, None, None, None, None, 0, None)
+TransferClientSession.__new__.__defaults__ = (None, None, None, None, None, None, None, None, None, None, 0, None, None)
 
 
 class FileTransferClient(object):
-    def __init__(self, client, download_directory=None):
+    def __init__(self, client, download_directory=None, threaded_upload=False):
         self._client = client
         self._sessions = {}
         self._download_directory = download_directory
+        self._threaded_upload = threaded_upload
 
     def get(self, transfer_id):
         return self._sessions.get(transfer_id)
@@ -77,6 +80,7 @@ class FileTransferClient(object):
                 status="approved",
                 destination_path=destinationPath,
                 fingerprint=fingerprint,
+                approved_local_path=local_path,
             )
         self._client._protocol.sendTransferDecision(transferId, True, fingerprint=fingerprint)
         return fingerprint
@@ -173,7 +177,7 @@ class FileTransferClient(object):
                 return
             self.prepareDownload(transferId, destination_path)
             session = self._sessions.get(transferId)
-        opener(session.ticket, TransferSocketClientProtocol(self, session.ticket))
+        opener(session.ticket, TransferSocketClientProtocol(self, session.ticket, threaded_upload=self._threaded_upload))
 
     def _choose_download_destination(self, session):
         chooser = getattr(getattr(self._client, "ui", None), "chooseFileTransferDestination", None)
@@ -184,12 +188,11 @@ class FileTransferClient(object):
             return os.path.join(self._download_directory, filename)
         return None
 
-    def streamUpload(self, transferId, transport, offset=0, chunkSize=None):
+    def streamUpload(self, transferId, transport, offset=0, chunkSize=None, schedule=None):
         session = self._sessions.get(transferId)
         if not session:
             raise ValueError("transfer session was not found")
-        current_file = self._client.userlist.currentUser.file
-        path = current_file.get("path") if current_file else None
+        path = session.approved_local_path
         if not path or not os.path.isfile(path):
             raise ValueError("loaded file is not readable")
         chunk_size = int(chunkSize or session.chunk_size or 262144)
@@ -198,19 +201,36 @@ class FileTransferClient(object):
         if position < 0 or position > size:
             raise ValueError("upload offset is outside the file")
 
-        self._sessions[transferId] = session._replace(status="uploading", bytes_transferred=position)
+        def set_session(replacement):
+            if schedule:
+                schedule(lambda replacement=replacement: self._set_session(transferId, replacement))
+            else:
+                self._set_session(transferId, replacement)
+
+        def write_frame(data):
+            if schedule:
+                schedule(lambda data=data: transport.write(data))
+            else:
+                transport.write(data)
+
+        set_session(session._replace(status="uploading", bytes_transferred=position))
         with open(path, "rb") as handle:
             handle.seek(position)
             while True:
                 chunk = handle.read(chunk_size)
                 if not chunk:
                     break
-                transport.write(encode_frame(TransferFrame(frame_type=FRAME_DATA, offset=position, payload=chunk)))
+                write_frame(encode_frame(TransferFrame(frame_type=FRAME_DATA, offset=position, payload=chunk)))
                 position += len(chunk)
-                self._sessions[transferId] = self._sessions[transferId]._replace(bytes_transferred=position)
-        transport.write(encode_frame(TransferFrame(frame_type=FRAME_COMPLETE, offset=position, payload=b"")))
-        self._sessions[transferId] = self._sessions[transferId]._replace(status="complete", bytes_transferred=position)
+                current = self._sessions.get(transferId, session)
+                set_session(current._replace(bytes_transferred=position))
+        write_frame(encode_frame(TransferFrame(frame_type=FRAME_COMPLETE, offset=position, payload=b"")))
+        current = self._sessions.get(transferId, session)
+        set_session(current._replace(status="complete", bytes_transferred=position))
         return position
+
+    def _set_session(self, transferId, session):
+        self._sessions[transferId] = session
 
     def receiveFrame(self, transferId, frame):
         session = self._sessions.get(transferId)
@@ -252,12 +272,15 @@ class FileTransferClient(object):
 
 def fingerprint_file(path, filename, size):
     digest = hashlib.sha256()
+    file_size = size if size is not None else os.path.getsize(path)
     digest.update(str(filename or os.path.basename(path)).encode("utf-8"))
-    digest.update(str(size if size is not None else os.path.getsize(path)).encode("utf-8"))
+    digest.update(str(file_size).encode("utf-8"))
     with open(path, "rb") as handle:
         first = handle.read(1024 * 1024)
         digest.update(first)
-        if os.path.getsize(path) > 2 * 1024 * 1024:
+        if file_size <= 2 * 1024 * 1024:
+            digest.update(handle.read())
+        else:
             handle.seek(-1024 * 1024, os.SEEK_END)
             digest.update(handle.read(1024 * 1024))
     return "sha256-first-last-size-v1:{}".format(digest.hexdigest())
@@ -297,10 +320,11 @@ def _encode_transfer_connect(ticket, offset):
 
 
 class TransferSocketClientProtocol(Protocol):
-    def __init__(self, transfers, ticket):
+    def __init__(self, transfers, ticket, threaded_upload=False):
         self._transfers = transfers
         self._ticket = ticket
         self._buffer = b""
+        self._threaded_upload = threaded_upload
 
     def connectionMade(self, transport=None):
         if transport is not None:
@@ -308,12 +332,25 @@ class TransferSocketClientProtocol(Protocol):
         offset = self._connection_offset()
         self.transport.write(_encode_transfer_connect(self._ticket, offset))
         if self._ticket.get("role") == "sender":
+            if self._threaded_upload:
+                reactor.callInThread(self._stream_upload, offset, reactor.callFromThread)
+                return
+            self._stream_upload(offset)
+
+    def _stream_upload(self, offset, schedule=None):
+        try:
             self._transfers.streamUpload(
                 self._ticket.get("transferId"),
                 self.transport,
                 offset=offset,
                 chunkSize=self._ticket.get("chunkSize"),
+                schedule=schedule,
             )
+        except (IOError, OSError, ValueError):
+            if schedule:
+                schedule(self.transport.loseConnection)
+            else:
+                self.transport.loseConnection()
 
     def dataReceived(self, data):
         self._buffer += data

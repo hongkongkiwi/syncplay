@@ -52,7 +52,7 @@ export type ServerTransferMessage = {
     status: string;
     destinationPath?: string;
   };
-  pause?: { transferId: string; reason: string };
+  pause?: { transferId: string; reason: string; offset?: number };
   resume?: { transferId: string; offset: number };
   cancel?: { transferId: string; reason: string };
   error?: { transferId: string; code: string; message: string };

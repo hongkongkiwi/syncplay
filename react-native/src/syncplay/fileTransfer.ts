@@ -7,9 +7,23 @@ export type TransferStatus =
   | 'paused-local'
   | 'paused-source-offline'
   | 'paused-source-changed-media'
+  | 'paused-receiver-offline'
   | 'complete'
   | 'failed'
   | 'cancelled';
+
+export const TRANSFER_STATUSES: readonly TransferStatus[] = [
+  'incoming-request',
+  'approved',
+  'downloading',
+  'paused-local',
+  'paused-source-offline',
+  'paused-source-changed-media',
+  'paused-receiver-offline',
+  'complete',
+  'failed',
+  'cancelled'
+];
 
 export type TransferSession = {
   transferId: string;
@@ -25,9 +39,13 @@ export type TransferSession = {
   completedPath?: string | null;
 };
 
-export function createIncomingTransfer(payload: Record<string, unknown>): TransferSession {
+export function createIncomingTransfer(payload: Record<string, unknown>): TransferSession | null {
+  const transferId = parseTransferId(payload.transferId);
+  if (!transferId) {
+    return null;
+  }
   return {
-    transferId: String(payload.transferId),
+    transferId,
     role: 'sender',
     status: 'incoming-request',
     source: typeof payload.source === 'string' ? payload.source : null,
@@ -39,12 +57,27 @@ export function createIncomingTransfer(payload: Record<string, unknown>): Transf
   };
 }
 
+export function parseTransferId(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+export function isTransferStatus(value: unknown): value is TransferStatus {
+  return typeof value === 'string' && TRANSFER_STATUSES.includes(value as TransferStatus);
+}
+
 export function statusFromTransferError(code: string): TransferStatus {
   if (code === 'source-offline') {
     return 'paused-source-offline';
   }
   if (code === 'source-changed-media') {
     return 'paused-source-changed-media';
+  }
+  if (code === 'receiver-offline') {
+    return 'paused-receiver-offline';
   }
   if (code === 'cancelled') {
     return 'cancelled';

@@ -74,6 +74,21 @@ describe('TransferSocket', () => {
     expect(transfer.getCompletedPath()).toBe('/downloads/movie.mkv');
   });
 
+  it('buffers partial data frames until the payload arrives', () => {
+    const sink = new Sink();
+    const socket = {
+      write: jest.fn(() => true),
+      destroy: jest.fn()
+    };
+    const transfer = new TransferSocket(socket, sink);
+    const encoded = encodeTransferFrame({ frameType: 1, offset: 0, payload: new Uint8Array([1, 2, 3]) });
+
+    transfer.handleData(encoded.slice(0, 25));
+    transfer.handleData(encoded.slice(25));
+
+    expect(sink.chunks).toEqual([new Uint8Array([1, 2, 3])]);
+  });
+
   it('uploads source bytes as data frames followed by complete', async () => {
     const sink = new Sink();
     const writes: Array<string | Uint8Array> = [];
@@ -86,7 +101,8 @@ describe('TransferSocket', () => {
     };
     const transfer = new TransferSocket(socket, sink);
 
-    await transfer.upload('tx1', { readAll: () => new Uint8Array([1, 2, 3, 4]) }, 1, 2);
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    await transfer.upload('tx1', { read: (offset, length) => bytes.slice(offset, offset + length) }, 1, 2);
 
     expect(decodeTransferFrame(writes[0] as Uint8Array).frame).toEqual({
       frameType: 1,
