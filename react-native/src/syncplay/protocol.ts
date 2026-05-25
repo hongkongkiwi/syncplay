@@ -16,6 +16,45 @@ export type ClientFeatures = {
   managedRooms: boolean;
   persistentRooms: boolean;
   setOthersReadiness: boolean;
+  fileTransfer: boolean;
+  fileTransferVersion: number;
+};
+
+export type TransferRequestPayload = {
+  source: string;
+  offset: number;
+};
+
+export type TransferDecisionPayload = {
+  transferId: string;
+  accepted: boolean;
+  reason?: string;
+  fingerprint?: string;
+  chunkSize?: number;
+};
+
+export type TransferMessage = {
+  Transfer:
+    | { request: TransferRequestPayload }
+    | { decision: TransferDecisionPayload }
+    | { pause: { transferId: string; reason: string } }
+    | { resume: { transferId: string; offset: number } }
+    | { cancel: { transferId: string; reason: string } };
+};
+
+export type ServerTransferMessage = {
+  offer?: Record<string, unknown>;
+  ticket?: Record<string, unknown>;
+  progress?: {
+    transferId: string;
+    transferred: number;
+    size: number;
+    status: string;
+  };
+  pause?: { transferId: string; reason: string };
+  resume?: { transferId: string; offset: number };
+  cancel?: { transferId: string; reason: string };
+  error?: { transferId: string; code: string; message: string };
 };
 
 export type HelloMessage = {
@@ -58,6 +97,7 @@ export type SyncplayServerMessage = {
     username: string;
     message: string;
   };
+  Transfer?: ServerTransferMessage;
   Error?: {
     message: string;
   };
@@ -82,7 +122,8 @@ export type ClientMessage =
   | { State: Record<string, unknown> }
   | { Chat: string }
   | { List: null }
-  | { TLS: Record<string, unknown> };
+  | { TLS: Record<string, unknown> }
+  | TransferMessage;
 
 export function createClientFeatures(): ClientFeatures {
   return {
@@ -93,7 +134,9 @@ export function createClientFeatures(): ClientFeatures {
     readiness: true,
     managedRooms: true,
     persistentRooms: true,
-    setOthersReadiness: true
+    setOthersReadiness: true,
+    fileTransfer: true,
+    fileTransferVersion: 1
   };
 }
 
@@ -197,6 +240,73 @@ export function buildPlaylistIndexMessage(index: number): {
     Set: {
       playlistIndex: {
         index
+      }
+    }
+  };
+}
+
+export function buildTransferRequestMessage(source: string, offset = 0): TransferMessage {
+  return {
+    Transfer: {
+      request: {
+        source: source.trim(),
+        offset
+      }
+    }
+  };
+}
+
+export function buildTransferDecisionMessage(args: TransferDecisionPayload): TransferMessage {
+  const decision: TransferDecisionPayload = {
+    transferId: args.transferId,
+    accepted: args.accepted
+  };
+
+  if (args.reason) {
+    decision.reason = args.reason;
+  }
+  if (args.fingerprint) {
+    decision.fingerprint = args.fingerprint;
+  }
+  if (typeof args.chunkSize === 'number') {
+    decision.chunkSize = args.chunkSize;
+  }
+
+  return {
+    Transfer: {
+      decision
+    }
+  };
+}
+
+export function buildTransferPauseMessage(transferId: string, reason: string): TransferMessage {
+  return {
+    Transfer: {
+      pause: {
+        transferId,
+        reason
+      }
+    }
+  };
+}
+
+export function buildTransferResumeMessage(transferId: string, offset: number): TransferMessage {
+  return {
+    Transfer: {
+      resume: {
+        transferId,
+        offset
+      }
+    }
+  };
+}
+
+export function buildTransferCancelMessage(transferId: string, reason: string): TransferMessage {
+  return {
+    Transfer: {
+      cancel: {
+        transferId,
+        reason
       }
     }
   };

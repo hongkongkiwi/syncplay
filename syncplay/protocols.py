@@ -34,6 +34,8 @@ class JSONCommandProtocol(LineReceiver):
                 self.handleChat(message[1])
             elif command == "TLS":
                 self.handleTLS(message[1])
+            elif command == "Transfer":
+                self.handleTransfer(message[1])
             else:
                 self.dropWithError(getMessage("unknown-command-server-error").format(message[1]))  # TODO: log, not drop
 
@@ -235,6 +237,44 @@ class SyncClientProtocol(JSONCommandProtocol):
 
     def sendChatMessage(self, chatMessage):
         self.sendMessage({"Chat": chatMessage})
+
+    def handleTransfer(self, payload):
+        handler = getattr(self._client, "handleTransfer", None)
+        if handler:
+            handler(payload)
+
+    def sendTransfer(self, payload):
+        self.sendMessage({"Transfer": payload})
+
+    def sendTransferRequest(self, sourceUsername, offset=0):
+        self.sendTransfer({
+            "request": {
+                "source": sourceUsername.strip(),
+                "offset": int(offset)
+            }
+        })
+
+    def sendTransferDecision(self, transferId, accepted, reason=None, fingerprint=None, chunkSize=None):
+        decision = {
+            "transferId": transferId,
+            "accepted": bool(accepted)
+        }
+        if reason:
+            decision["reason"] = reason
+        if fingerprint:
+            decision["fingerprint"] = fingerprint
+        if chunkSize:
+            decision["chunkSize"] = int(chunkSize)
+        self.sendTransfer({"decision": decision})
+
+    def sendTransferPause(self, transferId, reason):
+        self.sendTransfer({"pause": {"transferId": transferId, "reason": reason}})
+
+    def sendTransferResume(self, transferId, offset):
+        self.sendTransfer({"resume": {"transferId": transferId, "offset": int(offset)}})
+
+    def sendTransferCancel(self, transferId, reason):
+        self.sendTransfer({"cancel": {"transferId": transferId, "reason": reason}})
 
     def handleList(self, userList):
         self._client.userlist.clearList()
@@ -562,6 +602,12 @@ class SyncServerProtocol(JSONCommandProtocol):
         if not self._factory.disableChat:
             self._factory.sendChat(self._watcher, chatMessage)
 
+    @requireLogged
+    def handleTransfer(self, payload):
+        handler = getattr(self._factory, "handleTransfer", None)
+        if handler:
+            handler(self._watcher, payload)
+
     def setFeatures(self, features):
         self._features = features
 
@@ -615,6 +661,27 @@ class SyncServerProtocol(JSONCommandProtocol):
 
     def sendSet(self, setting):
         self.sendMessage({"Set": setting})
+
+    def sendTransfer(self, payload):
+        self.sendMessage({"Transfer": payload})
+
+    def sendTransferOffer(self, payload):
+        self.sendTransfer({"offer": payload})
+
+    def sendTransferTicket(self, payload):
+        self.sendTransfer({"ticket": payload})
+
+    def sendTransferProgress(self, payload):
+        self.sendTransfer({"progress": payload})
+
+    def sendTransferError(self, transferId, code, message):
+        self.sendTransfer({
+            "error": {
+                "transferId": transferId,
+                "code": code,
+                "message": message
+            }
+        })
 
     def sendNewControlledRoom(self, roomName, password):
         self.sendSet({
