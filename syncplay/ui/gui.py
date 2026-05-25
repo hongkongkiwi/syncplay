@@ -824,6 +824,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 path = self._syncplayClient.fileSwitch.findFilepath(filename)
                 if path:
                     menu.addAction(QtGui.QPixmap(resourcespath + "folder_film.png"), getMessage('open-containing-folder'), lambda: utils.open_system_file_browser(path))
+            if (
+                isUserRow
+                and username != self._syncplayClient.userlist.currentUser.username
+                and not isURL(filename)
+                and self._syncplayClient.serverFeatures.get("fileTransfer")
+            ):
+                menu.addAction(
+                    QtGui.QPixmap(resourcespath + "application_get.png"),
+                    getMessage("file-transfer-request-menu-label").format(shortUsername),
+                    lambda: self._syncplayClient.requestFileDownload(username)
+                )
 
         if isUserRow and roomToJoin == self._syncplayClient.getRoom() and self._syncplayClient.userlist.currentUser.canControl() and self._syncplayClient.userlist.isReadinessSupported(requiresOtherUsers=False) and self._syncplayClient.serverFeatures["setOthersReadiness"]:
             if self._syncplayClient.userlist.isReady(username):

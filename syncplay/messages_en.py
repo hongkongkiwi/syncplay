@@ -557,6 +557,7 @@ en = {
     "addotherusersstreamstoplaylist-menu-label": "Add {}' stream to playlist",  # [Username]
     "openusersstream-menu-label": "Open {}'s stream",  # [username]'s
     "openusersfile-menu-label": "Open {}'s file",  # [username]'s
+    "file-transfer-request-menu-label": "Download {}'s file",  # [username]'s
 
     "setasready-menu-label": "Set {} as ready", # [Username]
     "setasnotready-menu-label": "Set {} as not ready", # [Username]

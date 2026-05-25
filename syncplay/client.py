@@ -810,6 +810,9 @@ class SyncplayClient(object):
         if self._protocol and self._protocol.logged:
             self._protocol.sendList()
 
+    def requestFileDownload(self, username):
+        self.fileTransfer.requestDownload(username)
+
     def showUserList(self, altUI=None):
         self.userlist.showUserList(altUI)
 
