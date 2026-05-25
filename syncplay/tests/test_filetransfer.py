@@ -109,11 +109,14 @@ def test_size_above_server_limit_fails():
     "file_",
     [
         loaded_file(".hidden.mkv"),
+        loaded_file("d41d8cd98f00b204e9800998ecf8427e"),
+        loaded_file("da39a3ee5e6b4b0d3255bfef95601890afd80709.mkv"),
+        loaded_file("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
         loaded_file(path=""),
         loaded_file(path=None),
     ],
 )
-def test_hidden_names_and_missing_local_paths_are_not_shareable(file_):
+def test_hidden_hashed_names_and_missing_local_paths_are_not_shareable(file_):
     assert is_shareable_loaded_file(file_) is False
     with pytest.raises(TransferValidationError):
         validate_transfer_request(

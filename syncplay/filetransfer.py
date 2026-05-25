@@ -2,6 +2,7 @@
 
 import ntpath
 import posixpath
+import re
 from collections import namedtuple
 
 
@@ -63,6 +64,8 @@ _STREAM_PREFIXES = (
     "magnet:",
 )
 
+_HASH_BASENAME_RE = re.compile(r"^[0-9a-f]{32,}(?:\.[a-z0-9]{1,8})?$", re.IGNORECASE)
+
 
 def _read_value(container, key):
     if container is None:
@@ -104,6 +107,10 @@ def _is_stream_url(value):
     return bool(value and str(value).strip().lower().startswith(_STREAM_PREFIXES))
 
 
+def _is_hash_filename(filename):
+    return bool(filename and _HASH_BASENAME_RE.match(filename))
+
+
 def is_shareable_loaded_file(file_):
     filename = _read_value(file_, "name")
     size = _read_value(file_, "size")
@@ -111,6 +118,8 @@ def is_shareable_loaded_file(file_):
     if not normalized:
         return False
     if normalized.startswith("."):
+        return False
+    if _is_hash_filename(normalized):
         return False
     if _is_stream_url(filename):
         return False
