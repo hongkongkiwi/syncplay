@@ -24,6 +24,26 @@ class Sink(object):
         self.closed = True
 
 
+class Clock(object):
+    def __init__(self):
+        self.now = 0
+        self.calls = []
+
+    def seconds(self):
+        return self.now
+
+    def callLater(self, delay, fn, *args):
+        self.calls.append((delay, fn, args))
+        return None
+
+    def advance(self, seconds):
+        self.now += seconds
+        ready = self.calls
+        self.calls = []
+        for _, fn, args in ready:
+            fn(*args)
+
+
 def test_encode_decode_data_frame():
     frame = TransferFrame(frame_type=FRAME_DATA, offset=12, payload=b"abc")
 
@@ -100,6 +120,45 @@ def test_relay_reports_data_progress_for_sender_frames():
     relay.relay_frame("tx1", "sender", TransferFrame(frame_type=FRAME_DATA, offset=3, payload=b"de"))
 
     assert reports == [("tx1", 3), ("tx1", 5)]
+
+
+def test_relay_throttles_sender_frames_when_rate_limit_is_set():
+    clock = Clock()
+    relay = TransferSocketRelay(rate_limit=2, clock=clock)
+    sender = Sink()
+    receiver = Sink()
+    relay.register_token("sender-token", "tx1", "sender")
+    relay.register_token("receiver-token", "tx1", "receiver")
+    relay.connect("sender-token", sender)
+    relay.connect("receiver-token", receiver)
+    first = TransferFrame(frame_type=FRAME_DATA, offset=0, payload=b"ab")
+    second = TransferFrame(frame_type=FRAME_DATA, offset=2, payload=b"cd")
+
+    relay.relay_frame("tx1", "sender", first)
+    relay.relay_frame("tx1", "sender", second)
+
+    assert receiver.writes == [encode_frame(first)]
+    assert clock.calls[0][0] == 1.0
+    clock.advance(1.0)
+    assert receiver.writes == [encode_frame(first), encode_frame(second)]
+
+
+def test_relay_drops_scheduled_frame_after_pause():
+    clock = Clock()
+    relay = TransferSocketRelay(rate_limit=2, clock=clock)
+    sender = Sink()
+    receiver = Sink()
+    relay.register_token("sender-token", "tx1", "sender")
+    relay.register_token("receiver-token", "tx1", "receiver")
+    relay.connect("sender-token", sender)
+    relay.connect("receiver-token", receiver)
+
+    relay.relay_frame("tx1", "sender", TransferFrame(frame_type=FRAME_DATA, offset=0, payload=b"ab"))
+    relay.relay_frame("tx1", "sender", TransferFrame(frame_type=FRAME_DATA, offset=2, payload=b"cd"))
+    relay.pause("tx1")
+    clock.advance(1.0)
+
+    assert len(receiver.writes) == 1
 
 
 def test_pause_stops_relay_without_losing_session():

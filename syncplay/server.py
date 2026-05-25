@@ -84,6 +84,8 @@ class SyncFactory(Factory):
             self.serverAcceptsTLS = False
         self.transferRelay = TransferSocketRelay(
             progress_callback=lambda transfer_id, transferred: self.fileTransfers.report_progress(transfer_id, transferred),
+            rate_limit=self.fileTransferConfig.rate_limit,
+            clock=reactor,
         )
         self.fileTransfers = TransferManager(
             self.fileTransferConfig,

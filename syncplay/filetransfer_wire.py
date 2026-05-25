@@ -1,6 +1,7 @@
 # coding:utf8
 
 import struct
+import time
 import zlib
 from collections import namedtuple
 
@@ -64,11 +65,14 @@ def decode_frame(buffer, max_payload_size=262144):
 
 
 class TransferSocketRelay(object):
-    def __init__(self, progress_callback=None):
+    def __init__(self, progress_callback=None, rate_limit=None, clock=None):
         self._tokens = {}
         self._pairs = {}
         self._progress = {}
         self._progress_callback = progress_callback
+        self._rate_limit = int(rate_limit) if rate_limit else None
+        self._clock = clock
+        self._send_after = {}
 
     def register_token(self, token, transfer_id, role):
         self._tokens[token] = TransferToken(transfer_id=transfer_id, role=role)
@@ -108,12 +112,7 @@ class TransferSocketRelay(object):
         else:
             raise TransferFrameError("invalid transfer role")
         if target:
-            target.write(encode_frame(frame))
-        if role == "sender" and frame.frame_type == FRAME_DATA:
-            transferred = max(self._progress.get(transfer_id, 0), int(frame.offset) + len(frame.payload or b""))
-            self._progress[transfer_id] = transferred
-            if self._progress_callback:
-                self._progress_callback(transfer_id, transferred)
+            self._write_or_throttle(transfer_id, role, target, frame)
 
     def pause(self, transfer_id):
         pair = self._pairs.get(transfer_id)
@@ -134,3 +133,39 @@ class TransferSocketRelay(object):
         elif role == "receiver":
             pair = pair._replace(receiver=None, paused=True)
         self._pairs[transfer_id] = pair
+
+    def _write_or_throttle(self, transfer_id, role, target, frame):
+        encoded = encode_frame(frame)
+        if role != "sender" or not self._rate_limit or self._rate_limit <= 0:
+            self._write_frame(transfer_id, role, target, frame, encoded)
+            return
+
+        now = self._seconds()
+        send_at = max(now, self._send_after.get(transfer_id, now))
+        delay = send_at - now
+        if frame.frame_type == FRAME_DATA:
+            send_at += float(len(frame.payload or b"")) / float(self._rate_limit)
+        self._send_after[transfer_id] = send_at
+        if delay > 0 and self._clock:
+            self._clock.callLater(delay, self._write_frame, transfer_id, role, target, frame, encoded)
+        else:
+            self._write_frame(transfer_id, role, target, frame, encoded)
+
+    def _write_frame(self, transfer_id, role, target, frame, encoded):
+        pair = self._pairs.get(transfer_id)
+        if not pair or pair.paused:
+            return
+        expected = pair.receiver if role == "sender" else pair.sender
+        if expected is not target:
+            return
+        target.write(encoded)
+        if role == "sender" and frame.frame_type == FRAME_DATA:
+            transferred = max(self._progress.get(transfer_id, 0), int(frame.offset) + len(frame.payload or b""))
+            self._progress[transfer_id] = transferred
+            if self._progress_callback:
+                self._progress_callback(transfer_id, transferred)
+
+    def _seconds(self):
+        if self._clock and hasattr(self._clock, "seconds"):
+            return self._clock.seconds()
+        return time.time()
