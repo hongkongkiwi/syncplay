@@ -11,6 +11,11 @@ import {
   buildReadyMessage,
   buildRoomMessage,
   buildStateMessage,
+  buildTransferCancelMessage,
+  buildTransferDecisionMessage,
+  buildTransferPauseMessage,
+  buildTransferRequestMessage,
+  buildTransferResumeMessage,
   buildUserReadyMessage,
   encodeMessage,
   type ClientMessage,
@@ -140,6 +145,32 @@ export class SyncplayConnection {
 
   sendPlaylistIndex(index: number): void {
     this.send(buildPlaylistIndexMessage(index));
+  }
+
+  requestTransfer(source: string, offset = 0): void {
+    this.send(buildTransferRequestMessage(source, offset));
+  }
+
+  sendTransferDecision(args: {
+    transferId: string;
+    accepted: boolean;
+    reason?: string;
+    fingerprint?: string;
+    chunkSize?: number;
+  }): void {
+    this.send(buildTransferDecisionMessage(args));
+  }
+
+  pauseTransfer(transferId: string, reason: string): void {
+    this.send(buildTransferPauseMessage(transferId, reason));
+  }
+
+  resumeTransfer(transferId: string, offset: number): void {
+    this.send(buildTransferResumeMessage(transferId, offset));
+  }
+
+  cancelTransfer(transferId: string, reason: string): void {
+    this.send(buildTransferCancelMessage(transferId, reason));
   }
 
   sendPlayback(position: number, paused: boolean, doSeek = false): void {

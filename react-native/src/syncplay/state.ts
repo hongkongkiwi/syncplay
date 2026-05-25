@@ -1,3 +1,8 @@
+import {
+  createIncomingTransfer,
+  statusFromTransferError,
+  type TransferSession
+} from './fileTransfer';
 import type { ServerUserPayload, SyncplayFile, SyncplayServerMessage } from './protocol';
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -50,6 +55,7 @@ export type SyncplayState = {
     lastPassword: string | null;
     controllerRooms: Record<string, string>;
   };
+  transfers: Record<string, TransferSession>;
   messages: SyncplayMessage[];
 };
 
@@ -94,6 +100,7 @@ export function createInitialSyncplayState(): SyncplayState {
       lastPassword: null,
       controllerRooms: {}
     },
+    transfers: {},
     messages: []
   };
 }
@@ -188,6 +195,10 @@ function reduceServerMessage(state: SyncplayState, message: SyncplayServerMessag
     });
   }
 
+  if (message.Transfer) {
+    next = reduceTransferMessage(next, message.Transfer);
+  }
+
   if (message.State?.playstate) {
     next = {
       ...next,
@@ -215,6 +226,92 @@ function reduceServerMessage(state: SyncplayState, message: SyncplayServerMessag
   }
 
   return next;
+}
+
+function reduceTransferMessage(state: SyncplayState, payload: NonNullable<SyncplayServerMessage['Transfer']>): SyncplayState {
+  if (payload.offer) {
+    const session = createIncomingTransfer(payload.offer);
+    return {
+      ...state,
+      transfers: {
+        ...state.transfers,
+        [session.transferId]: session
+      }
+    };
+  }
+
+  if (payload.ticket) {
+    const transferId = String(payload.ticket.transferId);
+    const previous = state.transfers[transferId];
+    return {
+      ...state,
+      transfers: {
+        ...state.transfers,
+        [transferId]: {
+          ...(previous ?? {
+            transferId,
+            role: null,
+            status: 'approved',
+            transferred: 0,
+            size: null,
+            offset: 0
+          }),
+          role: payload.ticket.role === 'sender' || payload.ticket.role === 'receiver' ? payload.ticket.role : null,
+          status: 'approved',
+          token: typeof payload.ticket.token === 'string' ? payload.ticket.token : null,
+          offset: typeof payload.ticket.offset === 'number' ? payload.ticket.offset : previous?.offset ?? 0
+        }
+      }
+    };
+  }
+
+  if (payload.progress) {
+    const previous = state.transfers[payload.progress.transferId];
+    return {
+      ...state,
+      transfers: {
+        ...state.transfers,
+        [payload.progress.transferId]: {
+          ...(previous ?? {
+            transferId: payload.progress.transferId,
+            role: null,
+            file: null,
+            source: null,
+            receiver: null,
+            offset: 0
+          }),
+          status: payload.progress.status as TransferSession['status'],
+          transferred: payload.progress.transferred,
+          size: payload.progress.size
+        }
+      }
+    };
+  }
+
+  if (payload.error) {
+    const previous = state.transfers[payload.error.transferId];
+    return {
+      ...state,
+      transfers: {
+        ...state.transfers,
+        [payload.error.transferId]: {
+          ...(previous ?? {
+            transferId: payload.error.transferId,
+            role: null,
+            file: null,
+            source: null,
+            receiver: null,
+            transferred: 0,
+            size: null,
+            offset: 0
+          }),
+          status: statusFromTransferError(payload.error.code)
+        }
+      }
+    };
+  }
+
+  return state;
 }
 
 function reduceSetMessage(state: SyncplayState, payload: Record<string, unknown>): SyncplayState {

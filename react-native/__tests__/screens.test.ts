@@ -6,6 +6,7 @@ describe('mobile screen registry', () => {
       'connect',
       'watch',
       'room',
+      'transfers',
       'chat',
       'settings'
     ]);
@@ -20,6 +21,7 @@ describe('mobile screen registry', () => {
     expect(getScreenTitle('connect')).toBe('Connect');
     expect(getScreenTitle('watch')).toBe('Watch');
     expect(getScreenTitle('room')).toBe('Room');
+    expect(getScreenTitle('transfers')).toBe('Transfers');
     expect(getScreenTitle('chat')).toBe('Chat');
     expect(getScreenTitle('settings')).toBe('Settings');
   });

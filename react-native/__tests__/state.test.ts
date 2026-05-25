@@ -171,6 +171,63 @@ describe('Syncplay app state', () => {
     });
   });
 
+  it('tracks transfer offers, progress, and source failure states', () => {
+    const offered = syncplayReducer(createInitialSyncplayState(), {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          offer: {
+            transferId: 'tx1',
+            source: 'Aki',
+            receiver: 'Mobile',
+            file: { name: 'movie.mkv', duration: 100, size: 123 }
+          }
+        }
+      }
+    });
+
+    expect(offered.transfers.tx1).toMatchObject({
+      status: 'incoming-request',
+      source: 'Aki',
+      receiver: 'Mobile',
+      size: 123
+    });
+
+    const progressed = syncplayReducer(offered, {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          progress: {
+            transferId: 'tx1',
+            transferred: 10,
+            size: 123,
+            status: 'downloading'
+          }
+        }
+      }
+    });
+
+    expect(progressed.transfers.tx1).toMatchObject({
+      status: 'downloading',
+      transferred: 10
+    });
+
+    const paused = syncplayReducer(progressed, {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          error: {
+            transferId: 'tx1',
+            code: 'source-changed-media',
+            message: 'Source changed media.'
+          }
+        }
+      }
+    });
+
+    expect(paused.transfers.tx1?.status).toBe('paused-source-changed-media');
+  });
+
   it('updates room and readiness from Set messages', () => {
     const listed = syncplayReducer(createInitialSyncplayState(), {
       type: 'server-message',
