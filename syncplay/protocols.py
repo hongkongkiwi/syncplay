@@ -273,8 +273,11 @@ class SyncClientProtocol(JSONCommandProtocol):
     def sendTransferPause(self, transferId, reason):
         self.sendTransfer({"pause": {"transferId": transferId, "reason": reason}})
 
-    def sendTransferResume(self, transferId, offset):
-        self.sendTransfer({"resume": {"transferId": transferId, "offset": int(offset)}})
+    def sendTransferResume(self, transferId, offset, fingerprint=None):
+        resume = {"transferId": transferId, "offset": int(offset)}
+        if fingerprint:
+            resume["fingerprint"] = fingerprint
+        self.sendTransfer({"resume": resume})
 
     def sendTransferCancel(self, transferId, reason):
         self.sendTransfer({"cancel": {"transferId": transferId, "reason": reason}})
@@ -533,7 +536,7 @@ class SyncServerProtocol(JSONCommandProtocol):
     def connectionLost(self, reason):
         if self._transferId:
             self._factory.transferRelay.disconnect(self._transferId, self._transferRole)
-        else:
+        if self._watcher:
             self._factory.removeWatcher(self._watcher)
 
     def getFeatures(self):
@@ -631,13 +634,13 @@ class SyncServerProtocol(JSONCommandProtocol):
             self.transport.loseConnection()
             return
         try:
-            self._factory.transferRelay.connect(payload.get("token"), self.transport)
+            ticket = self._factory.transferRelay.connect(payload.get("token"), self.transport)
         except TransferFrameError as error:
             print("Transfer socket rejected: {}".format(error))
             self.transport.loseConnection()
             return
-        self._transferId = payload.get("transferId")
-        self._transferRole = payload.get("role")
+        self._transferId = ticket.transfer_id
+        self._transferRole = ticket.role
         self.setRawMode()
 
     def rawDataReceived(self, data):

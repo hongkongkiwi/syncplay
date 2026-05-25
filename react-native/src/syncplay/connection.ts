@@ -176,8 +176,8 @@ export class SyncplayConnection {
     this.send(buildTransferPauseMessage(transferId, reason));
   }
 
-  resumeTransfer(transferId: string, offset: number): void {
-    this.send(buildTransferResumeMessage(transferId, offset));
+  resumeTransfer(transferId: string, offset: number, fingerprint?: string | null): void {
+    this.send(buildTransferResumeMessage(transferId, offset, fingerprint));
   }
 
   cancelTransfer(transferId: string, reason: string): void {

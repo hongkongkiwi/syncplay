@@ -8,10 +8,11 @@ export type ExpoTransferSink = TransferFileSink & {
   getOffset(): number;
 };
 
-export function createExpoTransferSink(filename: string, directory: Directory = Paths.document): ExpoTransferSink {
+export function createExpoTransferSink(transferId: string, filename: string, directory: Directory = Paths.document): ExpoTransferSink {
   const safeName = sanitizeFilename(filename);
+  const safeTransferId = sanitizeFilename(transferId);
   const destination = new File(directory, safeName);
-  const part = new File(directory, `.syncplay-download.${safeName}.part`);
+  const part = new File(directory, `.syncplay-download.${safeTransferId}.${safeName}.part`);
 
   if (!part.exists) {
     part.create({ intermediates: true, overwrite: true });

@@ -20,8 +20,8 @@ class Protocol(object):
     def sendTransferPause(self, transferId, reason):
         self.calls.append(("pause", transferId, reason))
 
-    def sendTransferResume(self, transferId, offset):
-        self.calls.append(("resume", transferId, offset))
+    def sendTransferResume(self, transferId, offset, fingerprint=None):
+        self.calls.append(("resume", transferId, offset, fingerprint))
 
     def sendTransferCancel(self, transferId, reason):
         self.calls.append(("cancel", transferId, reason))
@@ -161,7 +161,20 @@ def test_download_writes_part_file_and_resume_uses_partial_size(tmp_path):
     transfers.resumeTransfer("tx1")
 
     assert part_path.endswith(".syncplay-download.tx1.part")
-    assert client._protocol.calls[-1] == ("resume", "tx1", 7)
+    assert client._protocol.calls[-1] == ("resume", "tx1", 7, None)
+
+
+def test_resume_sends_fingerprint_from_ticket(tmp_path):
+    client = Client()
+    transfers = FileTransferClient(client)
+    transfers.handleTicket({"transferId": "tx1", "role": "receiver", "offset": 0, "fingerprint": "fp"})
+    part_path = transfers.prepareDownload("tx1", str(tmp_path / "movie.mkv"))
+    with open(part_path, "wb") as part_file:
+        part_file.write(b"partial")
+
+    transfers.resumeTransfer("tx1")
+
+    assert client._protocol.calls[-1] == ("resume", "tx1", 7, "fp")
 
 
 def test_receiver_ticket_prepares_destination_and_opens_transfer_socket(tmp_path):

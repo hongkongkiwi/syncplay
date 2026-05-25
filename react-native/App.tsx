@@ -450,7 +450,7 @@ export default function App() {
       }
       if (transfer.role === 'receiver') {
         openedTransferSocketsRef.current.set(transfer.transferId, transfer.token);
-        const sink = createExpoTransferSink(transfer.file?.name ?? transfer.transferId, transferDirectory ?? undefined);
+        const sink = createExpoTransferSink(transfer.transferId, transfer.file?.name ?? transfer.transferId, transferDirectory ?? undefined);
         connection.openTransferSocket(
           {
             transferId: transfer.transferId,
@@ -1269,7 +1269,7 @@ export default function App() {
                 </Pressable>
               ) : null}
               {item.status.startsWith('paused') ? (
-                <Pressable style={styles.userReadyButton} onPress={() => connection.resumeTransfer(item.transferId, item.transferred || item.offset)}>
+                <Pressable style={styles.userReadyButton} onPress={() => connection.resumeTransfer(item.transferId, item.transferred || item.offset, item.fingerprint)}>
                   <Play color="#d7e5ef" size={16} />
                 </Pressable>
               ) : null}

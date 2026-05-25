@@ -228,10 +228,14 @@ class SyncFactory(Factory):
                 self.fileTransfers.reject_transfer(watcher, decision.get("transferId"), decision.get("reason"))
         elif "pause" in payload:
             pause = payload["pause"]
-            self.fileTransfers.pause_transfer(watcher, pause.get("transferId"), pause.get("reason"))
+            session = self.fileTransfers.pause_transfer(watcher, pause.get("transferId"), pause.get("reason"))
+            if session:
+                self.transferRelay.pause(session.transfer_id)
         elif "resume" in payload:
             resume = payload["resume"]
-            self.fileTransfers.resume_transfer(watcher, resume.get("transferId"), resume.get("offset", 0), resume.get("fingerprint"))
+            session = self.fileTransfers.resume_transfer(watcher, resume.get("transferId"), resume.get("offset", 0), resume.get("fingerprint"))
+            if session and session.status == "approved":
+                self.transferRelay.resume(session.transfer_id)
         elif "cancel" in payload:
             cancel = payload["cancel"]
             self.fileTransfers.cancel_transfer(watcher, cancel.get("transferId"), cancel.get("reason"))

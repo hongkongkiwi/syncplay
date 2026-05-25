@@ -302,6 +302,7 @@ function reduceTransferMessage(state: SyncplayState, payload: NonNullable<Syncpl
           role: payload.ticket.role === 'sender' || payload.ticket.role === 'receiver' ? payload.ticket.role : null,
           status: 'approved',
           token: typeof payload.ticket.token === 'string' ? payload.ticket.token : null,
+          fingerprint: typeof payload.ticket.fingerprint === 'string' ? payload.ticket.fingerprint : previous?.fingerprint ?? null,
           file: isTicketFile(payload.ticket.file) ? payload.ticket.file : previous?.file ?? null,
           size: isTicketFile(payload.ticket.file) ? payload.ticket.file.size : previous?.size ?? null,
           offset: typeof payload.ticket.offset === 'number' ? payload.ticket.offset : previous?.offset ?? 0

@@ -7,6 +7,7 @@ from syncplay.filetransfer_wire import (
     TransferFrame,
     TransferFrameError,
     TransferSocketRelay,
+    TransferToken,
     decode_frame,
     encode_frame,
 )
@@ -83,9 +84,10 @@ def test_relay_pairs_sender_and_receiver_by_valid_token():
 
     relay.register_token("sender-token", "tx1", "sender")
     relay.register_token("receiver-token", "tx1", "receiver")
-    assert relay.connect("sender-token", sender) is None
+    assert relay.connect("sender-token", sender) == TransferToken("tx1", "sender")
 
-    pair = relay.connect("receiver-token", receiver)
+    assert relay.connect("receiver-token", receiver) == TransferToken("tx1", "receiver")
+    pair = relay.get_pair("tx1")
 
     assert pair.sender is sender
     assert pair.receiver is receiver

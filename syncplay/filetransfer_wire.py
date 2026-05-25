@@ -94,9 +94,7 @@ class TransferSocketRelay(object):
             raise TransferFrameError("invalid transfer role")
 
         self._pairs[ticket.transfer_id] = pair
-        if pair.sender and pair.receiver:
-            return pair
-        return None
+        return ticket
 
     def get_pair(self, transfer_id):
         return self._pairs.get(transfer_id)

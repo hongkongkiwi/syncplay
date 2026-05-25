@@ -183,14 +183,14 @@ describe('SyncplayConnection', () => {
     connection.requestTransfer('Aki', 10);
     connection.sendTransferDecision({ transferId: 'tx1', accepted: true, fingerprint: 'fp' });
     connection.pauseTransfer('tx1', 'receiver');
-    connection.resumeTransfer('tx1', 20);
+    connection.resumeTransfer('tx1', 20, 'fp');
     connection.cancelTransfer('tx1', 'receiver');
 
     expect(socket.write.mock.calls.map(call => JSON.parse(call[0]))).toEqual([
       { Transfer: { request: { source: 'Aki', offset: 10 } } },
       { Transfer: { decision: { transferId: 'tx1', accepted: true, fingerprint: 'fp' } } },
       { Transfer: { pause: { transferId: 'tx1', reason: 'receiver' } } },
-      { Transfer: { resume: { transferId: 'tx1', offset: 20 } } },
+      { Transfer: { resume: { transferId: 'tx1', offset: 20, fingerprint: 'fp' } } },
       { Transfer: { cancel: { transferId: 'tx1', reason: 'receiver' } } }
     ]);
   });

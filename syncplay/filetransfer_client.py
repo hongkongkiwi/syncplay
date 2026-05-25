@@ -121,7 +121,7 @@ class FileTransferClient(object):
         offset = 0
         if session and session.part_path and os.path.exists(session.part_path):
             offset = os.path.getsize(session.part_path)
-        self._client._protocol.sendTransferResume(transferId, offset)
+        self._client._protocol.sendTransferResume(transferId, offset, session.fingerprint if session else None)
         self._update_status(transferId, "downloading")
 
     def cancelTransfer(self, transferId):

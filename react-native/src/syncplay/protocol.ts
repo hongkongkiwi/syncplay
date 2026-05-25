@@ -38,7 +38,7 @@ export type TransferMessage = {
     | { request: TransferRequestPayload }
     | { decision: TransferDecisionPayload }
     | { pause: { transferId: string; reason: string } }
-    | { resume: { transferId: string; offset: number } }
+    | { resume: { transferId: string; offset: number; fingerprint?: string } }
     | { cancel: { transferId: string; reason: string } };
 };
 
@@ -291,13 +291,17 @@ export function buildTransferPauseMessage(transferId: string, reason: string): T
   };
 }
 
-export function buildTransferResumeMessage(transferId: string, offset: number): TransferMessage {
+export function buildTransferResumeMessage(transferId: string, offset: number, fingerprint?: string | null): TransferMessage {
+  const resume: { transferId: string; offset: number; fingerprint?: string } = {
+    transferId,
+    offset
+  };
+  if (fingerprint) {
+    resume.fingerprint = fingerprint;
+  }
   return {
     Transfer: {
-      resume: {
-        transferId,
-        offset
-      }
+      resume
     }
   };
 }

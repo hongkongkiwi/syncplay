@@ -201,6 +201,7 @@ describe('Syncplay app state', () => {
             transferId: 'tx1',
             role: 'receiver',
             token: 'secret',
+            fingerprint: 'fp',
             file: { name: 'movie.mkv', duration: 100, size: 123 },
             offset: 0
           }
@@ -211,6 +212,7 @@ describe('Syncplay app state', () => {
     expect(ticketed.transfers.tx1).toMatchObject({
       status: 'approved',
       role: 'receiver',
+      fingerprint: 'fp',
       file: { name: 'movie.mkv', size: 123 }
     });
 

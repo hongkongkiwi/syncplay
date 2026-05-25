@@ -35,6 +35,7 @@ export type TransferSession = {
   transferred: number;
   size: number | null;
   token?: string | null;
+  fingerprint?: string | null;
   offset: number;
   completedPath?: string | null;
 };

@@ -1,6 +1,6 @@
 # coding:utf8
 
-from syncplay.filetransfer_wire import TransferFrameError
+from syncplay.filetransfer_wire import TransferFrameError, TransferToken
 from syncplay.protocols import JSONCommandProtocol, SyncClientProtocol, SyncServerProtocol
 
 
@@ -71,13 +71,13 @@ def test_client_protocol_can_send_transfer_decision_and_controls():
 
     protocol.sendTransferDecision("tx1", True, fingerprint="fp", chunkSize=1024)
     protocol.sendTransferPause("tx1", "receiver")
-    protocol.sendTransferResume("tx1", 4096)
+    protocol.sendTransferResume("tx1", 4096, fingerprint="fp")
     protocol.sendTransferCancel("tx1", "receiver")
 
     assert sent == [
         {"Transfer": {"decision": {"transferId": "tx1", "accepted": True, "fingerprint": "fp", "chunkSize": 1024}}},
         {"Transfer": {"pause": {"transferId": "tx1", "reason": "receiver"}}},
-        {"Transfer": {"resume": {"transferId": "tx1", "offset": 4096}}},
+        {"Transfer": {"resume": {"transferId": "tx1", "offset": 4096, "fingerprint": "fp"}}},
         {"Transfer": {"cancel": {"transferId": "tx1", "reason": "receiver"}}},
     ]
 
@@ -126,6 +126,7 @@ def test_server_protocol_accepts_transfer_connect_without_login():
 
         def connect(self, token, transport):
             self.connected.append((token, transport))
+            return TransferToken("server-tx", "sender")
 
     factory = FakeFactory()
     factory.transferRelay = Relay()
@@ -137,7 +138,34 @@ def test_server_protocol_accepts_transfer_connect_without_login():
     protocol.handleMessages({"TransferConnect": {"transferId": "tx1", "token": "secret", "role": "receiver"}})
 
     assert factory.transferRelay.connected == [("secret", protocol.transport)]
+    assert protocol._transferId == "server-tx"
+    assert protocol._transferRole == "sender"
     assert raw_mode == [True]
+
+
+def test_transfer_connection_lost_removes_logged_watcher_even_after_bad_transfer_connect():
+    class Transport(object):
+        def __init__(self):
+            self.closed = False
+
+        def loseConnection(self):
+            self.closed = True
+
+    watcher = object()
+    factory = FakeFactory()
+    factory.removed = []
+    factory.removeWatcher = factory.removed.append
+    factory.transferRelay = type("Relay", (), {"connect": lambda self, token, transport: None})()
+    protocol = SyncServerProtocol(factory)
+    protocol.transport = Transport()
+    protocol._watcher = watcher
+    protocol._logged = True
+
+    protocol.handleTransferConnect({"transferId": "tx1", "token": "secret", "role": "receiver"})
+    protocol.connectionLost(None)
+
+    assert protocol.transport.closed is True
+    assert factory.removed == [watcher]
 
 
 def test_bad_transfer_connect_token_closes_socket_without_crashing():

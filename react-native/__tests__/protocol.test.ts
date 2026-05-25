@@ -217,6 +217,9 @@ describe('Syncplay protocol helpers', () => {
     expect(buildTransferResumeMessage('tx1', 2048)).toEqual({
       Transfer: { resume: { transferId: 'tx1', offset: 2048 } }
     });
+    expect(buildTransferResumeMessage('tx1', 2048, 'fp')).toEqual({
+      Transfer: { resume: { transferId: 'tx1', offset: 2048, fingerprint: 'fp' } }
+    });
     expect(buildTransferCancelMessage('tx1', 'sender')).toEqual({
       Transfer: { cancel: { transferId: 'tx1', reason: 'sender' } }
     });

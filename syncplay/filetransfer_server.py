@@ -7,9 +7,9 @@ from collections import namedtuple
 from syncplay.filetransfer import (
     TransferSession,
     TransferStatus,
-    is_shareable_loaded_file,
     normalize_transfer_filename,
     validate_resume_offset,
+    validate_transfer_request,
 )
 
 
@@ -57,35 +57,31 @@ class TransferManager(object):
         if self._active_count_for(source.getName()) >= self.config.max_per_user or self._active_count_for(receiver.getName()) >= self.config.max_per_user:
             self._send_error(receiver, None, "too-many-user-transfers", "Too many file transfers are active for this user.")
             return None
-        if self._room_name(source) != self._room_name(receiver):
-            self._send_error(receiver, None, "not-same-room", "Source and receiver must be in the same room.")
-            return None
         file_ = source.getFile()
-        if not self._is_shareable_server_file(file_):
-            self._send_error(receiver, None, "file-not-shareable", "Source file is not shareable.")
-            return None
-
-        size = int(file_["size"])
-        if size > self.config.max_size:
-            self._send_error(receiver, None, "file-too-large", "File is larger than the server transfer limit.")
+        validation_file = dict(file_ or {}, path="/server/metadata-check")
+        try:
+            request = validate_transfer_request(source, receiver, validation_file, self.config)
+        except Exception as error:
+            code, message = self._validation_error(str(error))
+            self._send_error(receiver, None, code, message)
             return None
 
         try:
             offset = int(payload.get("offset") or 0)
-            validate_resume_offset(offset, size)
+            validate_resume_offset(offset, request.size)
         except Exception:
             self._send_error(receiver, None, "bad-offset", "Transfer offset is invalid.")
             return None
 
-        transfer_id = payload.get("transferId") or uuid.uuid4().hex
+        transfer_id = uuid.uuid4().hex
         session = TransferSession(
             transfer_id=transfer_id,
-            source=source.getName(),
-            receiver=receiver.getName(),
-            room=self._room_name(receiver),
-            filename=normalize_transfer_filename(file_["name"]),
+            source=request.source,
+            receiver=request.receiver,
+            room=request.room,
+            filename=request.filename,
             duration=file_.get("duration"),
-            size=size,
+            size=request.size,
             chunk_size=self.config.chunk_size,
             offset=offset,
             fingerprint=None,
@@ -259,12 +255,12 @@ class TransferManager(object):
         if watcher:
             watcher.sendTransferError(transfer_id, code, message)
 
-    def _is_shareable_server_file(self, file_):
-        if not file_:
-            return False
-        if is_shareable_loaded_file(dict(file_, path="/server/metadata-check")):
-            return True
-        return False
+    def _validation_error(self, message):
+        if "same room" in message:
+            return "not-same-room", "Source and receiver must be in the same room."
+        if "larger" in message:
+            return "file-too-large", "File is larger than the server transfer limit."
+        return "file-not-shareable", "Source file is not shareable."
 
     def _public_file(self, file_):
         return {

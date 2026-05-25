@@ -73,6 +73,8 @@ def _read_value(container, key):
         return None
     if isinstance(container, dict):
         return container.get(key)
+    if key == "username" and hasattr(container, "getName"):
+        return container.getName()
     return getattr(container, key, None)
 
 
@@ -80,6 +82,10 @@ def _read_room(user):
     room = _read_value(user, "room")
     if isinstance(room, dict):
         return room.get("name")
+    if room is None and hasattr(user, "getRoom"):
+        room = user.getRoom()
+    if hasattr(room, "getName"):
+        return room.getName()
     return room
 
 
@@ -164,6 +170,8 @@ def validate_transfer_request(source, receiver, file_, server_limits):
     except (TypeError, ValueError):
         raise TransferValidationError("file size must be an integer")
     max_size = _read_value(server_limits, "maxSize")
+    if max_size is None:
+        max_size = _read_value(server_limits, "max_size")
     if max_size is not None:
         try:
             max_size = int(max_size)

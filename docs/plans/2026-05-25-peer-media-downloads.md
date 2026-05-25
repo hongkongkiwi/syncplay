@@ -1,7 +1,5 @@
 # Peer Media Downloads Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
-
 **Goal:** Let desktop and mobile users request a download of the currently loaded media from a specific room user, with consent, pause/resume, reconnect, and clear handling when either side leaves or changes media.
 
 **Architecture:** Add file-transfer as an opt-in server feature, separate from playback sync. The Syncplay server brokers transfer sessions and relays bytes over a dedicated length-prefixed transfer connection, while the existing JSON control connection carries only offers, consent, progress, cancel, and resume state.

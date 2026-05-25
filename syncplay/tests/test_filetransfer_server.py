@@ -3,6 +3,7 @@
 import pytest
 
 from syncplay.filetransfer_server import TransferManager, TransferServerConfig
+from syncplay.server import SyncFactory
 
 
 class Room(object):
@@ -70,7 +71,7 @@ def test_request_rejected_when_server_feature_disabled():
 def test_request_uses_server_side_source_file_metadata():
     receiver = Watcher("receiver")
     source = Watcher("source", file_=media("real.mkv", 2048))
-    transfers = manager(watchers=[receiver, source])
+    transfers = TransferManager(TransferServerConfig(enabled=True, max_per_user=2), [receiver, source])
 
     session = transfers.request_transfer(
         receiver,
@@ -87,6 +88,20 @@ def test_request_uses_server_side_source_file_metadata():
     assert session.filename == "real.mkv"
     assert session.size == 2048
     assert source.offers[0]["file"]["name"] == "real.mkv"
+
+
+def test_request_ignores_client_supplied_transfer_id():
+    receiver = Watcher("receiver")
+    source = Watcher("source", file_=media())
+    transfers = TransferManager(TransferServerConfig(enabled=True, max_per_user=2), [receiver, source])
+
+    first = transfers.request_transfer(receiver, {"source": "source", "transferId": "client-id"})
+    second = transfers.request_transfer(receiver, {"source": "source", "transferId": first.transfer_id})
+
+    assert first.transfer_id != "client-id"
+    assert second.transfer_id != first.transfer_id
+    assert transfers.get_session(first.transfer_id) is first
+    assert transfers.get_session(second.transfer_id) is second
 
 
 def test_request_rejected_if_source_and_receiver_are_not_in_same_room():
@@ -225,3 +240,31 @@ def test_cleanup_expired_sessions_removes_tokens_and_session():
     transfers.resume_transfer(receiver, session.transfer_id, offset="bad", fingerprint="fp")
 
     assert receiver.errors[-1]["code"] == "bad-offset"
+
+
+def test_factory_pause_and_resume_updates_transfer_relay():
+    class Relay(object):
+        def __init__(self):
+            self.paused = []
+            self.resumed = []
+
+        def pause(self, transfer_id):
+            self.paused.append(transfer_id)
+
+        def resume(self, transfer_id):
+            self.resumed.append(transfer_id)
+
+    receiver = Watcher("receiver")
+    source = Watcher("source", file_=media())
+    transfers = manager(watchers=[receiver, source])
+    session = transfers.request_transfer(receiver, {"source": "source"})
+    transfers.accept_transfer(source, session.transfer_id, fingerprint="fp")
+    factory = type("Factory", (), {})()
+    factory.fileTransfers = transfers
+    factory.transferRelay = Relay()
+
+    SyncFactory.handleTransfer(factory, receiver, {"pause": {"transferId": session.transfer_id, "reason": "receiver"}})
+    SyncFactory.handleTransfer(factory, receiver, {"resume": {"transferId": session.transfer_id, "offset": 0, "fingerprint": "fp"}})
+
+    assert factory.transferRelay.paused == [session.transfer_id]
+    assert factory.transferRelay.resumed == [session.transfer_id]
