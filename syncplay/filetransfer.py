@@ -32,7 +32,7 @@ class TransferRole(object):
 
 TransferRequest = namedtuple(
     "TransferRequest",
-    ["source", "receiver", "room", "filename", "size"],
+    ["source", "receiver", "room", "filename", "size", "local_path"],
 )
 TransferDecision = namedtuple(
     "TransferDecision",
@@ -88,13 +88,34 @@ def normalize_transfer_filename(name):
     return ntpath.basename(posixpath.basename(name))
 
 
+def get_transfer_local_path(file_):
+    path = (
+        _read_value(file_, "path")
+        or _read_value(file_, "localPath")
+        or _read_value(file_, "uri")
+    )
+    if not path:
+        return None
+    path = str(path).strip()
+    return path or None
+
+
+def _is_stream_url(value):
+    return bool(value and str(value).strip().lower().startswith(_STREAM_PREFIXES))
+
+
 def is_shareable_loaded_file(file_):
     filename = _read_value(file_, "name")
     size = _read_value(file_, "size")
     normalized = normalize_transfer_filename(filename)
     if not normalized:
         return False
-    if str(filename).strip().lower().startswith(_STREAM_PREFIXES):
+    if normalized.startswith("."):
+        return False
+    if _is_stream_url(filename):
+        return False
+    local_path = get_transfer_local_path(file_)
+    if not local_path or _is_stream_url(local_path):
         return False
     if size is None:
         return False
@@ -128,10 +149,18 @@ def validate_transfer_request(source, receiver, file_, server_limits):
     if not is_shareable_loaded_file(file_):
         raise TransferValidationError("loaded file is not shareable")
 
-    size = int(_read_value(file_, "size"))
+    try:
+        size = int(_read_value(file_, "size"))
+    except (TypeError, ValueError):
+        raise TransferValidationError("file size must be an integer")
     max_size = _read_value(server_limits, "maxSize")
-    if max_size is not None and size > int(max_size):
-        raise TransferValidationError("file is larger than the server transfer limit")
+    if max_size is not None:
+        try:
+            max_size = int(max_size)
+        except (TypeError, ValueError):
+            raise TransferValidationError("server transfer limit must be an integer")
+        if size > max_size:
+            raise TransferValidationError("file is larger than the server transfer limit")
 
     return TransferRequest(
         source=source_name,
@@ -139,4 +168,5 @@ def validate_transfer_request(source, receiver, file_, server_limits):
         room=source_room,
         filename=normalize_transfer_filename(_read_value(file_, "name")),
         size=size,
+        local_path=get_transfer_local_path(file_),
     )

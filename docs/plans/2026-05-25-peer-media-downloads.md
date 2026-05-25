@@ -76,22 +76,24 @@ Advertise features:
 }
 ```
 
-Control messages on the existing JSON protocol:
+Control messages on the existing JSON protocol.
+
+Receiver requests are intentionally small. The receiver may name the source user and resume offset, but must not supply room, receiver username, filename, size, or fingerprint. The server derives those values from the authenticated receiver connection and the source watcher’s currently loaded media so a receiver cannot spoof file metadata.
 
 ```json
 {"Transfer": {"request": {
   "transferId": "uuid",
   "source": "Aki",
-  "receiver": "Mobile",
-  "room": "default",
-  "file": {"name": "movie.mkv", "duration": 7200, "size": 1234567890},
   "offset": 0
 }}}
 ```
 
+The server-created offer carries sanitized media metadata:
+
 ```json
 {"Transfer": {"offer": {
   "transferId": "uuid",
+  "source": "Aki",
   "receiver": "Mobile",
   "file": {"name": "movie.mkv", "duration": 7200, "size": 1234567890}
 }}}
@@ -187,6 +189,7 @@ For files under 2 MiB, hash the whole file. Store the fingerprint in transfer me
 - On completion, rename to final filename only after size and fingerprint checks pass.
 - Never overwrite an existing file without user confirmation.
 - Never expose absolute sender paths to receiver or server logs.
+- Keep local path/URI data sender-private. The server can know that a sender has a readable local file, but receiver-visible protocol messages only carry sanitized filename, duration, size, and fingerprint data.
 - Do not store server password, transfer tokens, or local file paths in chat logs.
 
 ---
@@ -205,7 +208,10 @@ Test cases:
 - missing source or receiver fails
 - request from a different room fails
 - stream URL file fails
+- hidden filename fails
+- missing local path fails
 - size above server limit fails
+- bad server size limit fails with validation error
 - resume offset must be between `0` and file size
 
 **Step 2: Run test to verify failure**
@@ -230,6 +236,7 @@ Add:
 - `validate_transfer_request(source, receiver, file, server_limits)`
 - `normalize_transfer_filename(name)`
 - `is_shareable_loaded_file(file)`
+- `get_transfer_local_path(file)`
 
 **Step 4: Run test to verify pass**
 
@@ -262,11 +269,13 @@ Desktop tests:
 
 - `JSONCommandProtocol` routes `Transfer` to `handleTransfer`
 - client protocol can send request, decision, pause, resume, cancel
+- transfer request builder sends only source and offset, not receiver, room, filename, size, or local path
 - unknown transfer subcommand returns a protocol error without dropping old clients for unrelated messages
 
 Mobile tests:
 
 - builds transfer request
+- transfer request includes only source and offset
 - builds transfer decision
 - builds pause/resume/cancel messages
 - parses transfer progress and errors
@@ -288,7 +297,7 @@ Desktop:
 
 - Add `Transfer` to `JSONCommandProtocol.handleMessages`.
 - Add `handleTransfer` stubs to client and server protocols.
-- Add sender methods on `SyncClientProtocol`: `sendTransferRequest`, `sendTransferDecision`, `sendTransferPause`, `sendTransferResume`, `sendTransferCancel`.
+- Add sender methods on `SyncClientProtocol`: `sendTransferRequest(sourceUsername, offset=0)`, `sendTransferDecision`, `sendTransferPause`, `sendTransferResume`, `sendTransferCancel`.
 - Add server protocol sender methods for `offer`, `ticket`, `progress`, `error`.
 
 Mobile:
@@ -322,6 +331,7 @@ Test cases:
 
 - request is rejected when server feature disabled
 - request is rejected if source and receiver are not in the same room
+- request ignores receiver-supplied file, room, and size if an old or malicious client sends them
 - request creates pending session and sends offer to source
 - accept sends transfer tickets to both clients
 - cancel notifies both sides and removes session

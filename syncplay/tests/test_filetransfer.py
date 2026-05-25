@@ -15,8 +15,18 @@ def user(username, room):
     return {"username": username, "room": room}
 
 
-def loaded_file(name="Movie.mkv", size=1024):
-    return {"name": name, "duration": 60.0, "size": size}
+_DEFAULT_PATH = object()
+
+
+def loaded_file(name="Movie.mkv", size=1024, path=_DEFAULT_PATH):
+    if path is _DEFAULT_PATH:
+        path = "/media/Movie.mkv"
+    return {
+        "name": name,
+        "duration": 60.0,
+        "size": size,
+        "path": path,
+    }
 
 
 def server_limits(max_size=2048):
@@ -36,6 +46,7 @@ def test_valid_transfer_request_returns_normalized_metadata():
     assert request.room == "room-a"
     assert request.filename == "Movie.mkv"
     assert request.size == 1024
+    assert request.local_path == "/media/Movie.mkv"
 
 
 @pytest.mark.parametrize(
@@ -91,6 +102,36 @@ def test_size_above_server_limit_fails():
             user("receiver", "room-a"),
             loaded_file(size=4096),
             server_limits(max_size=1024),
+        )
+
+
+@pytest.mark.parametrize(
+    "file_",
+    [
+        loaded_file(".hidden.mkv"),
+        loaded_file(path=""),
+        loaded_file(path=None),
+    ],
+)
+def test_hidden_names_and_missing_local_paths_are_not_shareable(file_):
+    assert is_shareable_loaded_file(file_) is False
+    with pytest.raises(TransferValidationError):
+        validate_transfer_request(
+            user("sender", "room-a"),
+            user("receiver", "room-a"),
+            file_,
+            server_limits(),
+        )
+
+
+@pytest.mark.parametrize("max_size", ["bad", object()])
+def test_invalid_server_limit_fails_with_validation_error(max_size):
+    with pytest.raises(TransferValidationError):
+        validate_transfer_request(
+            user("sender", "room-a"),
+            user("receiver", "room-a"),
+            loaded_file(),
+            server_limits(max_size=max_size),
         )
 
 
