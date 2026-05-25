@@ -64,6 +64,7 @@ import {
   assetToMediaLibraryItem,
   formatBytes,
   formatTime,
+  getTransferDisplay,
   isManagedRoomName,
   shouldAnnounceMediaOnConnection,
   shuffleFiles,
@@ -465,9 +466,9 @@ export default function App() {
           },
           undefined,
           undefined,
-          _error => {
+          error => {
             openedTransferSocketsRef.current.delete(transfer.transferId);
-            dispatch({ type: 'transfer-failed', transferId: transfer.transferId });
+            dispatch({ type: 'transfer-failed', transferId: transfer.transferId, error: error.message });
           }
         );
       } else if (transfer.role === 'sender') {
@@ -487,9 +488,9 @@ export default function App() {
           undefined,
           createExpoTransferSource(sourceItem.uri),
           undefined,
-          _error => {
+          error => {
             openedTransferSocketsRef.current.delete(transfer.transferId);
-            dispatch({ type: 'transfer-failed', transferId: transfer.transferId });
+            dispatch({ type: 'transfer-failed', transferId: transfer.transferId, error: error.message });
           }
         );
       }
@@ -872,8 +873,15 @@ export default function App() {
       <View style={styles.panel}>
         <View style={styles.panelTitleRow}>
           <Plug color="#7fd2ff" size={18} />
-          <Text style={styles.panelTitle}>Server</Text>
+          <Text style={styles.panelTitle}>Connection</Text>
         </View>
+        <View style={styles.connectionSummary}>
+          <SummaryItem label="Server" value={selectedServerText || form.serverAddress || 'host:port'} />
+          <SummaryItem label="Username" value={form.username.trim() || 'Mobile'} />
+          <SummaryItem label="Room" value={form.room.trim() || 'default'} />
+          <SummaryItem label="Transport" value={form.useTls ? 'TLS' : 'TCP'} />
+        </View>
+        <Text style={styles.label}>Public servers</Text>
         <View style={styles.serverOptionGrid}>
           {PUBLIC_SERVER_OPTIONS.map(option => {
             const selected = selectedServerText === option.address;
@@ -891,21 +899,21 @@ export default function App() {
           })}
         </View>
         <Field
-          label="Manual server"
+          label="Server address"
           value={form.serverAddress}
           onChangeText={value => updateForm('serverAddress', value)}
           autoCapitalize="none"
         />
         <View style={styles.gridTwo}>
           <Field
-            label="Name"
+            label="Username"
             value={form.username}
             onChangeText={value => updateForm('username', value)}
           />
           <Field label="Room" value={form.room} onChangeText={value => updateForm('room', value)} />
         </View>
         <Field
-          label="Password"
+          label="Server password"
           value={form.password}
           onChangeText={value => updateForm('password', value)}
           secureTextEntry
@@ -930,7 +938,7 @@ export default function App() {
         <View style={styles.divider} />
         <View style={styles.panelTitleRow}>
           <MonitorPlay color="#7fd2ff" size={18} />
-          <Text style={styles.panelTitle}>Player</Text>
+          <Text style={styles.panelTitle}>Media Player</Text>
         </View>
         <View style={styles.serverOptionGrid}>
           <View style={[styles.serverOption, styles.serverOptionSelected]}>
@@ -1245,62 +1253,109 @@ export default function App() {
           keyExtractor={item => item.transferId}
           scrollEnabled={false}
           ListEmptyComponent={<Text style={styles.mutedText}>No transfers yet.</Text>}
-          renderItem={({ item }) => (
-            <View style={styles.mediaLibraryRow}>
-              <Download color="#8fa3b8" size={16} />
-              <View style={styles.userMain}>
-                <Text style={styles.playlistText} numberOfLines={1}>
-                  {item.file?.name ?? item.transferId}
-                </Text>
-                <Text style={styles.smallText}>
-                  {item.status} {item.size ? `· ${formatBytes(item.transferred)} / ${formatBytes(item.size)}` : ''}
-                </Text>
-                {item.status === 'complete' && item.completedPath ? (
-                  <Text style={styles.smallText} numberOfLines={1}>
-                    Saved to {item.completedPath}
-                  </Text>
+          renderItem={({ item }) => {
+            const display = getTransferDisplay(item);
+            const retryOffset = Math.max(item.transferred, item.offset);
+            const canResume = item.status.startsWith('paused') && display.canRetry;
+            const canRetry = item.status === 'failed' && display.canRetry;
+            const canCancel = !['incoming-request', 'complete', 'cancelled'].includes(item.status);
+
+            return (
+              <View style={styles.transferRow}>
+                <View style={styles.transferHeader}>
+                  <Download color={item.status === 'failed' ? colors.error : colors.accent} size={17} />
+                  <View style={styles.transferTitleBlock}>
+                    <Text style={styles.playlistText} numberOfLines={1}>
+                      {item.file?.name ?? item.transferId}
+                    </Text>
+                    <Text style={styles.transferDetail} numberOfLines={2}>
+                      {display.detail}
+                    </Text>
+                  </View>
+                  <View style={[styles.transferStatusBadge, item.status === 'failed' && styles.transferStatusBadgeError]}>
+                    <Text style={[styles.transferStatusText, item.status === 'failed' && styles.transferStatusTextError]}>
+                      {display.label}
+                    </Text>
+                  </View>
+                </View>
+                {item.status !== 'incoming-request' ? (
+                  <View style={styles.transferProgressTrack}>
+                    <View style={[styles.transferProgressFill, { width: `${Math.round(display.progress * 100)}%` }]} />
+                  </View>
                 ) : null}
+                <View style={styles.transferFooter}>
+                  <Text style={styles.smallText}>
+                    {item.role === 'sender' ? 'Sending' : 'Receiving'} {item.size ? `· ${formatBytes(item.size)}` : ''}
+                  </Text>
+                  <View style={styles.transferActions}>
+                    {item.status === 'downloading' ? (
+                      <Pressable
+                        style={styles.transferIconButton}
+                        accessibilityLabel="Pause transfer"
+                        onPress={() => connection.pauseTransfer(item.transferId, item.role ?? 'receiver')}
+                      >
+                        <Pause color="#d7e5ef" size={16} />
+                      </Pressable>
+                    ) : null}
+                    {item.status === 'incoming-request' ? (
+                      <Pressable
+                        style={styles.transferIconButton}
+                        accessibilityLabel="Accept transfer"
+                        onPress={() => {
+                          const sourceItem = findMediaByName(mediaLibrary, item.file?.name ?? state.media?.name);
+                          if (sourceItem) {
+                            connection.sendTransferDecision({ transferId: item.transferId, accepted: true });
+                          } else {
+                            connection.sendTransferDecision({ transferId: item.transferId, accepted: false, reason: 'missing-local-media' });
+                          }
+                        }}
+                      >
+                        <Check color="#d7e5ef" size={16} />
+                      </Pressable>
+                    ) : null}
+                    {item.status === 'incoming-request' ? (
+                      <Pressable
+                        style={styles.transferIconButton}
+                        accessibilityLabel="Reject transfer"
+                        onPress={() => connection.sendTransferDecision({ transferId: item.transferId, accepted: false, reason: 'rejected' })}
+                      >
+                        <Trash2 color="#d7e5ef" size={16} />
+                      </Pressable>
+                    ) : null}
+                    {canResume ? (
+                      <Pressable
+                        style={styles.transferActionButton}
+                        accessibilityLabel="Resume transfer"
+                        onPress={() => connection.resumeTransfer(item.transferId, retryOffset, item.fingerprint)}
+                      >
+                        <Play color="#d7e5ef" size={15} />
+                        <Text style={styles.transferActionText}>Resume</Text>
+                      </Pressable>
+                    ) : null}
+                    {canRetry ? (
+                      <Pressable
+                        style={styles.transferActionButton}
+                        accessibilityLabel="Retry transfer"
+                        onPress={() => dispatch({ type: 'transfer-retry', transferId: item.transferId })}
+                      >
+                        <Undo2 color="#d7e5ef" size={15} />
+                        <Text style={styles.transferActionText}>Retry</Text>
+                      </Pressable>
+                    ) : null}
+                    {canCancel ? (
+                      <Pressable
+                        style={styles.transferIconButton}
+                        accessibilityLabel="Cancel transfer"
+                        onPress={() => connection.cancelTransfer(item.transferId, item.role ?? 'receiver')}
+                      >
+                        <Trash2 color="#d7e5ef" size={16} />
+                      </Pressable>
+                    ) : null}
+                  </View>
+                </View>
               </View>
-              {item.status === 'downloading' ? (
-                <Pressable style={styles.userReadyButton} onPress={() => connection.pauseTransfer(item.transferId, item.role ?? 'receiver')}>
-                  <Pause color="#d7e5ef" size={16} />
-                </Pressable>
-              ) : null}
-              {item.status === 'incoming-request' ? (
-                <Pressable
-                  style={styles.userReadyButton}
-                  onPress={() => {
-                    const sourceItem = findMediaByName(mediaLibrary, item.file?.name ?? state.media?.name);
-                    if (sourceItem) {
-                      connection.sendTransferDecision({ transferId: item.transferId, accepted: true });
-                    } else {
-                      connection.sendTransferDecision({ transferId: item.transferId, accepted: false, reason: 'missing-local-media' });
-                    }
-                  }}
-                >
-                  <Check color="#d7e5ef" size={16} />
-                </Pressable>
-              ) : null}
-              {item.status === 'incoming-request' ? (
-                <Pressable
-                  style={styles.userReadyButton}
-                  onPress={() => connection.sendTransferDecision({ transferId: item.transferId, accepted: false, reason: 'rejected' })}
-                >
-                  <Trash2 color="#d7e5ef" size={16} />
-                </Pressable>
-              ) : null}
-              {item.status.startsWith('paused') ? (
-                <Pressable style={styles.userReadyButton} onPress={() => connection.resumeTransfer(item.transferId, item.transferred || item.offset, item.fingerprint)}>
-                  <Play color="#d7e5ef" size={16} />
-                </Pressable>
-              ) : null}
-              {item.status !== 'incoming-request' ? (
-                <Pressable style={styles.userReadyButton} onPress={() => connection.cancelTransfer(item.transferId, item.role ?? 'receiver')}>
-                  <Trash2 color="#d7e5ef" size={16} />
-                </Pressable>
-              ) : null}
-            </View>
-          )}
+            );
+          }}
         />
       </View>
     ) : activeScreen === 'chat' ? (
@@ -1334,7 +1389,7 @@ export default function App() {
       <View style={styles.panel}>
         <View style={styles.panelTitleRow}>
           <SettingsIcon color="#7fd2ff" size={18} />
-          <Text style={styles.panelTitle}>Session</Text>
+          <Text style={styles.panelTitle}>Client Options</Text>
         </View>
         <View style={styles.settingRow}>
           <View style={styles.settingText}>
@@ -1394,8 +1449,10 @@ export default function App() {
         </View>
         <View style={styles.settingRow}>
           <View style={styles.settingText}>
-            <Text style={styles.userName}>Connection</Text>
-            <Text style={styles.smallText}>{form.serverAddress} · {state.profile.username}</Text>
+            <Text style={styles.userName}>Current connection</Text>
+            <Text style={styles.smallText}>
+              {form.serverAddress} · {state.profile.username} · {state.profile.room}
+            </Text>
           </View>
           <ActionButton
             label={connected ? 'Disconnect' : 'Connect'}
@@ -1483,6 +1540,17 @@ function ActionButton({ label, icon: Icon, tone, onPress, disabled }: ActionButt
       <Icon color={tone === 'primary' ? '#061015' : '#d7e5ef'} size={17} />
       <Text style={[styles.actionText, tone === 'primary' && styles.primaryActionText]}>{label}</Text>
     </Pressable>
+  );
+}
+
+function SummaryItem({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.summaryItem}>
+      <Text style={styles.summaryLabel}>{label}</Text>
+      <Text style={styles.summaryValue} numberOfLines={1}>
+        {value}
+      </Text>
+    </View>
   );
 }
 
@@ -1748,6 +1816,34 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     flex: 1
   },
+  connectionSummary: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8
+  },
+  summaryItem: {
+    flexGrow: 1,
+    flexBasis: '47%',
+    minHeight: 54,
+    borderRadius: 8,
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+    justifyContent: 'center',
+    backgroundColor: colors.bg,
+    borderColor: colors.line,
+    borderWidth: 1
+  },
+  summaryLabel: {
+    color: colors.muted,
+    fontSize: 11,
+    fontWeight: '800'
+  },
+  summaryValue: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '800',
+    marginTop: 4
+  },
   countText: {
     color: colors.muted,
     fontSize: 13
@@ -1971,6 +2067,93 @@ const styles = StyleSheet.create({
     backgroundColor: colors.panelSoft,
     borderColor: colors.line,
     borderWidth: 1
+  },
+  transferRow: {
+    gap: 9,
+    paddingVertical: 11,
+    borderTopColor: colors.line,
+    borderTopWidth: StyleSheet.hairlineWidth
+  },
+  transferHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10
+  },
+  transferTitleBlock: {
+    flex: 1,
+    minWidth: 0
+  },
+  transferDetail: {
+    color: colors.muted,
+    fontSize: 12,
+    marginTop: 4,
+    lineHeight: 16
+  },
+  transferStatusBadge: {
+    borderRadius: 8,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    backgroundColor: '#1c2830'
+  },
+  transferStatusBadgeError: {
+    backgroundColor: '#3b2527'
+  },
+  transferStatusText: {
+    color: colors.accent,
+    fontSize: 11,
+    fontWeight: '800'
+  },
+  transferStatusTextError: {
+    color: colors.error
+  },
+  transferProgressTrack: {
+    height: 6,
+    borderRadius: 3,
+    overflow: 'hidden',
+    backgroundColor: colors.bg
+  },
+  transferProgressFill: {
+    height: '100%',
+    borderRadius: 3,
+    backgroundColor: colors.accent
+  },
+  transferFooter: {
+    minHeight: 34,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10
+  },
+  transferActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8
+  },
+  transferIconButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.panelSoft,
+    borderColor: colors.line,
+    borderWidth: 1
+  },
+  transferActionButton: {
+    minHeight: 34,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: colors.panelSoft,
+    borderColor: colors.line,
+    borderWidth: 1
+  },
+  transferActionText: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: '800'
   },
   playlistRow: {
     minHeight: 40,

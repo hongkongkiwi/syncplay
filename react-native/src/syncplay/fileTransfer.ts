@@ -38,6 +38,8 @@ export type TransferSession = {
   fingerprint?: string | null;
   offset: number;
   completedPath?: string | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
 };
 
 export function createIncomingTransfer(payload: Record<string, unknown>): TransferSession | null {

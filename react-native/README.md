@@ -59,7 +59,7 @@ npm run ios
 ## Watch Flow
 
 1. Pick a public server or enter `host:port` manually.
-2. Enter a display name and room. Syncplay does not use accounts or registration.
+2. Enter a username and room.
 3. Leave the player as the native synced mobile player.
 4. Add media files or a media folder to the search list. Folder scanning is deeper on Android. iOS folder access can be temporary, so keep picked files available as a fallback.
 5. Connect to the server.
@@ -74,12 +74,12 @@ The mobile app matches remote playlist entries and other users' files by filenam
 
 Stream URLs are opened directly from the playlist or manual URL field.
 
-## Accounts
+## Connection Model
 
-There are no Syncplay user accounts in this client. The server connection uses:
+The mobile client follows the desktop app: a connection has a server, username, room, and optional passwords. The app saves local preferences such as server, room, media search list, and options.
 
 - server address
-- display name
+- username
 - room name
 - optional server password
 - optional managed-room operator password
@@ -94,11 +94,11 @@ There are no Syncplay user accounts in this client. The server connection uses:
 
 ## Screens
 
-- Connect: server, identity, room, password, player, and media search setup.
+- Connection: server, username, room, password, player, and media search setup.
 - Watch: video player, transport controls, typed seek, stream URL, file picker, media search list, and playback status.
 - Room: room members, room joining, saved rooms, shared playlist, managed rooms, and ready controls.
 - Chat: server messages and room chat.
-- Settings: sync correction hold, reconnect, automatic file switching, background playback, and connection actions.
+- Options: sync correction hold, reconnect, automatic file switching, background playback, and connection actions.
 
 ## After Native Dependency Changes
 

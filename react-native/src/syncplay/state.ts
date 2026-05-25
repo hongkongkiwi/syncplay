@@ -67,7 +67,8 @@ export type SyncplayAction =
   | { type: 'media-updated'; media: SyncplayFile | null }
   | { type: 'local-playback-updated'; position: number; paused: boolean }
   | { type: 'transfer-completed'; transferId: string; completedPath: string }
-  | { type: 'transfer-failed'; transferId: string }
+  | { type: 'transfer-failed'; transferId: string; error?: string | null }
+  | { type: 'transfer-retry'; transferId: string }
   | { type: 'server-message'; message: SyncplayServerMessage };
 
 let nextMessageId = 0;
@@ -171,7 +172,27 @@ export function syncplayReducer(state: SyncplayState, action: SyncplayAction): S
           ...state.transfers,
           [action.transferId]: {
             ...previous,
-            status: 'failed'
+            status: 'failed',
+            errorMessage: action.error ?? previous.errorMessage ?? 'Transfer failed.'
+          }
+        }
+      };
+    }
+    case 'transfer-retry': {
+      const previous = state.transfers[action.transferId];
+      if (!previous?.token || previous.status === 'complete' || previous.status === 'cancelled') {
+        return state;
+      }
+      return {
+        ...state,
+        transfers: {
+          ...state.transfers,
+          [action.transferId]: {
+            ...previous,
+            status: 'approved',
+            offset: Math.max(previous.offset, previous.transferred),
+            errorCode: null,
+            errorMessage: null
           }
         }
       };
@@ -335,7 +356,9 @@ function reduceTransferMessage(state: SyncplayState, payload: NonNullable<Syncpl
           size: payload.progress.size,
           completedPath: payload.progress.status === 'complete'
             ? payload.progress.destinationPath ?? previous?.completedPath ?? null
-            : previous?.completedPath ?? null
+            : previous?.completedPath ?? null,
+          errorCode: null,
+          errorMessage: null
         }
       }
     };
@@ -362,7 +385,9 @@ function reduceTransferMessage(state: SyncplayState, payload: NonNullable<Syncpl
             size: null,
             offset: 0
           }),
-          status: statusFromTransferError(payload.error.code)
+          status: statusFromTransferError(payload.error.code),
+          errorCode: payload.error.code,
+          errorMessage: payload.error.message
         }
       }
     };
@@ -419,7 +444,9 @@ function reduceTransferControl(
           offset: 0
         }),
         status,
-        offset: typeof offset === 'number' ? offset : previous?.offset ?? 0
+        offset: typeof offset === 'number' ? offset : previous?.offset ?? 0,
+        errorCode: status === 'downloading' ? null : previous?.errorCode ?? null,
+        errorMessage: status === 'downloading' ? null : previous?.errorMessage ?? null
       }
     }
   };

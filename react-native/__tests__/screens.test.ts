@@ -18,11 +18,11 @@ describe('mobile screen registry', () => {
   });
 
   it('has user-facing titles for each screen', () => {
-    expect(getScreenTitle('connect')).toBe('Connect');
+    expect(getScreenTitle('connect')).toBe('Connection');
     expect(getScreenTitle('watch')).toBe('Watch');
     expect(getScreenTitle('room')).toBe('Room');
     expect(getScreenTitle('transfers')).toBe('Transfers');
     expect(getScreenTitle('chat')).toBe('Chat');
-    expect(getScreenTitle('settings')).toBe('Settings');
+    expect(getScreenTitle('settings')).toBe('Options');
   });
 });

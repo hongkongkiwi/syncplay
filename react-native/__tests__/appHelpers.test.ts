@@ -2,6 +2,7 @@ import {
   assetToMediaLibraryItem,
   formatBytes,
   formatTime,
+  getTransferDisplay,
   isManagedRoomName,
   isStreamUri,
   shouldAnnounceMediaOnConnection,
@@ -55,6 +56,58 @@ describe('app helper functions', () => {
     expect(statusLabel('disconnected')).toBe('Disconnected');
     expect(statusLabel('error')).toBe('Connection error');
     expect(statusLabel('idle')).toBe('Idle');
+  });
+
+  it('builds readable transfer labels, progress, and retry hints', () => {
+    expect(
+      getTransferDisplay({
+        transferId: 'tx1',
+        role: 'receiver',
+        status: 'downloading',
+        transferred: 25,
+        size: 100,
+        offset: 0
+      })
+    ).toMatchObject({
+      label: 'Downloading',
+      detail: '25% · 0.0 MB / 0.0 MB',
+      progress: 0.25,
+      canRetry: false
+    });
+
+    expect(
+      getTransferDisplay({
+        transferId: 'tx2',
+        role: 'receiver',
+        status: 'paused-source-offline',
+        transferred: 64,
+        size: 128,
+        offset: 64,
+        token: 'ticket'
+      })
+    ).toMatchObject({
+      label: 'Paused',
+      detail: 'The sender left. Retry after they reconnect.',
+      canRetry: true
+    });
+
+    expect(
+      getTransferDisplay({
+        transferId: 'tx3',
+        role: 'receiver',
+        status: 'failed',
+        transferred: 64,
+        size: 128,
+        offset: 64,
+        token: 'ticket',
+        errorMessage: 'Bad transfer frame magic'
+      })
+    ).toMatchObject({
+      label: 'Failed',
+      detail: 'Bad transfer frame magic',
+      progress: 0.5,
+      canRetry: true
+    });
   });
 
   it('announces already selected media when a socket connects', () => {
