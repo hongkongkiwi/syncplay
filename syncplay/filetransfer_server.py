@@ -151,10 +151,14 @@ class TransferManager(object):
         return session
 
     def cancel_transfer(self, watcher, transfer_id, reason):
-        session = self._sessions.pop(transfer_id, None)
+        session = self._sessions.get(transfer_id)
         if not session:
             self._send_error(watcher, transfer_id, "not-found", "Transfer was not found.")
             return None
+        if watcher.getName() not in (session.source, session.receiver):
+            self._send_error(watcher, transfer_id, "not-participant", "Only transfer participants can cancel this transfer.")
+            return None
+        self._sessions.pop(transfer_id, None)
         for participant in self._participants(session):
             self._send_error(participant, transfer_id, "cancelled", reason or "Transfer cancelled.")
         return session

@@ -236,7 +236,7 @@ export class SyncplayConnection {
           .catch(error => onError?.(error instanceof Error ? error : new Error(String(error))));
       }
     );
-    socket.on('data', data => transfer.handleData(typeof data === 'string' ? new Uint8Array(Buffer.from(data)) : data));
+    socket.on('data', data => transfer.handleData(typeof data === 'string' ? new Uint8Array(Buffer.from(data, 'binary')) : data));
     socket.on('error', error => {
       onError?.(error);
       socket.destroy();

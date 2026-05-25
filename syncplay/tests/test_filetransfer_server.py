@@ -175,6 +175,19 @@ def test_cancel_notifies_both_sides_and_removes_session():
     assert transfers.get_session(session.transfer_id) is None
 
 
+def test_cancel_rejects_non_participants():
+    receiver = Watcher("receiver")
+    source = Watcher("source", file_=media())
+    stranger = Watcher("stranger")
+    transfers = manager(watchers=[receiver, source, stranger])
+    session = transfers.request_transfer(receiver, {"source": "source"})
+
+    transfers.cancel_transfer(stranger, session.transfer_id, "stranger")
+
+    assert stranger.errors[-1]["code"] == "not-participant"
+    assert transfers.get_session(session.transfer_id) is session
+
+
 @pytest.mark.parametrize(
     "handler, code",
     [

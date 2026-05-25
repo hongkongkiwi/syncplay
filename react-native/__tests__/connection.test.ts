@@ -1,3 +1,4 @@
+import { Buffer } from 'buffer';
 import TcpSocket from 'react-native-tcp-socket';
 
 import { SyncplayConnection } from '../src/syncplay/connection';
@@ -226,7 +227,7 @@ describe('SyncplayConnection', () => {
       path => completed.push(path)
     );
     onConnect();
-    handlers.data?.(encodeTransferFrame({ frameType: 1, offset: 0, payload: new Uint8Array([7]) }));
+    handlers.data?.(Buffer.from(encodeTransferFrame({ frameType: 1, offset: 0, payload: new Uint8Array([7]) })).toString('binary'));
     handlers.data?.(encodeTransferFrame({ frameType: 3, offset: 1, payload: new Uint8Array() }));
 
     expect(socket.write).toHaveBeenCalledWith(

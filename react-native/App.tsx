@@ -1266,14 +1266,39 @@ export default function App() {
                   <Pause color="#d7e5ef" size={16} />
                 </Pressable>
               ) : null}
+              {item.status === 'incoming-request' ? (
+                <Pressable
+                  style={styles.userReadyButton}
+                  onPress={() => {
+                    const sourceItem = findMediaByName(mediaLibrary, item.file?.name ?? state.media?.name);
+                    if (sourceItem) {
+                      connection.sendTransferDecision({ transferId: item.transferId, accepted: true });
+                    } else {
+                      connection.sendTransferDecision({ transferId: item.transferId, accepted: false, reason: 'missing-local-media' });
+                    }
+                  }}
+                >
+                  <Check color="#d7e5ef" size={16} />
+                </Pressable>
+              ) : null}
+              {item.status === 'incoming-request' ? (
+                <Pressable
+                  style={styles.userReadyButton}
+                  onPress={() => connection.sendTransferDecision({ transferId: item.transferId, accepted: false, reason: 'rejected' })}
+                >
+                  <Trash2 color="#d7e5ef" size={16} />
+                </Pressable>
+              ) : null}
               {item.status.startsWith('paused') ? (
                 <Pressable style={styles.userReadyButton} onPress={() => connection.resumeTransfer(item.transferId, item.transferred || item.offset, item.fingerprint)}>
                   <Play color="#d7e5ef" size={16} />
                 </Pressable>
               ) : null}
-              <Pressable style={styles.userReadyButton} onPress={() => connection.cancelTransfer(item.transferId, item.role ?? 'receiver')}>
-                <Trash2 color="#d7e5ef" size={16} />
-              </Pressable>
+              {item.status !== 'incoming-request' ? (
+                <Pressable style={styles.userReadyButton} onPress={() => connection.cancelTransfer(item.transferId, item.role ?? 'receiver')}>
+                  <Trash2 color="#d7e5ef" size={16} />
+                </Pressable>
+              ) : null}
             </View>
           )}
         />
