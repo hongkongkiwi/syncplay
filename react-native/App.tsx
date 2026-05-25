@@ -71,6 +71,7 @@ import {
   stripManagedRoomName
 } from './src/app/appHelpers';
 import { scanMediaDirectory } from './src/app/directoryScanner';
+import { createExpoTransferSink, createExpoTransferSource } from './src/app/fileTransferSink';
 import {
   PREFERENCES_STORAGE_KEY,
   createPersistedPreferences,
@@ -122,6 +123,7 @@ export default function App() {
   const [chatDraft, setChatDraft] = useState('');
   const [mediaUri, setMediaUri] = useState<string | null>(null);
   const [mediaLibrary, setMediaLibrary] = useState<MediaLibraryItem[]>([]);
+  const [transferDirectory, setTransferDirectory] = useState<Directory | null>(null);
   const [streamUrl, setStreamUrl] = useState('');
   const [seekDraft, setSeekDraft] = useState('0:00');
   const [playlistUrl, setPlaylistUrl] = useState('');
@@ -148,6 +150,7 @@ export default function App() {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAppliedPlaylistKeyRef = useRef<string | null>(null);
   const lastAutoFileSwitchRef = useRef<string | null>(null);
+  const openedTransferSocketsRef = useRef<Set<string>>(new Set());
   const wasConnectedRef = useRef(false);
 
   const player = useVideoPlayer(mediaUri, instance => {
@@ -429,6 +432,54 @@ export default function App() {
   }, [autoFileSwitch, connected, mediaLibrary, roomUsers, state.media?.name, state.profile.username]);
 
   useEffect(() => {
+    if (!connected) {
+      openedTransferSocketsRef.current.clear();
+      return;
+    }
+
+    for (const transfer of transfers) {
+      if (
+        transfer.status !== 'approved' ||
+        !transfer.token ||
+        openedTransferSocketsRef.current.has(transfer.transferId)
+      ) {
+        continue;
+      }
+      if (transfer.role === 'receiver') {
+        openedTransferSocketsRef.current.add(transfer.transferId);
+        const sink = createExpoTransferSink(transfer.file?.name ?? transfer.transferId, transferDirectory ?? undefined);
+        connection.openTransferSocket(
+          {
+            transferId: transfer.transferId,
+            token: transfer.token,
+            role: 'receiver',
+            offset: sink.getOffset()
+          },
+          sink,
+          completedPath => dispatch({ type: 'transfer-completed', transferId: transfer.transferId, completedPath })
+        );
+      } else if (transfer.role === 'sender') {
+        const sourceItem = findMediaByName(mediaLibrary, transfer.file?.name ?? state.media?.name);
+        if (!sourceItem) {
+          continue;
+        }
+        openedTransferSocketsRef.current.add(transfer.transferId);
+        connection.openTransferSocket(
+          {
+            transferId: transfer.transferId,
+            token: transfer.token,
+            role: 'sender',
+            offset: transfer.offset
+          },
+          { write: () => undefined },
+          undefined,
+          createExpoTransferSource(sourceItem.uri)
+        );
+      }
+    }
+  }, [connected, connection, mediaLibrary, state.media?.name, transferDirectory, transfers]);
+
+  useEffect(() => {
     if (connected && activeScreen === 'connect') {
       setActiveScreen('watch');
     } else if (!connected && activeScreen !== 'connect') {
@@ -550,6 +601,16 @@ export default function App() {
         status: 'error',
         error: error instanceof Error ? error.message : 'Could not read that folder.'
       });
+    }
+  }
+
+  async function pickTransferDirectory() {
+    try {
+      const directory = await Directory.pickDirectoryAsync();
+      setTransferDirectory(directory);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not select download folder.';
+      dispatch({ type: 'connection-status', status: 'error', error: message });
     }
   }
 
@@ -1160,6 +1221,7 @@ export default function App() {
           <Download color="#7fd2ff" size={18} />
           <Text style={styles.panelTitle}>Transfers</Text>
           <Text style={styles.countText}>{transfers.length}</Text>
+          <ActionButton label="Folder" icon={FolderOpen} tone="ghost" onPress={pickTransferDirectory} />
         </View>
         <FlatList
           data={transfers}

@@ -193,7 +193,28 @@ describe('Syncplay app state', () => {
       size: 123
     });
 
-    const progressed = syncplayReducer(offered, {
+    const ticketed = syncplayReducer(offered, {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          ticket: {
+            transferId: 'tx1',
+            role: 'receiver',
+            token: 'secret',
+            file: { name: 'movie.mkv', size: 123 },
+            offset: 0
+          }
+        }
+      }
+    });
+
+    expect(ticketed.transfers.tx1).toMatchObject({
+      status: 'approved',
+      role: 'receiver',
+      file: { name: 'movie.mkv', size: 123 }
+    });
+
+    const progressed = syncplayReducer(ticketed, {
       type: 'server-message',
       message: {
         Transfer: {
@@ -230,6 +251,17 @@ describe('Syncplay app state', () => {
     expect(completed.transfers.tx1).toMatchObject({
       status: 'complete',
       completedPath: '/downloads/movie.mkv'
+    });
+
+    const locallyCompleted = syncplayReducer(progressed, {
+      type: 'transfer-completed',
+      transferId: 'tx1',
+      completedPath: 'file:///downloads/movie.mkv'
+    });
+
+    expect(locallyCompleted.transfers.tx1).toMatchObject({
+      status: 'complete',
+      completedPath: 'file:///downloads/movie.mkv'
     });
 
     const paused = syncplayReducer(completed, {

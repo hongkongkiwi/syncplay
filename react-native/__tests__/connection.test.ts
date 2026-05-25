@@ -1,6 +1,7 @@
 import TcpSocket from 'react-native-tcp-socket';
 
 import { SyncplayConnection } from '../src/syncplay/connection';
+import { encodeTransferFrame } from '../src/syncplay/transferSocket';
 
 jest.mock('react-native-tcp-socket', () => ({
   __esModule: true,
@@ -192,6 +193,47 @@ describe('SyncplayConnection', () => {
       { Transfer: { resume: { transferId: 'tx1', offset: 20 } } },
       { Transfer: { cancel: { transferId: 'tx1', reason: 'receiver' } } }
     ]);
+  });
+
+  it('opens a receiver transfer socket and writes frames to the sink', () => {
+    const { socket, handlers } = createMockSocket();
+    let onConnect: () => void = () => undefined;
+    jest.mocked(TcpSocket.createConnection).mockImplementation((options, callback) => {
+      onConnect = callback;
+      expect(options).toEqual({ host: 'syncplay.pl', port: 8999, rejectUnauthorized: true });
+      return socket as never;
+    });
+    const sink = {
+      write: jest.fn(),
+      finalize: jest.fn(() => '/downloads/movie.mkv')
+    };
+    const completed: string[] = [];
+    const connection = new SyncplayConnection(jest.fn(), jest.fn(), () => ({
+      position: null,
+      paused: true
+    }));
+
+    connection.openTransferSocket(
+      {
+        transferId: 'tx1',
+        token: 'secret',
+        role: 'receiver',
+        host: 'syncplay.pl',
+        port: 8999,
+        offset: 0
+      },
+      sink,
+      path => completed.push(path)
+    );
+    onConnect();
+    handlers.data?.(encodeTransferFrame({ frameType: 1, offset: 0, payload: new Uint8Array([7]) }));
+    handlers.data?.(encodeTransferFrame({ frameType: 3, offset: 1, payload: new Uint8Array() }));
+
+    expect(socket.write).toHaveBeenCalledWith(
+      '{"TransferConnect":{"transferId":"tx1","token":"secret","role":"receiver","offset":0}}\r\n'
+    );
+    expect(sink.write).toHaveBeenCalledWith(new Uint8Array([7]));
+    expect(completed).toEqual(['/downloads/movie.mkv']);
   });
 
   it('replies to server state pings with current playback and latency', () => {

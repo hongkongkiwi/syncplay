@@ -541,6 +541,24 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return reply == QtWidgets.QMessageBox.Yes
 
+    def chooseFileTransferDestination(self, session):
+        file_ = session.file or {}
+        filename = file_.get("name") if isinstance(file_, dict) else getattr(file_, "name", "")
+        if isMacOS() and IsPySide:
+            options = QtWidgets.QFileDialog.Options(QtWidgets.QFileDialog.DontUseNativeDialog)
+        else:
+            options = QtWidgets.QFileDialog.Options()
+        default_path = os.path.join(self.getInitialMediaDirectory(), os.path.basename(filename or session.transfer_id))
+        filepath, filtr = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            getMessage("file-transfer-save-title"),
+            default_path,
+            getMessage("file-transfer-save-filter"),
+            "",
+            options,
+        )
+        return str(filepath) if filepath else None
+
     def setFeatures(self, featureList):
         if not featureList["readiness"]:
             self.readyPushButton.setEnabled(False)

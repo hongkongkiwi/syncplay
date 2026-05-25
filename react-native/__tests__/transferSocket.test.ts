@@ -73,4 +73,34 @@ describe('TransferSocket', () => {
     expect(sink.finalized).toBe(true);
     expect(transfer.getCompletedPath()).toBe('/downloads/movie.mkv');
   });
+
+  it('uploads source bytes as data frames followed by complete', async () => {
+    const sink = new Sink();
+    const writes: Array<string | Uint8Array> = [];
+    const socket = {
+      write: jest.fn((data: string | Uint8Array) => {
+        writes.push(data);
+        return true;
+      }),
+      destroy: jest.fn()
+    };
+    const transfer = new TransferSocket(socket, sink);
+
+    await transfer.upload('tx1', { readAll: () => new Uint8Array([1, 2, 3, 4]) }, 1, 2);
+
+    expect(decodeTransferFrame(writes[0] as Uint8Array).frame).toEqual({
+      frameType: 1,
+      offset: 1,
+      payload: new Uint8Array([2, 3])
+    });
+    expect(decodeTransferFrame(writes[1] as Uint8Array).frame).toEqual({
+      frameType: 1,
+      offset: 3,
+      payload: new Uint8Array([4])
+    });
+    expect(decodeTransferFrame(writes[2] as Uint8Array).frame).toMatchObject({
+      frameType: 3,
+      offset: 4
+    });
+  });
 });

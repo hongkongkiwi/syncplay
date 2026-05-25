@@ -14,7 +14,7 @@ from functools import wraps
 from urllib.parse import urlparse
 
 from twisted.application.internet import ClientService
-from twisted.internet.endpoints import HostnameEndpoint
+from twisted.internet.endpoints import HostnameEndpoint, connectProtocol
 from twisted.internet.protocol import ClientFactory
 from twisted.internet import reactor, task, defer, threads
 
@@ -166,6 +166,16 @@ class SyncplayClient(object):
 
     def handleTransfer(self, payload):
         self.fileTransfer.handleTransfer(payload)
+
+    def openTransferSocket(self, ticket, handler):
+        host = ticket.get("host") or self._config["host"]
+        port = int(ticket.get("port") or self._config["port"])
+        if '[' in host:
+            host = host.strip('[]')
+        endpoint = HostnameEndpoint(reactor, host, port)
+        d = connectProtocol(endpoint, handler)
+        d.addErrback(lambda failure: self.ui.showErrorMessage(str(failure.value)))
+        return d
 
     def initPlayer(self, player):
         self._player = player
@@ -1719,6 +1729,12 @@ class UiManager(object):
         prompt = getattr(self.__ui, "promptFileTransferOffer", None)
         if prompt:
             return prompt(session)
+        return None
+
+    def chooseFileTransferDestination(self, session):
+        chooser = getattr(self.__ui, "chooseFileTransferDestination", None)
+        if chooser:
+            return chooser(session)
         return None
 
     def showDebugMessage(self, message):

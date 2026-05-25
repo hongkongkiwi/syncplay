@@ -64,6 +64,7 @@ export type SyncplayAction =
   | { type: 'profile-updated'; username: string; room: string }
   | { type: 'media-updated'; media: SyncplayFile | null }
   | { type: 'local-playback-updated'; position: number; paused: boolean }
+  | { type: 'transfer-completed'; transferId: string; completedPath: string }
   | { type: 'server-message'; message: SyncplayServerMessage };
 
 let nextMessageId = 0;
@@ -139,6 +140,23 @@ export function syncplayReducer(state: SyncplayState, action: SyncplayAction): S
           setBy: null
         }
       };
+    case 'transfer-completed': {
+      const previous = state.transfers[action.transferId];
+      if (!previous) {
+        return state;
+      }
+      return {
+        ...state,
+        transfers: {
+          ...state.transfers,
+          [action.transferId]: {
+            ...previous,
+            status: 'complete',
+            completedPath: action.completedPath
+          }
+        }
+      };
+    }
     case 'server-message':
       return reduceServerMessage(state, action.message);
     default:
@@ -259,6 +277,8 @@ function reduceTransferMessage(state: SyncplayState, payload: NonNullable<Syncpl
           role: payload.ticket.role === 'sender' || payload.ticket.role === 'receiver' ? payload.ticket.role : null,
           status: 'approved',
           token: typeof payload.ticket.token === 'string' ? payload.ticket.token : null,
+          file: isTicketFile(payload.ticket.file) ? payload.ticket.file : previous?.file ?? null,
+          size: isTicketFile(payload.ticket.file) ? payload.ticket.file.size : previous?.size ?? null,
           offset: typeof payload.ticket.offset === 'number' ? payload.ticket.offset : previous?.offset ?? 0
         }
       }
@@ -315,6 +335,14 @@ function reduceTransferMessage(state: SyncplayState, payload: NonNullable<Syncpl
   }
 
   return state;
+}
+
+function isTicketFile(file: unknown): file is SyncplayFile {
+  return (
+    !!file &&
+    typeof (file as SyncplayFile).name === 'string' &&
+    typeof (file as SyncplayFile).size === 'number'
+  );
 }
 
 function reduceSetMessage(state: SyncplayState, payload: Record<string, unknown>): SyncplayState {

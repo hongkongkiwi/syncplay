@@ -8,8 +8,8 @@ The receiver requests a file from a specific room user. The sender must approve 
 
 The playback JSON socket only carries request, offer, decision, ticket, progress, pause, resume, cancel, and error messages. Media bytes use the transfer socket frame format. The server reports relayed byte counts to both sides.
 
-Files download to a temporary `.syncplay-download.<transferId>.part` name first. The client renames or exposes the file only after size and fingerprint checks pass.
+Files download to a temporary `.syncplay-download.<transferId>.part` name first. The desktop client renames the file only after size and fingerprint checks pass. The mobile client writes to a `.part` file in the selected folder or app document folder, then moves it to the final filename when the complete frame arrives.
 
 If the sender leaves, the receiver sees the transfer paused as `source-offline`. If the sender changes media, the transfer pauses as `source-changed-media`. A resume only works when the source file size and fingerprint still match.
 
-Desktop senders get an approval prompt before the transfer starts. Mobile clients store partial data through the transfer socket file sink and show the completed destination path when the sink exposes it. Destination-folder handling stays platform-specific because Android and iOS expose different filesystem permissions.
+Desktop senders get an approval prompt before the transfer starts, and desktop receivers get a save-file picker. Mobile receivers can pick a download folder from the Transfers screen. Mobile senders upload from the local media library item that matches the loaded filename.

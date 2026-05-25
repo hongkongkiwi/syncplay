@@ -3,7 +3,7 @@
 import os
 
 from syncplay.filetransfer_client import FileTransferClient, fingerprint_file
-from syncplay.filetransfer_wire import FRAME_COMPLETE, FRAME_DATA, TransferFrame, decode_frame
+from syncplay.filetransfer_wire import FRAME_COMPLETE, FRAME_DATA, TransferFrame, decode_frame, encode_frame
 
 
 class Protocol(object):
@@ -41,6 +41,10 @@ class Client(object):
         self._protocol = Protocol()
         self.userlist = UserList(file_)
         self.ui = ui
+        self.transfer_socket_requests = []
+
+    def openTransferSocket(self, ticket, handler):
+        self.transfer_socket_requests.append((ticket, handler))
 
 
 class Ui(object):
@@ -130,6 +134,69 @@ def test_download_writes_part_file_and_resume_uses_partial_size(tmp_path):
     assert client._protocol.calls[-1] == ("resume", "tx1", 7)
 
 
+def test_receiver_ticket_prepares_destination_and_opens_transfer_socket(tmp_path):
+    client = Client()
+    transfers = FileTransferClient(client, download_directory=str(tmp_path))
+
+    transfers.handleTicket({
+        "transferId": "tx1",
+        "role": "receiver",
+        "token": "secret",
+        "file": {"name": "movie.mkv", "size": 6},
+    })
+
+    session = transfers.get("tx1")
+    assert session.destination_path == str(tmp_path / "movie.mkv")
+    assert session.part_path == str(tmp_path / ".syncplay-download.tx1.part")
+    assert client.transfer_socket_requests[0][0]["token"] == "secret"
+
+
+def test_sender_ticket_opens_transfer_socket():
+    client = Client({"name": "movie.mkv", "size": 6, "path": "/tmp/movie.mkv"})
+    transfers = FileTransferClient(client)
+
+    transfers.handleTicket({"transferId": "tx1", "role": "sender", "token": "secret", "offset": 2, "chunkSize": 2})
+
+    assert client.transfer_socket_requests[0][0]["role"] == "sender"
+
+
+def test_transfer_socket_handler_sends_handshake_and_uploads_for_sender(tmp_path):
+    path = tmp_path / "movie.mkv"
+    path.write_bytes(b"abcdef")
+    client = Client({"name": "movie.mkv", "size": 6, "path": str(path)})
+    transfers = FileTransferClient(client)
+    transfers.handleOffer({"transferId": "tx1", "file": {"name": "movie.mkv", "size": 6}})
+    transfers.acceptOffer("tx1")
+    ticket = {"transferId": "tx1", "role": "sender", "token": "secret", "offset": 2, "chunkSize": 2}
+    transfers.handleTicket(ticket)
+    transport = Transport()
+
+    client.transfer_socket_requests[0][1].connectionMade(transport)
+
+    assert transport.writes[0] == b'{"TransferConnect":{"transferId":"tx1","token":"secret","role":"sender","offset":2}}\r\n'
+    frames = _decode_all(transport.writes[1:])
+    assert frames[0] == TransferFrame(frame_type=FRAME_DATA, offset=2, payload=b"cd")
+
+
+def test_transfer_socket_handler_writes_receiver_frames(tmp_path):
+    client = Client()
+    transfers = FileTransferClient(client, download_directory=str(tmp_path))
+    transfers.handleTicket({
+        "transferId": "tx1",
+        "role": "receiver",
+        "token": "secret",
+        "file": {"name": "movie.mkv", "size": 3},
+    })
+    handler = client.transfer_socket_requests[0][1]
+    transport = Transport()
+
+    handler.connectionMade(transport)
+    handler.dataReceived(transport_frame(FRAME_DATA, 0, b"abc") + transport_frame(FRAME_COMPLETE, 3, b""))
+
+    assert transport.writes == [b'{"TransferConnect":{"transferId":"tx1","token":"secret","role":"receiver","offset":0}}\r\n']
+    assert (tmp_path / "movie.mkv").read_bytes() == b"abc"
+
+
 def test_progress_updates_transferred_bytes_from_server_payload():
     transfers = FileTransferClient(Client())
 
@@ -169,6 +236,10 @@ def _decode_all(chunks):
             break
         frames.append(frame)
     return frames
+
+
+def transport_frame(frame_type, offset, payload):
+    return encode_frame(TransferFrame(frame_type=frame_type, offset=offset, payload=payload))
 
 
 def test_sender_streams_loaded_file_as_data_frames(tmp_path):

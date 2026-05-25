@@ -1,10 +1,13 @@
 # coding:utf8
 
 import hashlib
+import json
 import os
 from collections import namedtuple
 
-from syncplay.filetransfer_wire import FRAME_COMPLETE, FRAME_DATA, TransferFrame, encode_frame
+from twisted.internet.protocol import Protocol
+
+from syncplay.filetransfer_wire import FRAME_COMPLETE, FRAME_DATA, TransferFrame, TransferFrameError, decode_frame, encode_frame
 
 
 TransferClientSession = namedtuple(
@@ -28,9 +31,10 @@ TransferClientSession.__new__.__defaults__ = (None, None, None, None, None, None
 
 
 class FileTransferClient(object):
-    def __init__(self, client):
+    def __init__(self, client, download_directory=None):
         self._client = client
         self._sessions = {}
+        self._download_directory = download_directory
 
     def get(self, transfer_id):
         return self._sessions.get(transfer_id)
@@ -91,6 +95,7 @@ class FileTransferClient(object):
             fingerprint=payload.get("fingerprint") or session.fingerprint,
             chunk_size=payload.get("chunkSize") or session.chunk_size,
         )
+        self._open_ticket_socket(transfer_id)
 
     def prepareDownload(self, transferId, destinationPath):
         session = self._sessions.get(transferId) or TransferClientSession(transfer_id=transferId, role="receiver")
@@ -155,6 +160,29 @@ class FileTransferClient(object):
             self.acceptOffer(transferId)
         elif answer is False:
             self.rejectOffer(transferId)
+
+    def _open_ticket_socket(self, transferId):
+        session = self._sessions.get(transferId)
+        opener = getattr(self._client, "openTransferSocket", None)
+        if not session or not session.ticket or not opener:
+            return
+        if session.role == "receiver" and not session.destination_path:
+            destination_path = self._choose_download_destination(session)
+            if not destination_path:
+                self.cancelTransfer(transferId)
+                return
+            self.prepareDownload(transferId, destination_path)
+            session = self._sessions.get(transferId)
+        opener(session.ticket, TransferSocketClientProtocol(self, session.ticket))
+
+    def _choose_download_destination(self, session):
+        chooser = getattr(getattr(self._client, "ui", None), "chooseFileTransferDestination", None)
+        if chooser:
+            return chooser(session)
+        if self._download_directory:
+            filename = _safe_download_filename(_file_name(session.file) or session.transfer_id)
+            return os.path.join(self._download_directory, filename)
+        return None
 
     def streamUpload(self, transferId, transport, offset=0, chunkSize=None):
         session = self._sessions.get(transferId)
@@ -249,3 +277,57 @@ def _file_size(file_):
         return int(size)
     except (TypeError, ValueError):
         return None
+
+
+def _safe_download_filename(filename):
+    filename = os.path.basename(str(filename or "syncplay-download"))
+    return filename or "syncplay-download"
+
+
+def _encode_transfer_connect(ticket, offset):
+    payload = {
+        "TransferConnect": {
+            "transferId": ticket.get("transferId"),
+            "token": ticket.get("token"),
+            "role": ticket.get("role"),
+            "offset": int(offset or 0),
+        }
+    }
+    return (json.dumps(payload, separators=(",", ":")) + "\r\n").encode("utf-8")
+
+
+class TransferSocketClientProtocol(Protocol):
+    def __init__(self, transfers, ticket):
+        self._transfers = transfers
+        self._ticket = ticket
+        self._buffer = b""
+
+    def connectionMade(self, transport=None):
+        if transport is not None:
+            self.transport = transport
+        offset = self._connection_offset()
+        self.transport.write(_encode_transfer_connect(self._ticket, offset))
+        if self._ticket.get("role") == "sender":
+            self._transfers.streamUpload(
+                self._ticket.get("transferId"),
+                self.transport,
+                offset=offset,
+                chunkSize=self._ticket.get("chunkSize"),
+            )
+
+    def dataReceived(self, data):
+        self._buffer += data
+        try:
+            while self._buffer:
+                frame, self._buffer = decode_frame(self._buffer)
+                if frame is None:
+                    return
+                self._transfers.receiveFrame(self._ticket.get("transferId"), frame)
+        except (TransferFrameError, ValueError):
+            self.transport.loseConnection()
+
+    def _connection_offset(self):
+        session = self._transfers.get(self._ticket.get("transferId"))
+        if self._ticket.get("role") == "receiver" and session and session.part_path and os.path.exists(session.part_path):
+            return os.path.getsize(session.part_path)
+        return int(self._ticket.get("offset") or 0)

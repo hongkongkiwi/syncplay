@@ -13,14 +13,18 @@ export type TransferFrame = {
   payload: Uint8Array;
 };
 
-type SocketLike = {
+export type TransferSocketLike = {
   write(data: string | Uint8Array): boolean;
   destroy(): void;
 };
 
-type FileSink = {
+export type TransferFileSink = {
   write(chunk: Uint8Array): void;
   finalize?(): string | null | void;
+};
+
+export type TransferFileSource = {
+  readAll(): Uint8Array | Promise<Uint8Array>;
 };
 
 const HEADER_LENGTH = 24;
@@ -76,8 +80,8 @@ export class TransferSocket {
   private completedPath: string | null = null;
 
   constructor(
-    private socket: SocketLike,
-    private sink: FileSink
+    private socket: TransferSocketLike,
+    private sink: TransferFileSink
   ) {}
 
   connect(args: TransferConnectArgs): void {
@@ -108,6 +112,22 @@ export class TransferSocket {
 
   resume(transferId: string, token: string, role: 'sender' | 'receiver', offset: number): void {
     this.connect({ transferId, token, role, offset });
+  }
+
+  async upload(transferId: string, source: TransferFileSource, offset = 0, chunkSize = 262144): Promise<number> {
+    const bytes = await source.readAll();
+    let position = Math.max(0, offset);
+    while (position < bytes.length) {
+      const end = Math.min(position + chunkSize, bytes.length);
+      this.socket.write(encodeTransferFrame({
+        frameType: 1,
+        offset: position,
+        payload: bytes.slice(position, end)
+      }));
+      position = end;
+    }
+    this.socket.write(encodeTransferFrame({ frameType: 3, offset: position, payload: new Uint8Array() }));
+    return position;
   }
 
   getCompletedPath(): string | null {
