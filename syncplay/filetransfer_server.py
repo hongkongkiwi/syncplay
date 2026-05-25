@@ -7,6 +7,7 @@ from collections import namedtuple
 from syncplay.filetransfer import (
     TransferSession,
     TransferStatus,
+    TransferValidationError,
     normalize_transfer_filename,
     validate_resume_offset,
     validate_transfer_request,
@@ -61,7 +62,7 @@ class TransferManager(object):
         validation_file = dict(file_ or {}, path="/server/metadata-check")
         try:
             request = validate_transfer_request(source, receiver, validation_file, self.config)
-        except Exception as error:
+        except TransferValidationError as error:
             code, message = self._validation_error(str(error))
             self._send_error(receiver, None, code, message)
             return None

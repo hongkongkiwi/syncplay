@@ -57,6 +57,7 @@ export function createIncomingTransfer(payload: Record<string, unknown>): Transf
     file: isSyncplayFile(payload.file) ? payload.file : null,
     transferred: 0,
     size: isSyncplayFile(payload.file) ? payload.file.size : null,
+    fingerprint: typeof payload.fingerprint === 'string' ? payload.fingerprint : null,
     offset
   };
 }
