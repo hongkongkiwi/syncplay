@@ -12,6 +12,7 @@ from zope.interface.declarations import implementer
 
 import syncplay
 from syncplay.constants import PING_MOVING_AVERAGE_WEIGHT, CONTROLLED_ROOMS_MIN_VERSION, USER_READY_MIN_VERSION, SHARED_PLAYLIST_MIN_VERSION, CHAT_MIN_VERSION, UNKNOWN_UI_MODE
+from syncplay.filetransfer_wire import TransferFrameError, decode_frame
 from syncplay.messages import getMessage
 from syncplay.utils import meetsMinVersion
 
@@ -36,6 +37,8 @@ class JSONCommandProtocol(LineReceiver):
                 self.handleTLS(message[1])
             elif command == "Transfer":
                 self.handleTransfer(message[1])
+            elif command == "TransferConnect":
+                self.handleTransferConnect(message[1])
             else:
                 self.dropWithError(getMessage("unknown-command-server-error").format(message[1]))  # TODO: log, not drop
 
@@ -501,6 +504,9 @@ class SyncServerProtocol(JSONCommandProtocol):
         self._clientLatencyCalculation = 0
         self._clientLatencyCalculationArrivalTime = 0
         self._watcher = None
+        self._transferId = None
+        self._transferRole = None
+        self._transferBuffer = b""
 
     def __hash__(self):
         return hash('|'.join((
@@ -525,7 +531,10 @@ class SyncServerProtocol(JSONCommandProtocol):
         self.drop()
 
     def connectionLost(self, reason):
-        self._factory.removeWatcher(self._watcher)
+        if self._transferId:
+            self._factory.transferRelay.disconnect(self._transferId, self._transferRole)
+        else:
+            self._factory.removeWatcher(self._watcher)
 
     def getFeatures(self):
         if not self._features:
@@ -616,6 +625,24 @@ class SyncServerProtocol(JSONCommandProtocol):
 
     def setWatcher(self, watcher):
         self._watcher = watcher
+
+    def handleTransferConnect(self, payload):
+        self._transferId = payload.get("transferId")
+        self._transferRole = payload.get("role")
+        self._factory.transferRelay.connect(payload.get("token"), self.transport)
+        self.setRawMode()
+
+    def rawDataReceived(self, data):
+        self._transferBuffer += data
+        try:
+            while self._transferBuffer:
+                frame, self._transferBuffer = decode_frame(self._transferBuffer)
+                if frame is None:
+                    return
+                self._factory.transferRelay.relay_frame(self._transferId, self._transferRole, frame)
+        except TransferFrameError as error:
+            print("Transfer socket error: {}".format(error))
+            self.transport.loseConnection()
 
     def sendHello(self, clientVersion):
         hello = {}

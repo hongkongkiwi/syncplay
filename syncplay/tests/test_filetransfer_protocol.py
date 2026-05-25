@@ -116,3 +116,24 @@ def test_server_protocol_can_send_transfer_offer_ticket_progress_and_error():
         {"Transfer": {"progress": {"transferId": "tx1", "transferred": 5}}},
         {"Transfer": {"error": {"transferId": "tx1", "code": "source-left", "message": "Source left."}}},
     ]
+
+
+def test_server_protocol_accepts_transfer_connect_without_login():
+    class Relay(object):
+        def __init__(self):
+            self.connected = []
+
+        def connect(self, token, transport):
+            self.connected.append((token, transport))
+
+    factory = FakeFactory()
+    factory.transferRelay = Relay()
+    protocol = SyncServerProtocol(factory)
+    protocol.transport = object()
+    raw_mode = []
+    protocol.setRawMode = lambda: raw_mode.append(True)
+
+    protocol.handleMessages({"TransferConnect": {"transferId": "tx1", "token": "secret", "role": "receiver"}})
+
+    assert factory.transferRelay.connected == [("secret", protocol.transport)]
+    assert raw_mode == [True]

@@ -19,6 +19,7 @@ except:
 import syncplay
 from syncplay import constants
 from syncplay.filetransfer_server import TransferManager, TransferServerConfig
+from syncplay.filetransfer_wire import TransferSocketRelay
 from syncplay.messages import getMessage
 from syncplay.protocols import SyncServerProtocol
 from syncplay.utils import RoomPasswordProvider, NotControlledRoom, RandomStringGenerator, meetsMinVersion, playlistIsValid, truncateText, getListAsMultilineString, convertMultilineStringToList
@@ -81,7 +82,12 @@ class SyncFactory(Factory):
             self.certPath = None
             self.options = None
             self.serverAcceptsTLS = False
-        self.fileTransfers = TransferManager(self.fileTransferConfig, self._getFileTransferWatchers)
+        self.transferRelay = TransferSocketRelay()
+        self.fileTransfers = TransferManager(
+            self.fileTransferConfig,
+            self._getFileTransferWatchers,
+            token_observer=self.transferRelay.register_token,
+        )
 
     def loadListFromMultilineTextFile(self, path):
         if not os.path.isfile(path):

@@ -29,13 +29,14 @@ TransferServerConfig.__new__.__defaults__ = (False, 2147483648, 4, 1, None, 600,
 
 
 class TransferManager(object):
-    def __init__(self, config=None, watchers=None, now=None, token_factory=None):
+    def __init__(self, config=None, watchers=None, now=None, token_factory=None, token_observer=None):
         self.config = config or TransferServerConfig()
         self._watchers = watchers or []
         self._sessions = {}
         self._tokens = {}
         self._now = now or time.time
         self._token_factory = token_factory or (lambda: uuid.uuid4().hex)
+        self._token_observer = token_observer
 
     def get_session(self, transfer_id):
         return self._sessions.get(transfer_id)
@@ -170,6 +171,8 @@ class TransferManager(object):
             "role": role,
             "expires": self._now() + self.config.token_ttl,
         }
+        if self._token_observer:
+            self._token_observer(token, session.transfer_id, role)
         return {
             "transferId": session.transfer_id,
             "role": role,
