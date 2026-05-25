@@ -4,6 +4,7 @@ import {
   formatTime,
   isManagedRoomName,
   isStreamUri,
+  shouldAnnounceMediaOnConnection,
   shuffleFiles,
   statusLabel,
   stripManagedRoomName
@@ -54,6 +55,14 @@ describe('app helper functions', () => {
     expect(statusLabel('disconnected')).toBe('Disconnected');
     expect(statusLabel('error')).toBe('Connection error');
     expect(statusLabel('idle')).toBe('Idle');
+  });
+
+  it('announces already selected media when a socket connects', () => {
+    const media = { name: 'movie.mkv', duration: 100, size: 123 };
+
+    expect(shouldAnnounceMediaOnConnection(false, true, media)).toBe(true);
+    expect(shouldAnnounceMediaOnConnection(true, true, media)).toBe(false);
+    expect(shouldAnnounceMediaOnConnection(false, true, null)).toBe(false);
   });
 
   it('shuffles files with Fisher-Yates without mutating the input', () => {
