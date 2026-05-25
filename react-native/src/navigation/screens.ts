@@ -1,4 +1,4 @@
-export type AppScreenId = 'connect' | 'watch' | 'room' | 'chat' | 'settings';
+export type AppScreenId = 'connect' | 'watch' | 'room' | 'transfers' | 'chat' | 'settings';
 
 export type AppScreen = {
   id: AppScreenId;
@@ -9,6 +9,7 @@ export const APP_SCREENS: AppScreen[] = [
   { id: 'connect', title: 'Connect' },
   { id: 'watch', title: 'Watch' },
   { id: 'room', title: 'Room' },
+  { id: 'transfers', title: 'Transfers' },
   { id: 'chat', title: 'Chat' },
   { id: 'settings', title: 'Settings' }
 ];

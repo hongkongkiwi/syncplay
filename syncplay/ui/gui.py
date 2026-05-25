@@ -523,6 +523,42 @@ class MainWindow(QtWidgets.QMainWindow):
         # TODO: Prompt user
         return None
 
+    def promptFileTransferOffer(self, session):
+        file_ = session.file or {}
+        filename = file_.get("name") if isinstance(file_, dict) else getattr(file_, "name", "")
+        size = file_.get("size") if isinstance(file_, dict) else getattr(file_, "size", None)
+        requester = session.receiver or session.source or getMessage("unknown-userlist-item")
+        message = getMessage("file-transfer-offer-question").format(
+            requester,
+            filename or session.transfer_id,
+            formatSize(size) if size is not None else getMessage("unknown-file-size"),
+        )
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            getMessage("file-transfer-offer-title"),
+            message,
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        return reply == QtWidgets.QMessageBox.Yes
+
+    def chooseFileTransferDestination(self, session):
+        file_ = session.file or {}
+        filename = file_.get("name") if isinstance(file_, dict) else getattr(file_, "name", "")
+        if isMacOS() and IsPySide:
+            options = QtWidgets.QFileDialog.Options(QtWidgets.QFileDialog.DontUseNativeDialog)
+        else:
+            options = QtWidgets.QFileDialog.Options()
+        default_path = os.path.join(self.getInitialMediaDirectory(), os.path.basename(filename or session.transfer_id))
+        filepath, filtr = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            getMessage("file-transfer-save-title"),
+            default_path,
+            getMessage("file-transfer-save-filter"),
+            "",
+            options,
+        )
+        return str(filepath) if filepath else None
+
     def setFeatures(self, featureList):
         if not featureList["readiness"]:
             self.readyPushButton.setEnabled(False)
@@ -824,6 +860,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 path = self._syncplayClient.fileSwitch.findFilepath(filename)
                 if path:
                     menu.addAction(QtGui.QPixmap(resourcespath + "folder_film.png"), getMessage('open-containing-folder'), lambda: utils.open_system_file_browser(path))
+            if (
+                isUserRow
+                and username != self._syncplayClient.userlist.currentUser.username
+                and not isURL(filename)
+                and self._syncplayClient.serverFeatures.get("fileTransfer")
+            ):
+                menu.addAction(
+                    QtGui.QPixmap(resourcespath + "application_get.png"),
+                    getMessage("file-transfer-request-menu-label").format(shortUsername),
+                    lambda: self._syncplayClient.requestFileDownload(username)
+                )
 
         if isUserRow and roomToJoin == self._syncplayClient.getRoom() and self._syncplayClient.userlist.currentUser.canControl() and self._syncplayClient.userlist.isReadinessSupported(requiresOtherUsers=False) and self._syncplayClient.serverFeatures["setOthersReadiness"]:
             if self._syncplayClient.userlist.isReady(username):

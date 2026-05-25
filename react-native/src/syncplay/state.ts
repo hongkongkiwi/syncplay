@@ -1,3 +1,10 @@
+import {
+  createIncomingTransfer,
+  isTransferStatus,
+  parseTransferId,
+  statusFromTransferError,
+  type TransferSession
+} from './fileTransfer';
 import type { ServerUserPayload, SyncplayFile, SyncplayServerMessage } from './protocol';
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -50,6 +57,7 @@ export type SyncplayState = {
     lastPassword: string | null;
     controllerRooms: Record<string, string>;
   };
+  transfers: Record<string, TransferSession>;
   messages: SyncplayMessage[];
 };
 
@@ -58,6 +66,8 @@ export type SyncplayAction =
   | { type: 'profile-updated'; username: string; room: string }
   | { type: 'media-updated'; media: SyncplayFile | null }
   | { type: 'local-playback-updated'; position: number; paused: boolean }
+  | { type: 'transfer-completed'; transferId: string; completedPath: string }
+  | { type: 'transfer-failed'; transferId: string }
   | { type: 'server-message'; message: SyncplayServerMessage };
 
 let nextMessageId = 0;
@@ -94,6 +104,7 @@ export function createInitialSyncplayState(): SyncplayState {
       lastPassword: null,
       controllerRooms: {}
     },
+    transfers: {},
     messages: []
   };
 }
@@ -132,6 +143,39 @@ export function syncplayReducer(state: SyncplayState, action: SyncplayAction): S
           setBy: null
         }
       };
+    case 'transfer-completed': {
+      const previous = state.transfers[action.transferId];
+      if (!previous) {
+        return state;
+      }
+      return {
+        ...state,
+        transfers: {
+          ...state.transfers,
+          [action.transferId]: {
+            ...previous,
+            status: 'complete',
+            completedPath: action.completedPath
+          }
+        }
+      };
+    }
+    case 'transfer-failed': {
+      const previous = state.transfers[action.transferId];
+      if (!previous) {
+        return state;
+      }
+      return {
+        ...state,
+        transfers: {
+          ...state.transfers,
+          [action.transferId]: {
+            ...previous,
+            status: 'failed'
+          }
+        }
+      };
+    }
     case 'server-message':
       return reduceServerMessage(state, action.message);
     default:
@@ -188,6 +232,10 @@ function reduceServerMessage(state: SyncplayState, message: SyncplayServerMessag
     });
   }
 
+  if (message.Transfer) {
+    next = reduceTransferMessage(next, message.Transfer);
+  }
+
   if (message.State?.playstate) {
     next = {
       ...next,
@@ -215,6 +263,166 @@ function reduceServerMessage(state: SyncplayState, message: SyncplayServerMessag
   }
 
   return next;
+}
+
+function reduceTransferMessage(state: SyncplayState, payload: NonNullable<SyncplayServerMessage['Transfer']>): SyncplayState {
+  if (payload.offer) {
+    const session = createIncomingTransfer(payload.offer);
+    if (!session) {
+      return state;
+    }
+    return {
+      ...state,
+      transfers: {
+        ...state.transfers,
+        [session.transferId]: session
+      }
+    };
+  }
+
+  if (payload.ticket) {
+    const transferId = parseTransferId(payload.ticket.transferId);
+    if (!transferId) {
+      return state;
+    }
+    const previous = state.transfers[transferId];
+    return {
+      ...state,
+      transfers: {
+        ...state.transfers,
+        [transferId]: {
+          ...(previous ?? {
+            transferId,
+            role: null,
+            status: 'approved',
+            transferred: 0,
+            size: null,
+            offset: 0
+          }),
+          role: payload.ticket.role === 'sender' || payload.ticket.role === 'receiver' ? payload.ticket.role : null,
+          status: 'approved',
+          token: typeof payload.ticket.token === 'string' ? payload.ticket.token : null,
+          fingerprint: typeof payload.ticket.fingerprint === 'string' ? payload.ticket.fingerprint : previous?.fingerprint ?? null,
+          file: isTicketFile(payload.ticket.file) ? payload.ticket.file : previous?.file ?? null,
+          size: isTicketFile(payload.ticket.file) ? payload.ticket.file.size : previous?.size ?? null,
+          offset: typeof payload.ticket.offset === 'number' ? payload.ticket.offset : previous?.offset ?? 0
+        }
+      }
+    };
+  }
+
+  if (payload.progress) {
+    const transferId = parseTransferId(payload.progress.transferId);
+    if (!transferId || !isTransferStatus(payload.progress.status)) {
+      return state;
+    }
+    const previous = state.transfers[transferId];
+    return {
+      ...state,
+      transfers: {
+        ...state.transfers,
+        [transferId]: {
+          ...(previous ?? {
+            transferId,
+            role: null,
+            file: null,
+            source: null,
+            receiver: null,
+            offset: 0
+          }),
+          status: payload.progress.status,
+          transferred: payload.progress.transferred,
+          size: payload.progress.size,
+          completedPath: payload.progress.status === 'complete'
+            ? payload.progress.destinationPath ?? previous?.completedPath ?? null
+            : previous?.completedPath ?? null
+        }
+      }
+    };
+  }
+
+  if (payload.error) {
+    const transferId = parseTransferId(payload.error.transferId);
+    if (!transferId) {
+      return state;
+    }
+    const previous = state.transfers[transferId];
+    return {
+      ...state,
+      transfers: {
+        ...state.transfers,
+        [transferId]: {
+          ...(previous ?? {
+            transferId,
+            role: null,
+            file: null,
+            source: null,
+            receiver: null,
+            transferred: 0,
+            size: null,
+            offset: 0
+          }),
+          status: statusFromTransferError(payload.error.code)
+        }
+      }
+    };
+  }
+
+  if (payload.pause) {
+    return reduceTransferControl(state, payload.pause.transferId, 'paused-local', payload.pause.offset);
+  }
+
+  if (payload.resume) {
+    return reduceTransferControl(state, payload.resume.transferId, 'downloading', payload.resume.offset);
+  }
+
+  if (payload.cancel) {
+    return reduceTransferControl(state, payload.cancel.transferId, 'cancelled');
+  }
+
+  return state;
+}
+
+function isTicketFile(file: unknown): file is SyncplayFile {
+  return (
+    !!file &&
+    typeof (file as SyncplayFile).name === 'string' &&
+    typeof (file as SyncplayFile).duration === 'number' &&
+    typeof (file as SyncplayFile).size === 'number'
+  );
+}
+
+function reduceTransferControl(
+  state: SyncplayState,
+  transferIdValue: unknown,
+  status: TransferSession['status'],
+  offset?: number
+): SyncplayState {
+  const transferId = parseTransferId(transferIdValue);
+  if (!transferId) {
+    return state;
+  }
+  const previous = state.transfers[transferId];
+  return {
+    ...state,
+    transfers: {
+      ...state.transfers,
+      [transferId]: {
+        ...(previous ?? {
+          transferId,
+          role: null,
+          file: null,
+          source: null,
+          receiver: null,
+          transferred: 0,
+          size: null,
+          offset: 0
+        }),
+        status,
+        offset: typeof offset === 'number' ? offset : previous?.offset ?? 0
+      }
+    }
+  };
 }
 
 function reduceSetMessage(state: SyncplayState, payload: Record<string, unknown>): SyncplayState {

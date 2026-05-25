@@ -52,7 +52,13 @@ def main():
         args.max_chat_message_length,
         args.max_username_length,
         args.stats_db_file,
-        args.tls
+        args.tls,
+        args.enable_file_transfers,
+        args.file_transfer_max_size,
+        args.file_transfer_max_active,
+        args.file_transfer_max_per_user,
+        args.file_transfer_rate_limit,
+        args.file_transfer_token_ttl
     )
 
     if args.ipv6_only is True:

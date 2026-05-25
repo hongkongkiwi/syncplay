@@ -171,6 +171,175 @@ describe('Syncplay app state', () => {
     });
   });
 
+  it('tracks transfer offers, progress, and source failure states', () => {
+    const offered = syncplayReducer(createInitialSyncplayState(), {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          offer: {
+            transferId: 'tx1',
+            source: 'Aki',
+            receiver: 'Mobile',
+            file: { name: 'movie.mkv', duration: 100, size: 123 }
+          }
+        }
+      }
+    });
+
+    expect(offered.transfers.tx1).toMatchObject({
+      status: 'incoming-request',
+      source: 'Aki',
+      receiver: 'Mobile',
+      size: 123
+    });
+
+    const badOffer = syncplayReducer(createInitialSyncplayState(), {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          offer: {
+            transferId: 'bad',
+            file: { name: 'bad.mkv', duration: Number.NaN, size: -1 },
+            offset: Number.POSITIVE_INFINITY
+          }
+        }
+      }
+    });
+
+    expect(badOffer.transfers.bad).toMatchObject({ file: null, size: null, offset: 0 });
+
+    const ticketed = syncplayReducer(offered, {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          ticket: {
+            transferId: 'tx1',
+            role: 'receiver',
+            token: 'secret',
+            fingerprint: 'fp',
+            file: { name: 'movie.mkv', duration: 100, size: 123 },
+            offset: 0
+          }
+        }
+      }
+    });
+
+    expect(ticketed.transfers.tx1).toMatchObject({
+      status: 'approved',
+      role: 'receiver',
+      fingerprint: 'fp',
+      file: { name: 'movie.mkv', size: 123 }
+    });
+
+    const ignoredBadTicket = syncplayReducer(ticketed, {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          ticket: {
+            role: 'receiver',
+            token: 'bad'
+          }
+        }
+      }
+    });
+
+    expect(ignoredBadTicket.transfers.undefined).toBeUndefined();
+
+    const progressed = syncplayReducer(ticketed, {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          progress: {
+            transferId: 'tx1',
+            transferred: 10,
+            size: 123,
+            status: 'downloading'
+          }
+        }
+      }
+    });
+
+    expect(progressed.transfers.tx1).toMatchObject({
+      status: 'downloading',
+      transferred: 10
+    });
+
+    const completed = syncplayReducer(progressed, {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          progress: {
+            transferId: 'tx1',
+            transferred: 123,
+            size: 123,
+            status: 'complete',
+            destinationPath: '/downloads/movie.mkv'
+          }
+        }
+      }
+    });
+
+    expect(completed.transfers.tx1).toMatchObject({
+      status: 'complete',
+      completedPath: '/downloads/movie.mkv'
+    });
+
+    const locallyCompleted = syncplayReducer(progressed, {
+      type: 'transfer-completed',
+      transferId: 'tx1',
+      completedPath: 'file:///downloads/movie.mkv'
+    });
+
+    expect(locallyCompleted.transfers.tx1).toMatchObject({
+      status: 'complete',
+      completedPath: 'file:///downloads/movie.mkv'
+    });
+
+    const paused = syncplayReducer(completed, {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          error: {
+            transferId: 'tx1',
+            code: 'source-changed-media',
+            message: 'Source changed media.'
+          }
+        }
+      }
+    });
+
+    expect(paused.transfers.tx1?.status).toBe('paused-source-changed-media');
+
+    const receiverOffline = syncplayReducer(completed, {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          error: {
+            transferId: 'tx1',
+            code: 'receiver-offline',
+            message: 'Receiver is offline.'
+          }
+        }
+      }
+    });
+
+    expect(receiverOffline.transfers.tx1?.status).toBe('paused-receiver-offline');
+
+    const serverPaused = syncplayReducer(progressed, {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          pause: {
+            transferId: 'tx1',
+            reason: 'paused'
+          }
+        }
+      }
+    });
+
+    expect(serverPaused.transfers.tx1?.status).toBe('paused-local');
+  });
+
   it('updates room and readiness from Set messages', () => {
     const listed = syncplayReducer(createInitialSyncplayState(), {
       type: 'server-message',

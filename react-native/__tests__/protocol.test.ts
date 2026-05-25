@@ -10,6 +10,11 @@ import {
   buildReadyMessage,
   buildRoomMessage,
   buildStateMessage,
+  buildTransferCancelMessage,
+  buildTransferDecisionMessage,
+  buildTransferPauseMessage,
+  buildTransferRequestMessage,
+  buildTransferResumeMessage,
   buildUserReadyMessage,
   createClientFeatures,
   encodeMessage
@@ -165,6 +170,90 @@ describe('Syncplay protocol helpers', () => {
         }
       }
     });
+  });
+
+  it('builds transfer messages without receiver-controlled file metadata', () => {
+    expect(buildTransferRequestMessage(' Aki ', 12)).toEqual({
+      Transfer: {
+        request: {
+          source: 'Aki',
+          offset: 12
+        }
+      }
+    });
+
+    expect(buildTransferRequestMessage('Aki')).toEqual({
+      Transfer: {
+        request: {
+          source: 'Aki',
+          offset: 0
+        }
+      }
+    });
+  });
+
+  it('builds transfer decision and control messages', () => {
+    expect(
+      buildTransferDecisionMessage({
+        transferId: 'tx1',
+        accepted: true,
+        fingerprint: 'fp',
+        chunkSize: 1024
+      })
+    ).toEqual({
+      Transfer: {
+        decision: {
+          transferId: 'tx1',
+          accepted: true,
+          fingerprint: 'fp',
+          chunkSize: 1024
+        }
+      }
+    });
+
+    expect(buildTransferPauseMessage('tx1', 'receiver')).toEqual({
+      Transfer: { pause: { transferId: 'tx1', reason: 'receiver' } }
+    });
+    expect(buildTransferResumeMessage('tx1', 2048)).toEqual({
+      Transfer: { resume: { transferId: 'tx1', offset: 2048 } }
+    });
+    expect(buildTransferResumeMessage('tx1', 2048, 'fp')).toEqual({
+      Transfer: { resume: { transferId: 'tx1', offset: 2048, fingerprint: 'fp' } }
+    });
+    expect(buildTransferCancelMessage('tx1', 'sender')).toEqual({
+      Transfer: { cancel: { transferId: 'tx1', reason: 'sender' } }
+    });
+  });
+
+  it('decodes transfer progress and error messages', () => {
+    const decoder = new LineDecoder();
+
+    expect(
+      decoder.push(
+        '{"Transfer":{"progress":{"transferId":"tx1","transferred":10,"size":20,"status":"downloading"}}}\n' +
+          '{"Transfer":{"error":{"transferId":"tx1","code":"source-left","message":"Source left."}}}\n'
+      )
+    ).toEqual([
+      {
+        Transfer: {
+          progress: {
+            transferId: 'tx1',
+            transferred: 10,
+            size: 20,
+            status: 'downloading'
+          }
+        }
+      },
+      {
+        Transfer: {
+          error: {
+            transferId: 'tx1',
+            code: 'source-left',
+            message: 'Source left.'
+          }
+        }
+      }
+    ]);
   });
 
   it('decodes binary chunks and keeps incomplete trailing data buffered', () => {

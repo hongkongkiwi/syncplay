@@ -14,7 +14,7 @@ from functools import wraps
 from urllib.parse import urlparse
 
 from twisted.application.internet import ClientService
-from twisted.internet.endpoints import HostnameEndpoint
+from twisted.internet.endpoints import HostnameEndpoint, connectProtocol
 from twisted.internet.protocol import ClientFactory
 from twisted.internet import reactor, task, defer, threads
 
@@ -42,6 +42,7 @@ from syncplay import utils, constants, version
 from syncplay.constants import PRIVACY_SENDHASHED_MODE, PRIVACY_DONTSEND_MODE, \
     PRIVACY_HIDDENFILENAME
 from syncplay.messages import getMissingStrings, getMessage, isNoOSDMessage
+from syncplay.filetransfer_client import FileTransferClient
 from syncplay.protocols import SyncClientProtocol
 from syncplay.utils import isMacOS
 class SyncClientFactory(ClientFactory):
@@ -141,6 +142,7 @@ class SyncplayClient(object):
         self._warnings = self._WarningManager(self._player, self.userlist, self.ui, self)
         self.fileSwitch = FileSwitchManager(self)
         self.playlist = SyncplayPlaylist(self)
+        self.fileTransfer = FileTransferClient(self, threaded_upload=True)
         self.playlistMayNeedRestoring = False
 
         self._serverSupportsTLS = True
@@ -161,6 +163,21 @@ class SyncplayClient(object):
         if self._protocol:
             self._protocol.drop()
         self._protocol = None
+
+    def handleTransfer(self, payload):
+        self.fileTransfer.handleTransfer(payload)
+
+    def openTransferSocket(self, ticket, handler):
+        host = ticket.get("host") or self._config["host"]
+        port = int(ticket.get("port") or self._config["port"])
+        if '[' in host:
+            host = host.strip('[]')
+        if self._clientSupportsTLS and self._serverSupportsTLS:
+            handler._tls_options = self.protocolFactory.options
+        endpoint = HostnameEndpoint(reactor, host, port)
+        d = connectProtocol(endpoint, handler)
+        d.addErrback(lambda failure: self.ui.showErrorMessage(str(failure.value)))
+        return d
 
     def initPlayer(self, player):
         self._player = player
@@ -744,6 +761,9 @@ class SyncplayClient(object):
         features["managedRooms"] = True
         features["persistentRooms"] = True
         features["setOthersReadiness"] = True
+        features["fileTransfer"] = self.ui.canHandleFileTransfers()
+        if features["fileTransfer"]:
+            features["fileTransferVersion"] = 1
 
         return features
 
@@ -802,6 +822,9 @@ class SyncplayClient(object):
     def getUserList(self):
         if self._protocol and self._protocol.logged:
             self._protocol.sendList()
+
+    def requestFileDownload(self, username):
+        self.fileTransfer.requestDownload(username)
 
     def showUserList(self, altUI=None):
         self.userlist.showUserList(altUI)
@@ -1704,6 +1727,21 @@ class UiManager(object):
 
     def setFeatures(self, featureList):
         self.__ui.setFeatures(featureList)
+
+    def promptFileTransferOffer(self, session):
+        prompt = getattr(self.__ui, "promptFileTransferOffer", None)
+        if prompt:
+            return prompt(session)
+        return None
+
+    def chooseFileTransferDestination(self, session):
+        chooser = getattr(self.__ui, "chooseFileTransferDestination", None)
+        if chooser:
+            return chooser(session)
+        return None
+
+    def canHandleFileTransfers(self):
+        return callable(getattr(self.__ui, "promptFileTransferOffer", None)) and callable(getattr(self.__ui, "chooseFileTransferDestination", None))
 
     def showDebugMessage(self, message):
         if constants.DEBUG_MODE and message.rstrip():

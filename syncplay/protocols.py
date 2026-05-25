@@ -12,6 +12,7 @@ from zope.interface.declarations import implementer
 
 import syncplay
 from syncplay.constants import PING_MOVING_AVERAGE_WEIGHT, CONTROLLED_ROOMS_MIN_VERSION, USER_READY_MIN_VERSION, SHARED_PLAYLIST_MIN_VERSION, CHAT_MIN_VERSION, UNKNOWN_UI_MODE
+from syncplay.filetransfer_wire import TransferFrameError, decode_frame
 from syncplay.messages import getMessage
 from syncplay.utils import meetsMinVersion
 
@@ -34,6 +35,14 @@ class JSONCommandProtocol(LineReceiver):
                 self.handleChat(message[1])
             elif command == "TLS":
                 self.handleTLS(message[1])
+            elif command == "Transfer":
+                self.handleTransfer(message[1])
+            elif command == "TransferConnect":
+                handler = getattr(self, "handleTransferConnect", None)
+                if handler:
+                    handler(message[1])
+                else:
+                    self.dropWithError(getMessage("unknown-command-server-error").format(message[1]))
             else:
                 self.dropWithError(getMessage("unknown-command-server-error").format(message[1]))  # TODO: log, not drop
 
@@ -235,6 +244,47 @@ class SyncClientProtocol(JSONCommandProtocol):
 
     def sendChatMessage(self, chatMessage):
         self.sendMessage({"Chat": chatMessage})
+
+    def handleTransfer(self, payload):
+        handler = getattr(self._client, "handleTransfer", None)
+        if handler:
+            handler(payload)
+
+    def sendTransfer(self, payload):
+        self.sendMessage({"Transfer": payload})
+
+    def sendTransferRequest(self, sourceUsername, offset=0):
+        self.sendTransfer({
+            "request": {
+                "source": sourceUsername.strip(),
+                "offset": int(offset)
+            }
+        })
+
+    def sendTransferDecision(self, transferId, accepted, reason=None, fingerprint=None, chunkSize=None):
+        decision = {
+            "transferId": transferId,
+            "accepted": bool(accepted)
+        }
+        if reason:
+            decision["reason"] = reason
+        if fingerprint:
+            decision["fingerprint"] = fingerprint
+        if chunkSize:
+            decision["chunkSize"] = int(chunkSize)
+        self.sendTransfer({"decision": decision})
+
+    def sendTransferPause(self, transferId, reason):
+        self.sendTransfer({"pause": {"transferId": transferId, "reason": reason}})
+
+    def sendTransferResume(self, transferId, offset, fingerprint=None):
+        resume = {"transferId": transferId, "offset": int(offset)}
+        if fingerprint:
+            resume["fingerprint"] = fingerprint
+        self.sendTransfer({"resume": resume})
+
+    def sendTransferCancel(self, transferId, reason):
+        self.sendTransfer({"cancel": {"transferId": transferId, "reason": reason}})
 
     def handleList(self, userList):
         self._client.userlist.clearList()
@@ -461,6 +511,9 @@ class SyncServerProtocol(JSONCommandProtocol):
         self._clientLatencyCalculation = 0
         self._clientLatencyCalculationArrivalTime = 0
         self._watcher = None
+        self._transferId = None
+        self._transferRole = None
+        self._transferBuffer = b""
 
     def __hash__(self):
         return hash('|'.join((
@@ -485,7 +538,10 @@ class SyncServerProtocol(JSONCommandProtocol):
         self.drop()
 
     def connectionLost(self, reason):
-        self._factory.removeWatcher(self._watcher)
+        if self._transferId:
+            self._factory.transferRelay.disconnect(self._transferId, self._transferRole)
+        if self._watcher:
+            self._factory.removeWatcher(self._watcher)
 
     def getFeatures(self):
         if not self._features:
@@ -562,6 +618,12 @@ class SyncServerProtocol(JSONCommandProtocol):
         if not self._factory.disableChat:
             self._factory.sendChat(self._watcher, chatMessage)
 
+    @requireLogged
+    def handleTransfer(self, payload):
+        handler = getattr(self._factory, "handleTransfer", None)
+        if handler:
+            handler(self._watcher, payload)
+
     def setFeatures(self, features):
         self._features = features
 
@@ -570,6 +632,34 @@ class SyncServerProtocol(JSONCommandProtocol):
 
     def setWatcher(self, watcher):
         self._watcher = watcher
+
+    def handleTransferConnect(self, payload):
+        if self._logged:
+            self.transport.loseConnection()
+            return
+        try:
+            if not isinstance(payload, dict):
+                raise TransferFrameError("invalid transfer connect payload")
+            ticket = self._factory.transferRelay.connect(payload.get("token"), self.transport)
+        except TransferFrameError as error:
+            print("Transfer socket rejected: {}".format(error))
+            self.transport.loseConnection()
+            return
+        self._transferId = ticket.transfer_id
+        self._transferRole = ticket.role
+        self.setRawMode()
+
+    def rawDataReceived(self, data):
+        self._transferBuffer += data
+        try:
+            while self._transferBuffer:
+                frame, self._transferBuffer = decode_frame(self._transferBuffer)
+                if frame is None:
+                    return
+                self._factory.transferRelay.relay_frame(self._transferId, self._transferRole, frame)
+        except TransferFrameError as error:
+            print("Transfer socket error: {}".format(error))
+            self.transport.loseConnection()
 
     def sendHello(self, clientVersion):
         hello = {}
@@ -615,6 +705,42 @@ class SyncServerProtocol(JSONCommandProtocol):
 
     def sendSet(self, setting):
         self.sendMessage({"Set": setting})
+
+    def sendTransfer(self, payload):
+        self.sendMessage({"Transfer": payload})
+
+    def sendTransferOffer(self, payload):
+        self.sendTransfer({"offer": payload})
+
+    def sendTransferTicket(self, payload):
+        self.sendTransfer({"ticket": payload})
+
+    def sendTransferProgress(self, payload):
+        self.sendTransfer({"progress": payload})
+
+    def sendTransferPause(self, transferId, reason, offset=None):
+        pause = {"transferId": transferId, "reason": reason}
+        if offset is not None:
+            pause["offset"] = int(offset)
+        self.sendTransfer({"pause": pause})
+
+    def sendTransferResume(self, transferId, offset, fingerprint=None):
+        resume = {"transferId": transferId, "offset": int(offset)}
+        if fingerprint:
+            resume["fingerprint"] = fingerprint
+        self.sendTransfer({"resume": resume})
+
+    def sendTransferCancel(self, transferId, reason):
+        self.sendTransfer({"cancel": {"transferId": transferId, "reason": reason}})
+
+    def sendTransferError(self, transferId, code, message):
+        self.sendTransfer({
+            "error": {
+                "transferId": transferId,
+                "code": code,
+                "message": message
+            }
+        })
 
     def sendNewControlledRoom(self, roomName, password):
         self.sendSet({

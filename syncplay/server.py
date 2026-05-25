@@ -18,6 +18,8 @@ except:
 
 import syncplay
 from syncplay import constants
+from syncplay.filetransfer_server import TransferManager, TransferServerConfig
+from syncplay.filetransfer_wire import TransferSocketRelay
 from syncplay.messages import getMessage
 from syncplay.protocols import SyncServerProtocol
 from syncplay.utils import RoomPasswordProvider, NotControlledRoom, RandomStringGenerator, meetsMinVersion, playlistIsValid, truncateText, getListAsMultilineString, convertMultilineStringToList
@@ -25,7 +27,13 @@ from syncplay.utils import RoomPasswordProvider, NotControlledRoom, RandomString
 class SyncFactory(Factory):
     def __init__(self, port='', password='', motdFilePath=None, roomsDbFile=None, permanentRoomsFile=None, isolateRooms=False, salt=None,
                  disableReady=False, disableChat=False, maxChatMessageLength=constants.MAX_CHAT_MESSAGE_LENGTH,
-                 maxUsernameLength=constants.MAX_USERNAME_LENGTH, statsDbFile=None, tlsCertPath=None):
+                 maxUsernameLength=constants.MAX_USERNAME_LENGTH, statsDbFile=None, tlsCertPath=None,
+                 enableFileTransfers=constants.FILE_TRANSFER_ENABLED,
+                 fileTransferMaxSize=constants.FILE_TRANSFER_MAX_SIZE,
+                 fileTransferMaxActive=constants.FILE_TRANSFER_MAX_ACTIVE,
+                 fileTransferMaxPerUser=constants.FILE_TRANSFER_MAX_PER_USER,
+                 fileTransferRateLimit=constants.FILE_TRANSFER_RATE_LIMIT,
+                 fileTransferTokenTtl=constants.FILE_TRANSFER_TOKEN_TTL):
         self.isolateRooms = isolateRooms
         syncplay.messages.setLanguage(syncplay.messages.getInitialLanguage())
         print(getMessage("welcome-server-notification").format(syncplay.version))
@@ -44,6 +52,15 @@ class SyncFactory(Factory):
         self.disableChat = disableChat
         self.maxChatMessageLength = maxChatMessageLength if maxChatMessageLength is not None else constants.MAX_CHAT_MESSAGE_LENGTH
         self.maxUsernameLength = maxUsernameLength if maxUsernameLength is not None else constants.MAX_USERNAME_LENGTH
+        self.fileTransferConfig = TransferServerConfig(
+            enabled=enableFileTransfers,
+            max_size=fileTransferMaxSize,
+            max_active=fileTransferMaxActive,
+            max_per_user=fileTransferMaxPerUser,
+            rate_limit=fileTransferRateLimit,
+            token_ttl=fileTransferTokenTtl,
+            chunk_size=constants.FILE_TRANSFER_CHUNK_SIZE,
+        )
         self.permanentRoomsFile = permanentRoomsFile if permanentRoomsFile is not None and os.path.isfile(permanentRoomsFile) else None
         self.permanentRooms = self.loadListFromMultilineTextFile(self.permanentRoomsFile) if self.permanentRoomsFile is not None else []
         if not isolateRooms:
@@ -65,6 +82,16 @@ class SyncFactory(Factory):
             self.certPath = None
             self.options = None
             self.serverAcceptsTLS = False
+        self.transferRelay = TransferSocketRelay(
+            progress_callback=lambda transfer_id, transferred: self.fileTransfers.report_progress(transfer_id, transferred),
+            rate_limit=self.fileTransferConfig.rate_limit,
+            clock=reactor,
+        )
+        self.fileTransfers = TransferManager(
+            self.fileTransferConfig,
+            self._getFileTransferWatchers,
+            token_observer=self.transferRelay.register_token,
+        )
 
     def loadListFromMultilineTextFile(self, path):
         if not os.path.isfile(path):
@@ -98,8 +125,19 @@ class SyncFactory(Factory):
         features["maxRoomNameLength"] = constants.MAX_ROOM_NAME_LENGTH
         features["maxFilenameLength"] = constants.MAX_FILENAME_LENGTH
         features["setOthersReadiness"] = True
+        features["fileTransfer"] = self.fileTransferConfig.enabled
+        if self.fileTransferConfig.enabled:
+            features["fileTransferVersion"] = 1
+            features["fileTransferMaxSize"] = self.fileTransferConfig.max_size
+            features["fileTransferChunkSize"] = self.fileTransferConfig.chunk_size
 
         return features
+
+    def _getFileTransferWatchers(self):
+        watchers = []
+        for room in self._roomManager.exportRooms().values():
+            watchers.extend(room.getWatchers())
+        return watchers
 
     def getMotd(self, userIp, username, room, clientVersion):
         oldClient = False
@@ -154,6 +192,7 @@ class SyncFactory(Factory):
 
     def removeWatcher(self, watcher):
         if watcher and watcher.getRoom():
+            self.fileTransfers.handle_watcher_left(watcher)
             self.sendLeftMessage(watcher)
             self._roomManager.removeWatcher(watcher)
             if self.roomsDbFile:
@@ -173,9 +212,33 @@ class SyncFactory(Factory):
             self._roomManager.broadcast(watcher, l)
 
     def sendFileUpdate(self, watcher):
+        self.fileTransfers.handle_watcher_file_changed(watcher)
         if watcher.getFile():
             l = lambda w: w.sendSetting(watcher.getName(), watcher.getRoom(), watcher.getFile(), None)
             self._roomManager.broadcast(watcher, l)
+
+    def handleTransfer(self, watcher, payload):
+        if "request" in payload:
+            self.fileTransfers.request_transfer(watcher, payload["request"])
+        elif "decision" in payload:
+            decision = payload["decision"]
+            if decision.get("accepted"):
+                self.fileTransfers.accept_transfer(watcher, decision.get("transferId"), decision.get("fingerprint"))
+            else:
+                self.fileTransfers.reject_transfer(watcher, decision.get("transferId"), decision.get("reason"))
+        elif "pause" in payload:
+            pause = payload["pause"]
+            session = self.fileTransfers.pause_transfer(watcher, pause.get("transferId"), pause.get("reason"))
+            if session:
+                self.transferRelay.pause(session.transfer_id, close=True)
+        elif "resume" in payload:
+            resume = payload["resume"]
+            session = self.fileTransfers.resume_transfer(watcher, resume.get("transferId"), resume.get("offset", 0), resume.get("fingerprint"))
+            if session and session.status == "approved":
+                self.transferRelay.resume(session.transfer_id)
+        elif "cancel" in payload:
+            cancel = payload["cancel"]
+            self.fileTransfers.cancel_transfer(watcher, cancel.get("transferId"), cancel.get("reason"))
 
     def forcePositionUpdate(self, watcher, doSeek, watcherPauseState):
         room = watcher.getRoom()
@@ -801,6 +864,27 @@ class Watcher(object):
                 return
             self._connector.sendMessage({"Chat": message})
 
+    def sendTransferOffer(self, payload):
+        self._connector.sendTransferOffer(payload)
+
+    def sendTransferTicket(self, payload):
+        self._connector.sendTransferTicket(payload)
+
+    def sendTransferProgress(self, payload):
+        self._connector.sendTransferProgress(payload)
+
+    def sendTransferPause(self, transferId, reason, offset=None):
+        self._connector.sendTransferPause(transferId, reason, offset)
+
+    def sendTransferResume(self, transferId, offset, fingerprint=None):
+        self._connector.sendTransferResume(transferId, offset, fingerprint)
+
+    def sendTransferCancel(self, transferId, reason):
+        self._connector.sendTransferCancel(transferId, reason)
+
+    def sendTransferError(self, transferId, code, message):
+        self._connector.sendTransferError(transferId, code, message)
+
     def sendList(self, toGUIOnly=False):
         if toGUIOnly and self.isGUIUser(self._connector.getFeatures()):
             clientFeatures = self._connector.getFeatures()
@@ -913,6 +997,12 @@ class ConfigurationGetter(object):
         self._argparser.add_argument('--max-username-length', metavar='maxUsernameLength', type=int, nargs='?', help=getMessage("server-maxusernamelength-argument").format(constants.MAX_USERNAME_LENGTH))
         self._argparser.add_argument('--stats-db-file', metavar='file', type=str, nargs='?', help=getMessage("server-stats-db-file-argument"))
         self._argparser.add_argument('--tls', metavar='path', type=str, nargs='?', help=getMessage("server-startTLS-argument"))
+        self._argparser.add_argument('--enable-file-transfers', action='store_true', help=getMessage("server-enable-file-transfers-argument"))
+        self._argparser.add_argument('--file-transfer-max-size', metavar='bytes', type=int, nargs='?', default=constants.FILE_TRANSFER_MAX_SIZE, help=getMessage("server-file-transfer-max-size-argument").format(constants.FILE_TRANSFER_MAX_SIZE))
+        self._argparser.add_argument('--file-transfer-max-active', metavar='count', type=int, nargs='?', default=constants.FILE_TRANSFER_MAX_ACTIVE, help=getMessage("server-file-transfer-max-active-argument").format(constants.FILE_TRANSFER_MAX_ACTIVE))
+        self._argparser.add_argument('--file-transfer-max-per-user', metavar='count', type=int, nargs='?', default=constants.FILE_TRANSFER_MAX_PER_USER, help=getMessage("server-file-transfer-max-per-user-argument").format(constants.FILE_TRANSFER_MAX_PER_USER))
+        self._argparser.add_argument('--file-transfer-rate-limit', metavar='bytes', type=int, nargs='?', default=constants.FILE_TRANSFER_RATE_LIMIT, help=getMessage("server-file-transfer-rate-limit-argument"))
+        self._argparser.add_argument('--file-transfer-token-ttl', metavar='seconds', type=int, nargs='?', default=constants.FILE_TRANSFER_TOKEN_TTL, help=getMessage("server-file-transfer-token-ttl-argument").format(constants.FILE_TRANSFER_TOKEN_TTL))
         self._argparser.add_argument('--ipv4-only', action='store_true', help=getMessage("server-listen-only-on-ipv4"))
         self._argparser.add_argument('--ipv6-only', action='store_true', help=getMessage("server-listen-only-on-ipv6"))
         self._argparser.add_argument('--interface-ipv4', metavar='interfaceIPv4', type=str, nargs='?', help=getMessage("server-interface-ipv4"), default='')

@@ -8,6 +8,7 @@ import {
   Check,
   Clock,
   DoorOpen,
+  Download,
   Film,
   FolderOpen,
   KeyRound,
@@ -70,6 +71,7 @@ import {
   stripManagedRoomName
 } from './src/app/appHelpers';
 import { scanMediaDirectory } from './src/app/directoryScanner';
+import { createExpoTransferSink, createExpoTransferSource } from './src/app/fileTransferSink';
 import {
   PREFERENCES_STORAGE_KEY,
   createPersistedPreferences,
@@ -121,6 +123,7 @@ export default function App() {
   const [chatDraft, setChatDraft] = useState('');
   const [mediaUri, setMediaUri] = useState<string | null>(null);
   const [mediaLibrary, setMediaLibrary] = useState<MediaLibraryItem[]>([]);
+  const [transferDirectory, setTransferDirectory] = useState<Directory | null>(null);
   const [streamUrl, setStreamUrl] = useState('');
   const [seekDraft, setSeekDraft] = useState('0:00');
   const [playlistUrl, setPlaylistUrl] = useState('');
@@ -147,6 +150,7 @@ export default function App() {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAppliedPlaylistKeyRef = useRef<string | null>(null);
   const lastAutoFileSwitchRef = useRef<string | null>(null);
+  const openedTransferSocketsRef = useRef<Map<string, string>>(new Map());
   const wasConnectedRef = useRef(false);
 
   const player = useVideoPlayer(mediaUri, instance => {
@@ -365,6 +369,7 @@ export default function App() {
   });
 
   const roomUsers = state.rooms[state.profile.room] ?? [];
+  const transfers = Object.values(state.transfers);
   const connected = state.connection.status === 'connected';
   const currentRoomUser = roomUsers.find(user => user.username === state.profile.username);
   const canControlRoom =
@@ -425,6 +430,71 @@ export default function App() {
     lastAutoFileSwitchRef.current = candidate.file.name;
     openLibraryFileByName(candidate.file.name);
   }, [autoFileSwitch, connected, mediaLibrary, roomUsers, state.media?.name, state.profile.username]);
+
+  useEffect(() => {
+    if (!connected) {
+      openedTransferSocketsRef.current.clear();
+      return;
+    }
+
+    for (const transfer of transfers) {
+      if (transfer.status !== 'approved') {
+        openedTransferSocketsRef.current.delete(transfer.transferId);
+      }
+      if (
+        transfer.status !== 'approved' ||
+        !transfer.token ||
+        openedTransferSocketsRef.current.get(transfer.transferId) === transfer.token
+      ) {
+        continue;
+      }
+      if (transfer.role === 'receiver') {
+        openedTransferSocketsRef.current.set(transfer.transferId, transfer.token);
+        const sink = createExpoTransferSink(transfer.transferId, transfer.file?.name ?? transfer.transferId, transferDirectory ?? undefined);
+        connection.openTransferSocket(
+          {
+            transferId: transfer.transferId,
+            token: transfer.token,
+            role: 'receiver',
+            offset: sink.getOffset()
+          },
+          sink,
+          completedPath => {
+            openedTransferSocketsRef.current.delete(transfer.transferId);
+            dispatch({ type: 'transfer-completed', transferId: transfer.transferId, completedPath });
+          },
+          undefined,
+          undefined,
+          _error => {
+            openedTransferSocketsRef.current.delete(transfer.transferId);
+            dispatch({ type: 'transfer-failed', transferId: transfer.transferId });
+          }
+        );
+      } else if (transfer.role === 'sender') {
+        const sourceItem = findMediaByName(mediaLibrary, transfer.file?.name ?? state.media?.name);
+        if (!sourceItem) {
+          continue;
+        }
+        openedTransferSocketsRef.current.set(transfer.transferId, transfer.token);
+        connection.openTransferSocket(
+          {
+            transferId: transfer.transferId,
+            token: transfer.token,
+            role: 'sender',
+            offset: transfer.offset
+          },
+          { write: () => undefined },
+          undefined,
+          createExpoTransferSource(sourceItem.uri),
+          undefined,
+          _error => {
+            openedTransferSocketsRef.current.delete(transfer.transferId);
+            dispatch({ type: 'transfer-failed', transferId: transfer.transferId });
+          }
+        );
+      }
+    }
+  }, [connected, connection, mediaLibrary, state.media?.name, transferDirectory, transfers]);
 
   useEffect(() => {
     if (connected && activeScreen === 'connect') {
@@ -548,6 +618,16 @@ export default function App() {
         status: 'error',
         error: error instanceof Error ? error.message : 'Could not read that folder.'
       });
+    }
+  }
+
+  async function pickTransferDirectory() {
+    try {
+      const directory = await Directory.pickDirectoryAsync();
+      setTransferDirectory(directory);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not select download folder.';
+      dispatch({ type: 'connection-status', status: 'error', error: message });
     }
   }
 
@@ -994,6 +1074,13 @@ export default function App() {
               onSetReady={nextReady => connection.sendUserReady(item.username, nextReady)}
               canOpenFile={Boolean(item.file?.name && findMediaByName(mediaLibrary, item.file.name))}
               onOpenFile={() => openLibraryFileByName(item.file?.name ?? null)}
+              canRequestDownload={Boolean(
+                connected &&
+                  state.server.features.fileTransfer &&
+                  item.username !== state.profile.username &&
+                  item.file?.name
+              )}
+              onRequestDownload={() => connection.requestTransfer(item.username)}
             />
           )}
         />
@@ -1144,6 +1231,77 @@ export default function App() {
             disabled={!connected}
           />
         </View>
+      </View>
+    ) : activeScreen === 'transfers' ? (
+      <View style={styles.panel}>
+        <View style={styles.panelTitleRow}>
+          <Download color="#7fd2ff" size={18} />
+          <Text style={styles.panelTitle}>Transfers</Text>
+          <Text style={styles.countText}>{transfers.length}</Text>
+          <ActionButton label="Folder" icon={FolderOpen} tone="ghost" onPress={pickTransferDirectory} />
+        </View>
+        <FlatList
+          data={transfers}
+          keyExtractor={item => item.transferId}
+          scrollEnabled={false}
+          ListEmptyComponent={<Text style={styles.mutedText}>No transfers yet.</Text>}
+          renderItem={({ item }) => (
+            <View style={styles.mediaLibraryRow}>
+              <Download color="#8fa3b8" size={16} />
+              <View style={styles.userMain}>
+                <Text style={styles.playlistText} numberOfLines={1}>
+                  {item.file?.name ?? item.transferId}
+                </Text>
+                <Text style={styles.smallText}>
+                  {item.status} {item.size ? `· ${formatBytes(item.transferred)} / ${formatBytes(item.size)}` : ''}
+                </Text>
+                {item.status === 'complete' && item.completedPath ? (
+                  <Text style={styles.smallText} numberOfLines={1}>
+                    Saved to {item.completedPath}
+                  </Text>
+                ) : null}
+              </View>
+              {item.status === 'downloading' ? (
+                <Pressable style={styles.userReadyButton} onPress={() => connection.pauseTransfer(item.transferId, item.role ?? 'receiver')}>
+                  <Pause color="#d7e5ef" size={16} />
+                </Pressable>
+              ) : null}
+              {item.status === 'incoming-request' ? (
+                <Pressable
+                  style={styles.userReadyButton}
+                  onPress={() => {
+                    const sourceItem = findMediaByName(mediaLibrary, item.file?.name ?? state.media?.name);
+                    if (sourceItem) {
+                      connection.sendTransferDecision({ transferId: item.transferId, accepted: true });
+                    } else {
+                      connection.sendTransferDecision({ transferId: item.transferId, accepted: false, reason: 'missing-local-media' });
+                    }
+                  }}
+                >
+                  <Check color="#d7e5ef" size={16} />
+                </Pressable>
+              ) : null}
+              {item.status === 'incoming-request' ? (
+                <Pressable
+                  style={styles.userReadyButton}
+                  onPress={() => connection.sendTransferDecision({ transferId: item.transferId, accepted: false, reason: 'rejected' })}
+                >
+                  <Trash2 color="#d7e5ef" size={16} />
+                </Pressable>
+              ) : null}
+              {item.status.startsWith('paused') ? (
+                <Pressable style={styles.userReadyButton} onPress={() => connection.resumeTransfer(item.transferId, item.transferred || item.offset, item.fingerprint)}>
+                  <Play color="#d7e5ef" size={16} />
+                </Pressable>
+              ) : null}
+              {item.status !== 'incoming-request' ? (
+                <Pressable style={styles.userReadyButton} onPress={() => connection.cancelTransfer(item.transferId, item.role ?? 'receiver')}>
+                  <Trash2 color="#d7e5ef" size={16} />
+                </Pressable>
+              ) : null}
+            </View>
+          )}
+        />
       </View>
     ) : activeScreen === 'chat' ? (
       <View style={styles.panel}>
@@ -1364,8 +1522,10 @@ function renderTabIcon(screenId: AppScreenId, color: string) {
       return <Plug color={color} size={17} />;
     case 'watch':
       return <Film color={color} size={17} />;
-    case 'room':
+  case 'room':
       return <Users color={color} size={17} />;
+    case 'transfers':
+      return <Download color={color} size={17} />;
     case 'chat':
       return <MessageCircle color={color} size={17} />;
     case 'settings':
@@ -1381,7 +1541,9 @@ function UserRow({
   canSetReady,
   onSetReady,
   canOpenFile,
-  onOpenFile
+  onOpenFile,
+  canRequestDownload,
+  onRequestDownload
 }: {
   user: RoomUser;
   currentUser: string;
@@ -1389,6 +1551,8 @@ function UserRow({
   onSetReady: (nextReady: boolean) => void;
   canOpenFile: boolean;
   onOpenFile: () => void;
+  canRequestDownload: boolean;
+  onRequestDownload: () => void;
 }) {
   return (
     <View style={styles.userRow}>
@@ -1417,6 +1581,11 @@ function UserRow({
       {canOpenFile ? (
         <Pressable style={styles.userReadyButton} onPress={onOpenFile}>
           <Film color="#d7e5ef" size={16} />
+        </Pressable>
+      ) : null}
+      {canRequestDownload ? (
+        <Pressable style={styles.userReadyButton} onPress={onRequestDownload}>
+          <Download color="#d7e5ef" size={16} />
         </Pressable>
       ) : null}
     </View>

@@ -1,4 +1,5 @@
 import md5 from 'blueimp-md5';
+import { Buffer } from 'buffer';
 import TcpSocket from 'react-native-tcp-socket';
 
 import {
@@ -11,6 +12,11 @@ import {
   buildReadyMessage,
   buildRoomMessage,
   buildStateMessage,
+  buildTransferCancelMessage,
+  buildTransferDecisionMessage,
+  buildTransferPauseMessage,
+  buildTransferRequestMessage,
+  buildTransferResumeMessage,
   buildUserReadyMessage,
   encodeMessage,
   type ClientMessage,
@@ -18,9 +24,10 @@ import {
   type SyncplayServerMessage
 } from './protocol';
 import type { ConnectionStatus } from './state';
+import { TransferSocket, type TransferFileSink, type TransferFileSource, type TransferSocketLike } from './transferSocket';
 
 type SocketLike = {
-  write(data: string, encoding?: 'utf8'): boolean;
+  write(data: string | Uint8Array, encoding?: 'utf8'): boolean;
   destroy(): void;
   removeAllListeners?(): void;
   on(event: 'data', handler: (data: string | Uint8Array) => void): void;
@@ -42,8 +49,19 @@ export type ConnectionConfig = {
   password?: string;
 };
 
+export type TransferTicket = {
+  transferId: string;
+  token: string;
+  role: 'sender' | 'receiver';
+  host?: string | null;
+  port?: number | null;
+  offset?: number;
+  file?: { size?: number | null } | null;
+};
+
 export class SyncplayConnection {
   private socket: SocketLike | null = null;
+  private lastConfig: ConnectionConfig | null = null;
   private decoder = new LineDecoder();
   private connected = false;
   private lastLatencyTimestamp = 0;
@@ -58,6 +76,7 @@ export class SyncplayConnection {
   connect(config: ConnectionConfig): void {
     this.disconnect();
     this.onStatus('connecting');
+    this.lastConfig = config;
 
     const options = {
       host: config.host.trim(),
@@ -74,9 +93,7 @@ export class SyncplayConnection {
         })
       );
     };
-    const socket = (config.tls
-      ? TcpSocket.connectTLS(options, onConnect)
-      : TcpSocket.createConnection(options, onConnect)) as SocketLike;
+    const socket = this.createSocket(options, onConnect);
 
     socket.on('data', data => this.handleData(data));
     socket.on('error', error => {
@@ -142,6 +159,94 @@ export class SyncplayConnection {
     this.send(buildPlaylistIndexMessage(index));
   }
 
+  requestTransfer(source: string, offset = 0): void {
+    this.send(buildTransferRequestMessage(source, offset));
+  }
+
+  sendTransferDecision(args: {
+    transferId: string;
+    accepted: boolean;
+    reason?: string;
+    fingerprint?: string;
+    chunkSize?: number;
+  }): void {
+    this.send(buildTransferDecisionMessage(args));
+  }
+
+  pauseTransfer(transferId: string, reason: string): void {
+    this.send(buildTransferPauseMessage(transferId, reason));
+  }
+
+  resumeTransfer(transferId: string, offset: number, fingerprint?: string | null): void {
+    this.send(buildTransferResumeMessage(transferId, offset, fingerprint));
+  }
+
+  cancelTransfer(transferId: string, reason: string): void {
+    this.send(buildTransferCancelMessage(transferId, reason));
+  }
+
+  openTransferSocket(
+    ticket: TransferTicket,
+    sink: TransferFileSink,
+    onComplete?: (path: string) => void,
+    source?: TransferFileSource,
+    chunkSize?: number,
+    onError?: (error: Error) => void
+  ): TransferSocket {
+    let transfer: TransferSocket;
+    let uploadStarted = false;
+    const socket = this.createSocket(
+      {
+        host: (ticket.host ?? '').trim() || this.lastConfig?.host.trim() || 'localhost',
+        port: ticket.port ?? this.lastConfig?.port ?? 8999,
+        rejectUnauthorized: true
+      },
+      () => {
+        transfer.connect({
+          transferId: ticket.transferId,
+          token: ticket.token,
+          role: ticket.role,
+          offset: ticket.offset ?? 0
+        });
+      }
+    );
+    transfer = new TransferSocket(
+      socket as TransferSocketLike,
+      {
+        write: chunk => sink.write(chunk),
+        finalize: () => {
+          const destinationPath = sink.finalize?.() ?? null;
+          if (typeof destinationPath === 'string') {
+            onComplete?.(destinationPath);
+          }
+          return destinationPath;
+        }
+      },
+      message => {
+        if (message !== 'ready' || ticket.role !== 'sender' || uploadStarted) {
+          return;
+        }
+        uploadStarted = true;
+        if (!source) {
+          onError?.(new Error(`Missing transfer source for ${ticket.transferId}`));
+          socket.destroy();
+          return;
+        }
+        void transfer
+          .upload(ticket.transferId, source, ticket.offset ?? 0, chunkSize)
+          .catch(error => onError?.(error instanceof Error ? error : new Error(String(error))));
+      },
+      ticket.file?.size
+    );
+    socket.on('data', data => transfer.handleData(typeof data === 'string' ? new Uint8Array(Buffer.from(data, 'binary')) : data));
+    socket.on('error', error => {
+      onError?.(error);
+      socket.destroy();
+    });
+    socket.on('close', () => socket.removeAllListeners?.());
+    return transfer;
+  }
+
   sendPlayback(position: number, paused: boolean, doSeek = false): void {
     this.send(
       buildStateMessage({
@@ -204,5 +309,11 @@ export class SyncplayConnection {
     this.socket = null;
     socket.removeAllListeners?.();
     socket.destroy();
+  }
+
+  private createSocket(options: { host: string; port: number; rejectUnauthorized: boolean }, onConnect: () => void): SocketLike {
+    return (this.lastConfig?.tls
+      ? TcpSocket.connectTLS(options, onConnect)
+      : TcpSocket.createConnection(options, onConnect)) as SocketLike;
   }
 }

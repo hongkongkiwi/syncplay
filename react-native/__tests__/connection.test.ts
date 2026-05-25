@@ -1,6 +1,8 @@
+import { Buffer } from 'buffer';
 import TcpSocket from 'react-native-tcp-socket';
 
 import { SyncplayConnection } from '../src/syncplay/connection';
+import { encodeTransferFrame } from '../src/syncplay/transferSocket';
 
 jest.mock('react-native-tcp-socket', () => ({
   __esModule: true,
@@ -162,6 +164,77 @@ describe('SyncplayConnection', () => {
         }
       }
     ]);
+  });
+
+  it('sends transfer request, decision, pause, resume, and cancel messages', () => {
+    const { socket } = createMockSocket();
+    let onConnect: () => void = () => undefined;
+    jest.mocked(TcpSocket.createConnection).mockImplementation((options, callback) => {
+      onConnect = callback;
+      return socket as never;
+    });
+    const connection = new SyncplayConnection(jest.fn(), jest.fn(), () => ({
+      position: null,
+      paused: true
+    }));
+
+    connection.connect({ host: 'syncplay.pl', port: 8999, username: 'Mobile', room: 'default' });
+    onConnect();
+    socket.write.mockClear();
+    connection.requestTransfer('Aki', 10);
+    connection.sendTransferDecision({ transferId: 'tx1', accepted: true, fingerprint: 'fp' });
+    connection.pauseTransfer('tx1', 'receiver');
+    connection.resumeTransfer('tx1', 20, 'fp');
+    connection.cancelTransfer('tx1', 'receiver');
+
+    expect(socket.write.mock.calls.map(call => JSON.parse(call[0]))).toEqual([
+      { Transfer: { request: { source: 'Aki', offset: 10 } } },
+      { Transfer: { decision: { transferId: 'tx1', accepted: true, fingerprint: 'fp' } } },
+      { Transfer: { pause: { transferId: 'tx1', reason: 'receiver' } } },
+      { Transfer: { resume: { transferId: 'tx1', offset: 20, fingerprint: 'fp' } } },
+      { Transfer: { cancel: { transferId: 'tx1', reason: 'receiver' } } }
+    ]);
+  });
+
+  it('opens a receiver transfer socket and writes frames to the sink', () => {
+    const { socket, handlers } = createMockSocket();
+    let onConnect: () => void = () => undefined;
+    jest.mocked(TcpSocket.createConnection).mockImplementation((options, callback) => {
+      onConnect = callback;
+      expect(options).toEqual({ host: 'syncplay.pl', port: 8999, rejectUnauthorized: true });
+      return socket as never;
+    });
+    const sink = {
+      write: jest.fn(),
+      finalize: jest.fn(() => '/downloads/movie.mkv')
+    };
+    const completed: string[] = [];
+    const connection = new SyncplayConnection(jest.fn(), jest.fn(), () => ({
+      position: null,
+      paused: true
+    }));
+
+    connection.openTransferSocket(
+      {
+        transferId: 'tx1',
+        token: 'secret',
+        role: 'receiver',
+        host: 'syncplay.pl',
+        port: 8999,
+        offset: 0
+      },
+      sink,
+      path => completed.push(path)
+    );
+    onConnect();
+    handlers.data?.(Buffer.from(encodeTransferFrame({ frameType: 1, offset: 0, payload: new Uint8Array([7]) })).toString('binary'));
+    handlers.data?.(encodeTransferFrame({ frameType: 3, offset: 1, payload: new Uint8Array() }));
+
+    expect(socket.write).toHaveBeenCalledWith(
+      '{"TransferConnect":{"transferId":"tx1","token":"secret","role":"receiver","offset":0}}\r\n'
+    );
+    expect(sink.write).toHaveBeenCalledWith(new Uint8Array([7]));
+    expect(completed).toEqual(['/downloads/movie.mkv']);
   });
 
   it('replies to server state pings with current playback and latency', () => {

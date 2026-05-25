@@ -512,6 +512,12 @@ en = {
     "server-maxusernamelength-argument": "Maximum number of characters in a username (default is {})",
     "server-stats-db-file-argument": "Enable server stats using the SQLite db file provided",
     "server-startTLS-argument": "Enable TLS connections using the certificate files in the path provided",
+    "server-enable-file-transfers-argument": "enable relayed file transfers",
+    "server-file-transfer-max-size-argument": "maximum file transfer size in bytes (default is {})",
+    "server-file-transfer-max-active-argument": "maximum number of active file transfers (default is {})",
+    "server-file-transfer-max-per-user-argument": "maximum uploads and downloads per user (default is {})",
+    "server-file-transfer-rate-limit-argument": "file transfer rate limit in bytes per second",
+    "server-file-transfer-token-ttl-argument": "file transfer ticket lifetime in seconds (default is {})",
     "server-messed-up-motd-unescaped-placeholders": "Message of the Day has unescaped placeholders. All $ signs should be doubled ($$).",
     "server-messed-up-motd-too-long": "Message of the Day is too long - maximum of {} chars, {} given.",
     "server-listen-only-on-ipv4": "Listen only on IPv4 when starting the server.",
@@ -551,6 +557,13 @@ en = {
     "addotherusersstreamstoplaylist-menu-label": "Add {}' stream to playlist",  # [Username]
     "openusersstream-menu-label": "Open {}'s stream",  # [username]'s
     "openusersfile-menu-label": "Open {}'s file",  # [username]'s
+    "file-transfer-request-menu-label": "Download {}'s file",  # [username]'s
+    "file-transfer-offer-title": "File transfer request",
+    "file-transfer-offer-question": "{} wants to download your loaded file:\n{}\n{}\n\nAllow this transfer?",  # Username, filename, size
+    "file-transfer-save-title": "Save transferred file",
+    "file-transfer-save-filter": "All files (*)",
+    "unknown-userlist-item": "Unknown user",
+    "unknown-file-size": "Unknown size",
 
     "setasready-menu-label": "Set {} as ready", # [Username]
     "setasnotready-menu-label": "Set {} as not ready", # [Username]
