@@ -6,12 +6,12 @@ export type AppScreen = {
 };
 
 export const APP_SCREENS: AppScreen[] = [
-  { id: 'connect', title: 'Connect' },
+  { id: 'connect', title: 'Connection' },
   { id: 'watch', title: 'Watch' },
   { id: 'room', title: 'Room' },
   { id: 'transfers', title: 'Transfers' },
   { id: 'chat', title: 'Chat' },
-  { id: 'settings', title: 'Settings' }
+  { id: 'settings', title: 'Options' }
 ];
 
 export function getInitialScreen(connected: boolean): AppScreenId {

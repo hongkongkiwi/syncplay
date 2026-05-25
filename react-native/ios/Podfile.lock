@@ -223,6 +223,8 @@ PODS:
   - ExpoModulesWorklets (56.0.12):
     - ExpoModulesCore
     - ExpoModulesJSI
+  - ExpoSystemUI (56.0.5):
+    - ExpoModulesCore
   - ExpoVideo (56.1.2):
     - ExpoModulesCore
   - EXUpdatesInterface (56.0.2):
@@ -2087,6 +2089,28 @@ PODS:
     - React-utils (= 0.85.3)
     - ReactNativeDependencies
   - ReactNativeDependencies (0.85.3)
+  - RNCAsyncStorage (2.2.0):
+    - hermes-engine
+    - RCTRequired
+    - RCTTypeSafety
+    - React-Core
+    - React-Core-prebuilt
+    - React-debug
+    - React-Fabric
+    - React-featureflags
+    - React-graphics
+    - React-ImageManager
+    - React-jsi
+    - React-NativeModulesApple
+    - React-RCTFabric
+    - React-renderercss
+    - React-rendererdebug
+    - React-utils
+    - ReactCodegen
+    - ReactCommon/turbomodule/bridging
+    - ReactCommon/turbomodule/core
+    - ReactNativeDependencies
+    - Yoga
   - RNSVG (15.15.4):
     - hermes-engine
     - RCTRequired
@@ -2153,6 +2177,7 @@ DEPENDENCIES:
   - ExpoModulesCore (from `../node_modules/expo-modules-core/ExpoModulesCore.podspec`)
   - ExpoModulesJSI (from `../node_modules/expo-modules-jsi/apple`)
   - ExpoModulesWorklets (from `../node_modules/expo-modules-core/ExpoModulesWorklets.podspec`)
+  - ExpoSystemUI (from `../node_modules/expo-system-ui/ios`)
   - ExpoVideo (from `../node_modules/expo-video/ios/ExpoVideo.podspec`)
   - EXUpdatesInterface (from `../node_modules/expo-updates-interface/ios`)
   - FBLazyVector (from `../node_modules/react-native/Libraries/FBLazyVector`)
@@ -2231,6 +2256,7 @@ DEPENDENCIES:
   - ReactCodegen (from `build/generated/ios/ReactCodegen`)
   - ReactCommon/turbomodule/core (from `../node_modules/react-native/ReactCommon`)
   - ReactNativeDependencies (from `../node_modules/react-native/third-party-podspecs/ReactNativeDependencies.podspec`)
+  - "RNCAsyncStorage (from `../node_modules/@react-native-async-storage/async-storage`)"
   - RNSVG (from `../node_modules/react-native-svg`)
   - Yoga (from `../node_modules/react-native/ReactCommon/yoga`)
 
@@ -2275,6 +2301,8 @@ EXTERNAL SOURCES:
     :path: "../node_modules/expo-modules-jsi/apple"
   ExpoModulesWorklets:
     :podspec: "../node_modules/expo-modules-core/ExpoModulesWorklets.podspec"
+  ExpoSystemUI:
+    :path: "../node_modules/expo-system-ui/ios"
   ExpoVideo:
     :podspec: "../node_modules/expo-video/ios/ExpoVideo.podspec"
   EXUpdatesInterface:
@@ -2430,6 +2458,8 @@ EXTERNAL SOURCES:
     :path: "../node_modules/react-native/ReactCommon"
   ReactNativeDependencies:
     :podspec: "../node_modules/react-native/third-party-podspecs/ReactNativeDependencies.podspec"
+  RNCAsyncStorage:
+    :path: "../node_modules/@react-native-async-storage/async-storage"
   RNSVG:
     :path: "../node_modules/react-native-svg"
   Yoga:
@@ -2455,6 +2485,7 @@ SPEC CHECKSUMS:
   ExpoModulesCore: 064034b2f6c12481350d57c1997f040fb2fc8b67
   ExpoModulesJSI: f25a013ea9a79904bdd535e4bea0872e155cde09
   ExpoModulesWorklets: 5349d7281651a11e0a5d14f32db8bb47e32c2ff4
+  ExpoSystemUI: 8f4fb641c6a6ebe2a01dda0fbd3fdd952ab5823a
   ExpoVideo: 8ebbbf65778c5f986d65fc17bb60b79e9d7624e6
   EXUpdatesInterface: 25408a97d682355eb9fb37e5aa6e22caece1881f
   FBLazyVector: 24e62c765683b8d89006a88a2c8f5cf019f0074d
@@ -2532,9 +2563,10 @@ SPEC CHECKSUMS:
   ReactCodegen: c8f81e6c6f762dcf442a6203a1fb58f7dafc8014
   ReactCommon: 7dfc3250793bf36cf221096ff59e1179e13eef7f
   ReactNativeDependencies: efcd137cd135e72c25451e4b3f811f854eae361b
+  RNCAsyncStorage: 2ad919e88b8bc2cd80e8697ce66d04d006743283
   RNSVG: 04044c3abcf177fd674a1a3d13097efa1adebcbe
   Yoga: 77dfa8673de2874e1855002ae59c68b8be9b007b
 
-PODFILE CHECKSUM: 11b23805d68ddf5ea8acc8d1393238d9b2a14a84
+PODFILE CHECKSUM: 38350b41c576fadbed19ff6be818def32e56f30f
 
 COCOAPODS: 1.16.2

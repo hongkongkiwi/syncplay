@@ -309,6 +309,8 @@ describe('Syncplay app state', () => {
     });
 
     expect(paused.transfers.tx1?.status).toBe('paused-source-changed-media');
+    expect(paused.transfers.tx1?.errorCode).toBe('source-changed-media');
+    expect(paused.transfers.tx1?.errorMessage).toBe('Source changed media.');
 
     const receiverOffline = syncplayReducer(completed, {
       type: 'server-message',
@@ -338,6 +340,28 @@ describe('Syncplay app state', () => {
     });
 
     expect(serverPaused.transfers.tx1?.status).toBe('paused-local');
+
+    const locallyFailed = syncplayReducer(paused, {
+      type: 'transfer-failed',
+      transferId: 'tx1',
+      error: 'Socket closed before the download finished.'
+    });
+
+    expect(locallyFailed.transfers.tx1).toMatchObject({
+      status: 'failed',
+      errorCode: null,
+      errorMessage: 'Socket closed before the download finished.'
+    });
+
+    const retried = syncplayReducer(locallyFailed, {
+      type: 'transfer-retry',
+      transferId: 'tx1'
+    });
+
+    expect(retried.transfers.tx1).toMatchObject({
+      status: 'approved',
+      errorMessage: null
+    });
   });
 
   it('updates room and readiness from Set messages', () => {
