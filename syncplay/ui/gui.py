@@ -523,6 +523,24 @@ class MainWindow(QtWidgets.QMainWindow):
         # TODO: Prompt user
         return None
 
+    def promptFileTransferOffer(self, session):
+        file_ = session.file or {}
+        filename = file_.get("name") if isinstance(file_, dict) else getattr(file_, "name", "")
+        size = file_.get("size") if isinstance(file_, dict) else getattr(file_, "size", None)
+        requester = session.receiver or session.source or getMessage("unknown-userlist-item")
+        message = getMessage("file-transfer-offer-question").format(
+            requester,
+            filename or session.transfer_id,
+            formatSize(size) if size is not None else getMessage("unknown-file-size"),
+        )
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            getMessage("file-transfer-offer-title"),
+            message,
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        return reply == QtWidgets.QMessageBox.Yes
+
     def setFeatures(self, featureList):
         if not featureList["readiness"]:
             self.readyPushButton.setEnabled(False)

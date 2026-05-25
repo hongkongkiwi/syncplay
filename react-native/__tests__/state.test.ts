@@ -212,7 +212,27 @@ describe('Syncplay app state', () => {
       transferred: 10
     });
 
-    const paused = syncplayReducer(progressed, {
+    const completed = syncplayReducer(progressed, {
+      type: 'server-message',
+      message: {
+        Transfer: {
+          progress: {
+            transferId: 'tx1',
+            transferred: 123,
+            size: 123,
+            status: 'complete',
+            destinationPath: '/downloads/movie.mkv'
+          }
+        }
+      }
+    });
+
+    expect(completed.transfers.tx1).toMatchObject({
+      status: 'complete',
+      completedPath: '/downloads/movie.mkv'
+    });
+
+    const paused = syncplayReducer(completed, {
       type: 'server-message',
       message: {
         Transfer: {

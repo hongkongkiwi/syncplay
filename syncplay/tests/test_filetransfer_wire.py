@@ -86,6 +86,22 @@ def test_relay_forwards_data_frame_from_sender_to_receiver():
     assert receiver.writes == [encode_frame(frame)]
 
 
+def test_relay_reports_data_progress_for_sender_frames():
+    reports = []
+    relay = TransferSocketRelay(progress_callback=lambda transfer_id, transferred: reports.append((transfer_id, transferred)))
+    sender = Sink()
+    receiver = Sink()
+    relay.register_token("sender-token", "tx1", "sender")
+    relay.register_token("receiver-token", "tx1", "receiver")
+    relay.connect("sender-token", sender)
+    relay.connect("receiver-token", receiver)
+
+    relay.relay_frame("tx1", "sender", TransferFrame(frame_type=FRAME_DATA, offset=0, payload=b"abc"))
+    relay.relay_frame("tx1", "sender", TransferFrame(frame_type=FRAME_DATA, offset=3, payload=b"de"))
+
+    assert reports == [("tx1", 3), ("tx1", 5)]
+
+
 def test_pause_stops_relay_without_losing_session():
     relay = TransferSocketRelay()
     sender = Sink()

@@ -112,6 +112,26 @@ def test_accept_sends_transfer_tickets_to_both_clients():
     assert receiver.tickets[0]["role"] == "receiver"
     assert source.tickets[0]["transferId"] == session.transfer_id
     assert source.tickets[0]["token"] != receiver.tickets[0]["token"]
+    assert receiver.tickets[0]["file"] == {"name": "movie.mkv", "size": 1024}
+    assert receiver.tickets[0]["fingerprint"] == "fp"
+
+
+def test_progress_is_sent_to_both_transfer_participants():
+    receiver = Watcher("receiver")
+    source = Watcher("source", file_=media())
+    transfers = manager(watchers=[receiver, source])
+    session = transfers.request_transfer(receiver, {"source": "source"})
+    transfers.accept_transfer(source, session.transfer_id, fingerprint="fp")
+
+    transfers.report_progress(session.transfer_id, 512)
+
+    assert source.progress[-1] == {
+        "transferId": session.transfer_id,
+        "transferred": 512,
+        "size": 1024,
+        "status": "downloading",
+    }
+    assert receiver.progress[-1] == source.progress[-1]
 
 
 def test_cancel_notifies_both_sides_and_removes_session():

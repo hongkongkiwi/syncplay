@@ -64,9 +64,11 @@ def decode_frame(buffer, max_payload_size=262144):
 
 
 class TransferSocketRelay(object):
-    def __init__(self):
+    def __init__(self, progress_callback=None):
         self._tokens = {}
         self._pairs = {}
+        self._progress = {}
+        self._progress_callback = progress_callback
 
     def register_token(self, token, transfer_id, role):
         self._tokens[token] = TransferToken(transfer_id=transfer_id, role=role)
@@ -102,6 +104,11 @@ class TransferSocketRelay(object):
         target = pair.receiver if role == "sender" else pair.sender
         if target:
             target.write(encode_frame(frame))
+        if role == "sender" and frame.frame_type == FRAME_DATA:
+            transferred = max(self._progress.get(transfer_id, 0), int(frame.offset) + len(frame.payload or b""))
+            self._progress[transfer_id] = transferred
+            if self._progress_callback:
+                self._progress_callback(transfer_id, transferred)
 
     def pause(self, transfer_id):
         pair = self._pairs.get(transfer_id)

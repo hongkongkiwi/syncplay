@@ -8,6 +8,7 @@ import {
 class Sink {
   chunks: Uint8Array[] = [];
   finalized = false;
+  destinationPath = '/downloads/movie.mkv';
 
   write(chunk: Uint8Array) {
     this.chunks.push(chunk);
@@ -15,6 +16,7 @@ class Sink {
 
   finalize() {
     this.finalized = true;
+    return this.destinationPath;
   }
 }
 
@@ -56,5 +58,19 @@ describe('TransferSocket', () => {
     expect(writes.at(-1)).toBe(
       '{"TransferConnect":{"transferId":"tx1","token":"secret","role":"receiver","offset":2}}\r\n'
     );
+  });
+
+  it('records the completed destination path after the complete frame', () => {
+    const sink = new Sink();
+    const socket = {
+      write: jest.fn(() => true),
+      destroy: jest.fn()
+    };
+    const transfer = new TransferSocket(socket, sink);
+
+    transfer.handleData(encodeTransferFrame({ frameType: 3, offset: 0, payload: new Uint8Array() }));
+
+    expect(sink.finalized).toBe(true);
+    expect(transfer.getCompletedPath()).toBe('/downloads/movie.mkv');
   });
 });

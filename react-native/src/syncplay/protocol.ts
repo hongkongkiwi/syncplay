@@ -50,6 +50,7 @@ export type ServerTransferMessage = {
     transferred: number;
     size: number;
     status: string;
+    destinationPath?: string;
   };
   pause?: { transferId: string; reason: string };
   resume?: { transferId: string; offset: number };

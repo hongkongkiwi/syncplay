@@ -20,7 +20,7 @@ type SocketLike = {
 
 type FileSink = {
   write(chunk: Uint8Array): void;
-  finalize?(): void;
+  finalize?(): string | null | void;
 };
 
 const HEADER_LENGTH = 24;
@@ -73,6 +73,7 @@ export function decodeTransferFrame(bufferLike: Uint8Array): { frame: TransferFr
 
 export class TransferSocket {
   private buffer = Buffer.alloc(0);
+  private completedPath: string | null = null;
 
   constructor(
     private socket: SocketLike,
@@ -91,7 +92,8 @@ export class TransferSocket {
         this.sink.write(decoded.frame.payload);
       }
       if (decoded.frame.frameType === 3) {
-        this.sink.finalize?.();
+        const destinationPath = this.sink.finalize?.();
+        this.completedPath = typeof destinationPath === 'string' ? destinationPath : null;
       }
       this.buffer = Buffer.from(decoded.remaining);
       if (!this.buffer.length) {
@@ -106,6 +108,10 @@ export class TransferSocket {
 
   resume(transferId: string, token: string, role: 'sender' | 'receiver', offset: number): void {
     this.connect({ transferId, token, role, offset });
+  }
+
+  getCompletedPath(): string | null {
+    return this.completedPath;
   }
 }
 

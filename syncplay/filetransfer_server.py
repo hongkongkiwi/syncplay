@@ -154,6 +154,28 @@ class TransferManager(object):
             self._send_error(participant, transfer_id, "cancelled", reason or "Transfer cancelled.")
         return session
 
+    def report_progress(self, transfer_id, transferred):
+        session = self._sessions.get(transfer_id)
+        if not session:
+            return None
+        try:
+            transferred = int(transferred)
+        except (TypeError, ValueError):
+            return None
+        payload = {
+            "transferId": transfer_id,
+            "transferred": min(max(transferred, 0), session.size),
+            "size": session.size,
+            "status": TransferStatus.DOWNLOADING if transferred < session.size else TransferStatus.COMPLETE,
+        }
+        for participant in self._participants(session):
+            participant.sendTransferProgress(payload)
+        if payload["status"] == TransferStatus.COMPLETE:
+            self._sessions[transfer_id] = session._replace(status=TransferStatus.COMPLETE, offset=session.size)
+        else:
+            self._sessions[transfer_id] = session._replace(status=TransferStatus.DOWNLOADING, offset=payload["transferred"])
+        return payload
+
     def handle_watcher_left(self, watcher):
         for session in list(self._sessions.values()):
             if session.source == watcher.getName():
@@ -192,6 +214,8 @@ class TransferManager(object):
             "token": token,
             "offset": session.offset,
             "chunkSize": session.chunk_size,
+            "file": {"name": session.filename, "size": session.size},
+            "fingerprint": session.fingerprint,
         }
 
     def _pause(self, session, status, notify, code, message):

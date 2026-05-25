@@ -82,7 +82,9 @@ class SyncFactory(Factory):
             self.certPath = None
             self.options = None
             self.serverAcceptsTLS = False
-        self.transferRelay = TransferSocketRelay()
+        self.transferRelay = TransferSocketRelay(
+            progress_callback=lambda transfer_id, transferred: self.fileTransfers.report_progress(transfer_id, transferred),
+        )
         self.fileTransfers = TransferManager(
             self.fileTransferConfig,
             self._getFileTransferWatchers,

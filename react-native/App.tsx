@@ -1176,6 +1176,11 @@ export default function App() {
                 <Text style={styles.smallText}>
                   {item.status} {item.size ? `· ${formatBytes(item.transferred)} / ${formatBytes(item.size)}` : ''}
                 </Text>
+                {item.status === 'complete' && item.completedPath ? (
+                  <Text style={styles.smallText} numberOfLines={1}>
+                    Saved to {item.completedPath}
+                  </Text>
+                ) : null}
               </View>
               {item.status === 'downloading' ? (
                 <Pressable style={styles.userReadyButton} onPress={() => connection.pauseTransfer(item.transferId, item.role ?? 'receiver')}>

@@ -1715,6 +1715,12 @@ class UiManager(object):
     def setFeatures(self, featureList):
         self.__ui.setFeatures(featureList)
 
+    def promptFileTransferOffer(self, session):
+        prompt = getattr(self.__ui, "promptFileTransferOffer", None)
+        if prompt:
+            return prompt(session)
+        return None
+
     def showDebugMessage(self, message):
         if constants.DEBUG_MODE and message.rstrip():
             sys.stderr.write("{}{}\n".format(time.strftime(constants.UI_TIME_FORMAT, time.localtime()), message.rstrip()))

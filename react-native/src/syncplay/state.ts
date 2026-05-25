@@ -282,7 +282,10 @@ function reduceTransferMessage(state: SyncplayState, payload: NonNullable<Syncpl
           }),
           status: payload.progress.status as TransferSession['status'],
           transferred: payload.progress.transferred,
-          size: payload.progress.size
+          size: payload.progress.size,
+          completedPath: payload.progress.status === 'complete'
+            ? payload.progress.destinationPath ?? previous?.completedPath ?? null
+            : previous?.completedPath ?? null
         }
       }
     };

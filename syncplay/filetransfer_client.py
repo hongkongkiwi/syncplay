@@ -4,6 +4,8 @@ import hashlib
 import os
 from collections import namedtuple
 
+from syncplay.filetransfer_wire import FRAME_COMPLETE, FRAME_DATA, TransferFrame, encode_frame
+
 
 TransferClientSession = namedtuple(
     "TransferClientSession",
@@ -18,9 +20,11 @@ TransferClientSession = namedtuple(
         "destination_path",
         "part_path",
         "fingerprint",
+        "bytes_transferred",
+        "chunk_size",
     ],
 )
-TransferClientSession.__new__.__defaults__ = (None, None, None, None, None, None, None, None, None, None)
+TransferClientSession.__new__.__defaults__ = (None, None, None, None, None, None, None, None, None, None, 0, None)
 
 
 class FileTransferClient(object):
@@ -54,6 +58,7 @@ class FileTransferClient(object):
             receiver=payload.get("receiver"),
             file=payload.get("file"),
         )
+        self._prompt_incoming_offer(transfer_id)
 
     def acceptOffer(self, transferId, destinationPath=None):
         current_file = self._client.userlist.currentUser.file
@@ -82,6 +87,9 @@ class FileTransferClient(object):
             role=payload.get("role"),
             status="approved",
             ticket=payload,
+            file=payload.get("file") or session.file,
+            fingerprint=payload.get("fingerprint") or session.fingerprint,
+            chunk_size=payload.get("chunkSize") or session.chunk_size,
         )
 
     def prepareDownload(self, transferId, destinationPath):
@@ -113,7 +121,11 @@ class FileTransferClient(object):
 
     def handleProgress(self, payload):
         session = self._sessions.get(payload["transferId"]) or TransferClientSession(transfer_id=payload["transferId"])
-        self._sessions[payload["transferId"]] = session._replace(status=payload.get("status", "downloading"))
+        bytes_transferred = payload.get("transferred", payload.get("bytesTransferred", session.bytes_transferred))
+        self._sessions[payload["transferId"]] = session._replace(
+            status=payload.get("status", "downloading"),
+            bytes_transferred=bytes_transferred,
+        )
 
     def handleError(self, payload):
         status = "failed"
@@ -133,6 +145,82 @@ class FileTransferClient(object):
         if session:
             self._sessions[transferId] = session._replace(status=status)
 
+    def _prompt_incoming_offer(self, transferId):
+        session = self._sessions.get(transferId)
+        prompt = getattr(getattr(self._client, "ui", None), "promptFileTransferOffer", None)
+        if not session or not prompt:
+            return
+        answer = prompt(session)
+        if answer is True:
+            self.acceptOffer(transferId)
+        elif answer is False:
+            self.rejectOffer(transferId)
+
+    def streamUpload(self, transferId, transport, offset=0, chunkSize=None):
+        session = self._sessions.get(transferId)
+        if not session:
+            raise ValueError("transfer session was not found")
+        current_file = self._client.userlist.currentUser.file
+        path = current_file.get("path") if current_file else None
+        if not path or not os.path.isfile(path):
+            raise ValueError("loaded file is not readable")
+        chunk_size = int(chunkSize or session.chunk_size or 262144)
+        position = int(offset or 0)
+        size = os.path.getsize(path)
+        if position < 0 or position > size:
+            raise ValueError("upload offset is outside the file")
+
+        self._sessions[transferId] = session._replace(status="uploading", bytes_transferred=position)
+        with open(path, "rb") as handle:
+            handle.seek(position)
+            while True:
+                chunk = handle.read(chunk_size)
+                if not chunk:
+                    break
+                transport.write(encode_frame(TransferFrame(frame_type=FRAME_DATA, offset=position, payload=chunk)))
+                position += len(chunk)
+                self._sessions[transferId] = self._sessions[transferId]._replace(bytes_transferred=position)
+        transport.write(encode_frame(TransferFrame(frame_type=FRAME_COMPLETE, offset=position, payload=b"")))
+        self._sessions[transferId] = self._sessions[transferId]._replace(status="complete", bytes_transferred=position)
+        return position
+
+    def receiveFrame(self, transferId, frame):
+        session = self._sessions.get(transferId)
+        if not session:
+            raise ValueError("transfer session was not found")
+        if not session.part_path or not session.destination_path:
+            raise ValueError("download destination is not prepared")
+        if frame.frame_type == FRAME_DATA:
+            return self._receiveDataFrame(transferId, session, frame)
+        if frame.frame_type == FRAME_COMPLETE:
+            return self._completeDownload(transferId, session, frame)
+        return None
+
+    def _receiveDataFrame(self, transferId, session, frame):
+        current_size = os.path.getsize(session.part_path) if os.path.exists(session.part_path) else 0
+        if int(frame.offset) != current_size:
+            raise ValueError("unexpected transfer offset")
+        with open(session.part_path, "ab") as handle:
+            handle.write(frame.payload)
+        transferred = current_size + len(frame.payload)
+        self._sessions[transferId] = session._replace(status="downloading", bytes_transferred=transferred)
+        return transferred
+
+    def _completeDownload(self, transferId, session, frame):
+        current_size = os.path.getsize(session.part_path) if os.path.exists(session.part_path) else 0
+        if int(frame.offset) != current_size:
+            raise ValueError("unexpected transfer offset")
+        expected_size = _file_size(session.file)
+        if expected_size is not None and current_size != expected_size:
+            raise ValueError("download size does not match offer")
+        if session.fingerprint:
+            actual = fingerprint_file(session.part_path, _file_name(session.file), expected_size)
+            if actual != session.fingerprint:
+                raise ValueError("download fingerprint does not match offer")
+        os.replace(session.part_path, session.destination_path)
+        self._sessions[transferId] = session._replace(status="complete", bytes_transferred=current_size)
+        return session.destination_path
+
 
 def fingerprint_file(path, filename, size):
     digest = hashlib.sha256()
@@ -145,3 +233,19 @@ def fingerprint_file(path, filename, size):
             handle.seek(-1024 * 1024, os.SEEK_END)
             digest.update(handle.read(1024 * 1024))
     return "sha256-first-last-size-v1:{}".format(digest.hexdigest())
+
+
+def _file_name(file_):
+    if isinstance(file_, dict):
+        return file_.get("name")
+    return getattr(file_, "name", None) if file_ else None
+
+
+def _file_size(file_):
+    size = file_.get("size") if isinstance(file_, dict) else getattr(file_, "size", None) if file_ else None
+    if size is None:
+        return None
+    try:
+        return int(size)
+    except (TypeError, ValueError):
+        return None

@@ -558,6 +558,10 @@ en = {
     "openusersstream-menu-label": "Open {}'s stream",  # [username]'s
     "openusersfile-menu-label": "Open {}'s file",  # [username]'s
     "file-transfer-request-menu-label": "Download {}'s file",  # [username]'s
+    "file-transfer-offer-title": "File transfer request",
+    "file-transfer-offer-question": "{} wants to download your loaded file:\n{}\n{}\n\nAllow this transfer?",  # Username, filename, size
+    "unknown-userlist-item": "Unknown user",
+    "unknown-file-size": "Unknown size",
 
     "setasready-menu-label": "Set {} as ready", # [Username]
     "setasnotready-menu-label": "Set {} as not ready", # [Username]

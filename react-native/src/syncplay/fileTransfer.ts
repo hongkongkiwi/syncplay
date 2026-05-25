@@ -22,6 +22,7 @@ export type TransferSession = {
   size: number | null;
   token?: string | null;
   offset: number;
+  completedPath?: string | null;
 };
 
 export function createIncomingTransfer(payload: Record<string, unknown>): TransferSession {
