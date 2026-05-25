@@ -157,3 +157,18 @@ def test_resume_rejects_changed_fingerprint_or_size():
     transfers.resume_transfer(receiver, session.transfer_id, offset=10, fingerprint="wrong")
 
     assert receiver.errors[-1]["code"] == "source-changed-media"
+
+
+def test_malformed_request_and_resume_offsets_return_errors():
+    receiver = Watcher("receiver")
+    source = Watcher("source", file_=media(size=1024))
+    transfers = manager(watchers=[receiver, source])
+
+    assert transfers.request_transfer(receiver, {"source": "source", "offset": "bad"}) is None
+    assert receiver.errors[-1]["code"] == "bad-offset"
+
+    session = transfers.request_transfer(receiver, {"source": "source"})
+    transfers.accept_transfer(source, session.transfer_id, fingerprint="fp")
+    transfers.resume_transfer(receiver, session.transfer_id, offset="bad", fingerprint="fp")
+
+    assert receiver.errors[-1]["code"] == "bad-offset"

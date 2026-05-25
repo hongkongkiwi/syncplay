@@ -63,6 +63,13 @@ class TransferManager(object):
             self._send_error(receiver, None, "file-too-large", "File is larger than the server transfer limit.")
             return None
 
+        try:
+            offset = int(payload.get("offset") or 0)
+            validate_resume_offset(offset, size)
+        except Exception:
+            self._send_error(receiver, None, "bad-offset", "Transfer offset is invalid.")
+            return None
+
         transfer_id = payload.get("transferId") or uuid.uuid4().hex
         session = TransferSession(
             transfer_id=transfer_id,
@@ -72,7 +79,7 @@ class TransferManager(object):
             filename=normalize_transfer_filename(file_["name"]),
             size=size,
             chunk_size=self.config.chunk_size,
-            offset=int(payload.get("offset") or 0),
+            offset=offset,
             fingerprint=None,
             status=TransferStatus.WAITING_FOR_APPROVAL,
         )
@@ -129,7 +136,11 @@ class TransferManager(object):
             session = session._replace(status=TransferStatus.PAUSED_SOURCE_CHANGED_MEDIA)
             self._sessions[transfer_id] = session
             return session
-        validate_resume_offset(offset, session.size)
+        try:
+            validate_resume_offset(offset, session.size)
+        except Exception:
+            self._send_error(watcher, transfer_id, "bad-offset", "Transfer offset is invalid.")
+            return session
         session = session._replace(offset=int(offset), status=TransferStatus.APPROVED)
         self._sessions[transfer_id] = session
         return session

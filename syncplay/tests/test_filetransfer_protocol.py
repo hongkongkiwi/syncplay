@@ -137,3 +137,26 @@ def test_server_protocol_accepts_transfer_connect_without_login():
 
     assert factory.transferRelay.connected == [("secret", protocol.transport)]
     assert raw_mode == [True]
+
+
+def test_bad_transfer_connect_token_closes_socket_without_crashing():
+    class Relay(object):
+        def connect(self, token, transport):
+            raise ValueError("bad token")
+
+    class Transport(object):
+        def __init__(self):
+            self.closed = False
+
+        def loseConnection(self):
+            self.closed = True
+
+    factory = FakeFactory()
+    factory.transferRelay = Relay()
+    protocol = SyncServerProtocol(factory)
+    protocol.transport = Transport()
+    protocol.setRawMode = lambda: None
+
+    protocol.handleTransferConnect({"transferId": "tx1", "token": "bad", "role": "receiver"})
+
+    assert protocol.transport.closed is True

@@ -629,7 +629,12 @@ class SyncServerProtocol(JSONCommandProtocol):
     def handleTransferConnect(self, payload):
         self._transferId = payload.get("transferId")
         self._transferRole = payload.get("role")
-        self._factory.transferRelay.connect(payload.get("token"), self.transport)
+        try:
+            self._factory.transferRelay.connect(payload.get("token"), self.transport)
+        except Exception as error:
+            print("Transfer socket rejected: {}".format(error))
+            self.transport.loseConnection()
+            return
         self.setRawMode()
 
     def rawDataReceived(self, data):
