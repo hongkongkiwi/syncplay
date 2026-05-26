@@ -573,6 +573,7 @@ en = {
 
     "playlist-empty-error": "Playlist is currently empty.",
     "playlist-invalid-index-error": "Invalid playlist index",
+    "playlist-invalid-error": "Invalid playlist received.",
     "playlist-too-many-items-error": "Playlist exceeds the maximum number of items ({}).",  # PLAYLIST_MAX_ITEMS
     "playlist-too-many-characters-error": "Playlist exceeds the maximum total character count ({}).",  # PLAYLIST_MAX_CHARACTERS
 }

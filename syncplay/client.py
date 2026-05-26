@@ -2081,6 +2081,18 @@ class SyncplayPlaylist():
             self._client.playlistMayNeedRestoring = False
             return self._client.sharedPlaylistIsEnabled() and self._playlist != None and files == [] and username == None and not self._playlistBufferIsFromOldRoom(self._client.userlist.currentUser.room)
 
+    def _playlistSizeIsValid(self, files):
+        if not isinstance(files, list) or not all(isinstance(file, str) for file in files):
+            self._ui.showErrorMessage(getMessage("playlist-invalid-error"))
+            return False
+        if len(files) > constants.PLAYLIST_MAX_ITEMS:
+            self._ui.showErrorMessage(getMessage("playlist-too-many-items-error").format(constants.PLAYLIST_MAX_ITEMS))
+            return False
+        if sum(map(len, files)) > constants.PLAYLIST_MAX_CHARACTERS:
+            self._ui.showErrorMessage(getMessage("playlist-too-many-characters-error").format(constants.PLAYLIST_MAX_CHARACTERS))
+            return False
+        return True
+
     def changePlaylist(self, files, username=None, resetIndex=False):
         if self.playlistNeedsRestoring(files, username):
             self._ui.showDebugMessage("Restoring playlist on reconnect...")
@@ -2088,13 +2100,8 @@ class SyncplayPlaylist():
             self._client._protocol.setPlaylist(files)
             self._client._protocol.setPlaylistIndex(self._playlistIndex)
             return
-        if username is None:
-            if len(files) > constants.PLAYLIST_MAX_ITEMS:
-                self._ui.showErrorMessage(getMessage("playlist-too-many-items-error").format(constants.PLAYLIST_MAX_ITEMS))
-                return
-            if sum(map(len, files)) > constants.PLAYLIST_MAX_CHARACTERS:
-                self._ui.showErrorMessage(getMessage("playlist-too-many-characters-error").format(constants.PLAYLIST_MAX_CHARACTERS))
-                return
+        if not self._playlistSizeIsValid(files):
+            return
         self.queuedIndexFilename = None
         self._client.playlistMayNeedRestoring = False
         if self._playlist == files:
