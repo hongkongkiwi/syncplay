@@ -404,7 +404,13 @@ def sameFileduration(duration1, duration2):
 
 def meetsMinVersion(version, minVersion):
     def versiontotuple(ver):
-        return tuple(map(int, ver.split(".")))
+        parts = []
+        for part in ver.split("."):
+            match = re.match(r"(\d+)", part)
+            if match is None:
+                break
+            parts.append(int(match.group(1)))
+        return tuple(parts)
     return versiontotuple(version) >= versiontotuple(minVersion)
 
 
