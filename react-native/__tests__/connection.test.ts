@@ -237,6 +237,47 @@ describe('SyncplayConnection', () => {
     expect(completed).toEqual(['/downloads/movie.mkv']);
   });
 
+  it('rejects receiver transfers that finish before the offered file size', () => {
+    const { socket, handlers } = createMockSocket();
+    let onConnect: () => void = () => undefined;
+    jest.mocked(TcpSocket.createConnection).mockImplementation((_options, callback) => {
+      onConnect = callback;
+      return socket as never;
+    });
+    const sink = {
+      write: jest.fn(),
+      finalize: jest.fn(() => '/downloads/movie.mkv')
+    };
+    const errors: string[] = [];
+    const connection = new SyncplayConnection(jest.fn(), jest.fn(), () => ({
+      position: null,
+      paused: true
+    }));
+
+    connection.openTransferSocket(
+      {
+        transferId: 'tx1',
+        token: 'secret',
+        role: 'receiver',
+        host: 'syncplay.pl',
+        port: 8999,
+        offset: 0,
+        file: { size: 4 }
+      },
+      sink,
+      undefined,
+      undefined,
+      undefined,
+      error => errors.push(error.message)
+    );
+    onConnect();
+    handlers.data?.(encodeTransferFrame({ frameType: 1, offset: 0, payload: new Uint8Array([7]) }));
+    handlers.data?.(encodeTransferFrame({ frameType: 3, offset: 1, payload: new Uint8Array() }));
+
+    expect(sink.finalize).not.toHaveBeenCalled();
+    expect(errors).toEqual(['Transfer completed at 1 bytes, expected 4']);
+  });
+
   it('replies to server state pings with current playback and latency', () => {
     const { socket, handlers } = createMockSocket();
     let onConnect: () => void = () => undefined;
