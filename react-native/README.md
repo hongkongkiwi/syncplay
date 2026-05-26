@@ -51,6 +51,7 @@ npm run ios
 - Show room users, ready state, current files, server messages, and chat.
 - Join saved rooms or rooms currently visible on the server, including managed-room entries with operator passwords.
 - Use shared playlists for URLs and known filenames, including remote playlist selection.
+- Request, approve, pause, resume, cancel, and retry relayed file transfers when the server supports them.
 - Create managed rooms, identify as room operator, and set another user's ready state.
 - Persist server, room, media search, and session options locally.
 - Reconnect after socket errors unless the user disconnects manually.
@@ -68,7 +69,7 @@ npm run ios
 
 ## Matching Rules
 
-Syncplay does not send video files between devices. Everyone needs access to the same media through a local file or a stream URL.
+Syncplay can relay file transfers through servers that enable the file-transfer feature. Transfers still start from a user's currently loaded file, and both users need to approve or request the exchange from the room and transfers screens.
 
 The mobile app matches remote playlist entries and other users' files by filename against the media search list. If it cannot find a match, it shows the missing name and leaves the current player item alone. Add the matching file or folder, then choose the playlist item again.
 
@@ -97,6 +98,7 @@ The mobile client follows the desktop app: a connection has a server, username, 
 - Connection: server, username, room, password, player, and media search setup.
 - Watch: video player, transport controls, typed seek, stream URL, file picker, media search list, and playback status.
 - Room: room members, room joining, saved rooms, shared playlist, managed rooms, and ready controls.
+- Transfers: incoming approvals, active progress, pause, resume, retry, cancel, and download-folder selection.
 - Chat: server messages and room chat.
 - Options: sync correction hold, reconnect, automatic file switching, background playback, and connection actions.
 
