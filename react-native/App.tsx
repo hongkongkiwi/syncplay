@@ -457,7 +457,8 @@ export default function App() {
             transferId: transfer.transferId,
             token: transfer.token,
             role: 'receiver',
-            offset: sink.getOffset()
+            offset: sink.getOffset(),
+            file: transfer.file ?? null
           },
           sink,
           completedPath => {
@@ -482,7 +483,8 @@ export default function App() {
             transferId: transfer.transferId,
             token: transfer.token,
             role: 'sender',
-            offset: transfer.offset
+            offset: transfer.offset,
+            file: transfer.file ?? null
           },
           { write: () => undefined },
           undefined,

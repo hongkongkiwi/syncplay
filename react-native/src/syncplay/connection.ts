@@ -238,7 +238,14 @@ export class SyncplayConnection {
       },
       ticket.file?.size
     );
-    socket.on('data', data => transfer.handleData(typeof data === 'string' ? new Uint8Array(Buffer.from(data, 'binary')) : data));
+    socket.on('data', data => {
+      try {
+        transfer.handleData(typeof data === 'string' ? new Uint8Array(Buffer.from(data, 'binary')) : data);
+      } catch (error) {
+        onError?.(error instanceof Error ? error : new Error(String(error)));
+        socket.destroy();
+      }
+    });
     socket.on('error', error => {
       onError?.(error);
       socket.destroy();
