@@ -38,6 +38,19 @@ An Expo React Native mobile client lives in [`react-native/`](react-native/READM
 
 The mobile app needs a native development build. Expo Go cannot run it because the TCP socket, file-system, video, and local storage pieces use native modules.
 
+## Web client
+
+A browser client lives in [`web-client/`](web-client/README.md). It uses TanStack Start and pnpm, plays local media through the browser video element, and talks to Syncplay through a WebSocket bridge because browsers cannot open raw TCP sockets.
+
+For local testing:
+
+```sh
+pnpm install
+pnpm --filter syncplay-web-client dev
+```
+
+The bridge allows `localhost`, `127.0.0.1`, and `::1` by default. Set `SYNCPLAY_WEB_ALLOWED_HOSTS` to a comma-separated host list when deploying it near public Syncplay servers.
+
 ## What does it do
 
 Syncplay synchronises the position and play state of multiple media players so that the viewers can watch the same thing at the same time.
