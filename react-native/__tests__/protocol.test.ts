@@ -278,9 +278,50 @@ describe('Syncplay protocol helpers', () => {
     ]);
   });
 
-  it('skips malformed server lines and keeps decoding following messages', () => {
+  it('reports malformed server lines and keeps decoding following messages', () => {
     const decoder = new LineDecoder();
 
-    expect(decoder.push('not-json\n{"List":null}\n')).toEqual([{ List: null }]);
+    expect(decoder.push('not-json\n{"List":null}\n')).toEqual([
+      { Error: { message: 'Could not parse server line: not-json' } },
+      { List: null }
+    ]);
+  });
+
+  it('rejects completed server lines above the size limit', () => {
+    const decoder = new LineDecoder();
+    const hugeLine = `${'x'.repeat(1_048_577)}\n{"List":null}\n`;
+
+    expect(decoder.push(hugeLine)).toEqual([
+      { Error: { message: 'Syncplay server line exceeded the 1 MiB limit.' } },
+      { List: null }
+    ]);
+  });
+
+  it('rejects completed server lines above the byte limit with multi-byte characters', () => {
+    const decoder = new LineDecoder();
+    const hugeLine = `${'\u{1F525}'.repeat(262_145)}\n{"List":null}\n`;
+
+    expect(decoder.push(hugeLine)).toEqual([
+      { Error: { message: 'Syncplay server line exceeded the 1 MiB limit.' } },
+      { List: null }
+    ]);
+  });
+
+  it('clears an oversized incomplete server line', () => {
+    const decoder = new LineDecoder();
+
+    expect(decoder.push('x'.repeat(1_048_577))).toEqual([
+      { Error: { message: 'Syncplay server line exceeded the 1 MiB limit.' } }
+    ]);
+    expect(decoder.push('{"List":null}\n')).toEqual([{ List: null }]);
+  });
+
+  it('clears an oversized incomplete server line with multi-byte characters', () => {
+    const decoder = new LineDecoder();
+
+    expect(decoder.push('\u{1F525}'.repeat(262_145))).toEqual([
+      { Error: { message: 'Syncplay server line exceeded the 1 MiB limit.' } }
+    ]);
+    expect(decoder.push('{"List":null}\n')).toEqual([{ List: null }]);
   });
 });
