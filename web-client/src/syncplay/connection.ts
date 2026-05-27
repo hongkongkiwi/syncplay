@@ -40,6 +40,8 @@ export class SyncplayWebConnection {
 
   connect(config: ConnectionConfig): void {
     this.disconnect();
+    this.decoder = new LineDecoder();
+    this.rtt = 0;
     this.onStatus('connecting');
 
     const socket = new WebSocket(createProxyUrl(config));
@@ -79,6 +81,8 @@ export class SyncplayWebConnection {
     }
     this.socket = null;
     socket.close(1000, 'Client disconnected');
+    this.decoder = new LineDecoder();
+    this.rtt = 0;
     this.onStatus('disconnected');
   }
 

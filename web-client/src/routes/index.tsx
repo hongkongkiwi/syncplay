@@ -96,7 +96,11 @@ function WebClient() {
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !mediaUrl || syncPaused || state.playback.setBy === state.profile.username) {
+    if (!video) {
+      return;
+    }
+    if (!mediaUrl || syncPaused || state.playback.setBy === state.profile.username) {
+      video.playbackRate = 1;
       return;
     }
 
