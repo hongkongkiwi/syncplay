@@ -365,16 +365,23 @@ export function encodeMessage(message: ClientMessage): string {
   return `${JSON.stringify(message)}\r\n`;
 }
 
+const MAX_SERVER_LINE_BYTES = 1_048_576;
+
 export class LineDecoder {
   private buffer = '';
 
   push(chunk: string | Uint8Array): SyncplayServerMessage[] {
+    const messages: SyncplayServerMessage[] = [];
     this.buffer += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
     const lines = this.buffer.split(/\r?\n/);
     this.buffer = lines.pop() ?? '';
 
-    const messages: SyncplayServerMessage[] = [];
     for (const rawLine of lines) {
+      if (Buffer.byteLength(rawLine, 'utf8') > MAX_SERVER_LINE_BYTES) {
+        messages.push({ Error: { message: 'Syncplay server line exceeded the 1 MiB limit.' } });
+        continue;
+      }
+
       const line = rawLine.trim();
       if (!line) {
         continue;
@@ -383,8 +390,13 @@ export class LineDecoder {
       try {
         messages.push(JSON.parse(line) as SyncplayServerMessage);
       } catch {
-        continue;
+        messages.push({ Error: { message: `Could not parse server line: ${line.slice(0, 80)}` } });
       }
+    }
+
+    if (Buffer.byteLength(this.buffer, 'utf8') > MAX_SERVER_LINE_BYTES) {
+      this.buffer = '';
+      messages.push({ Error: { message: 'Syncplay server line exceeded the 1 MiB limit.' } });
     }
 
     return messages;
