@@ -2,6 +2,7 @@
 .*.sw[po]
 *.exe
 venv
+node_modules
 
 /*.egg-info
 /build
