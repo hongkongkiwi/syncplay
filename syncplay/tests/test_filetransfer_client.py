@@ -139,6 +139,23 @@ def test_sender_streams_approved_file_even_if_current_file_changes(tmp_path):
     assert frames[0] == TransferFrame(frame_type=FRAME_DATA, offset=0, payload=b"approved")
 
 
+def test_stream_upload_caps_ticket_chunk_size_to_wire_limit(tmp_path):
+    path = tmp_path / "movie.mkv"
+    path.write_bytes(b"a" * 262145)
+    client = Client({"name": "movie.mkv", "size": 262145, "path": str(path)})
+    transfers = FileTransferClient(client)
+    transfers.handleOffer({"transferId": "tx1", "file": {"name": "movie.mkv", "size": 262145}})
+    transfers.acceptOffer("tx1")
+    transfers.handleTicket({"transferId": "tx1", "role": "sender", "token": "secret", "chunkSize": 999999})
+    transport = Transport()
+
+    transfers.streamUpload("tx1", transport, chunkSize=999999)
+
+    frames = _decode_all(transport.writes)
+    assert len(frames[0].payload) == 262144
+    assert frames[1] == TransferFrame(frame_type=FRAME_DATA, offset=262144, payload=b"a")
+
+
 def test_fingerprint_covers_bytes_between_one_and_two_megabytes(tmp_path):
     first = tmp_path / "first.mkv"
     second = tmp_path / "second.mkv"

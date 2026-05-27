@@ -182,6 +182,11 @@ export function encodeMessage(message: ClientMessage): string {
 }
 
 const MAX_SERVER_LINE_BYTES = 1_048_576;
+const textEncoder = new TextEncoder();
+
+function utf8ByteLength(value: string): number {
+  return textEncoder.encode(value).byteLength;
+}
 
 export class LineDecoder {
   private buffer = '';
@@ -193,7 +198,7 @@ export class LineDecoder {
     this.buffer = lines.pop() ?? '';
 
     for (const rawLine of lines) {
-      if (rawLine.length > MAX_SERVER_LINE_BYTES) {
+      if (utf8ByteLength(rawLine) > MAX_SERVER_LINE_BYTES) {
         messages.push({ Error: { message: 'Syncplay server line exceeded the 1 MiB limit.' } });
         continue;
       }
@@ -210,7 +215,7 @@ export class LineDecoder {
       }
     }
 
-    if (this.buffer.length > MAX_SERVER_LINE_BYTES) {
+    if (utf8ByteLength(this.buffer) > MAX_SERVER_LINE_BYTES) {
       this.buffer = '';
       messages.push({ Error: { message: 'Syncplay server line exceeded the 1 MiB limit.' } });
     }

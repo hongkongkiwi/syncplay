@@ -38,6 +38,14 @@ describe('TransferSocket', () => {
     expect(decoded.remaining).toHaveLength(0);
   });
 
+  it('rejects data frames above the payload limit before writing them', () => {
+    expect(() => encodeTransferFrame({
+      frameType: 1,
+      offset: 0,
+      payload: new Uint8Array(262145)
+    })).toThrow('Transfer frame payload is too large');
+  });
+
   it('rejects unsupported frame types', () => {
     const encoded = encodeTransferFrame({ frameType: 99, offset: 0, payload: new Uint8Array() });
 
@@ -173,6 +181,34 @@ describe('TransferSocket', () => {
     expect(decodeTransferFrame(writes[2] as Uint8Array).frame).toMatchObject({
       frameType: 3,
       offset: 4
+    });
+  });
+
+  it('caps upload chunks at the transfer frame payload limit', async () => {
+    const sink = new Sink();
+    const writes: Array<string | Uint8Array> = [];
+    const socket = {
+      write: jest.fn((data: string | Uint8Array) => {
+        writes.push(data);
+        return true;
+      }),
+      destroy: jest.fn()
+    };
+    const transfer = new TransferSocket(socket, sink);
+    const bytes = new Uint8Array(262145);
+    bytes[262144] = 9;
+
+    await transfer.upload('tx1', { read: (offset, length) => bytes.slice(offset, offset + length) }, 0, 999999);
+
+    expect(decodeTransferFrame(writes[0] as Uint8Array).frame.payload).toHaveLength(262144);
+    expect(decodeTransferFrame(writes[1] as Uint8Array).frame).toEqual({
+      frameType: 1,
+      offset: 262144,
+      payload: new Uint8Array([9])
+    });
+    expect(decodeTransferFrame(writes[2] as Uint8Array).frame).toMatchObject({
+      frameType: 3,
+      offset: 262145
     });
   });
 });

@@ -13,6 +13,7 @@ FRAME_COMPLETE = 3
 MAGIC = b"SPFT"
 VERSION = 1
 HEADER_LENGTH = 24
+MAX_PAYLOAD_SIZE = 262144
 _HEADER_WITHOUT_CRC = struct.Struct("!4sHHQI")
 _HEADER = struct.Struct("!4sHHQII")
 
@@ -28,6 +29,8 @@ TransferToken = namedtuple("TransferToken", ["transfer_id", "role"])
 
 def encode_frame(frame):
     payload = frame.payload or b""
+    if len(payload) > MAX_PAYLOAD_SIZE:
+        raise TransferFrameError("transfer frame payload is too large")
     header_without_crc = _HEADER_WITHOUT_CRC.pack(
         MAGIC,
         VERSION,
@@ -39,7 +42,7 @@ def encode_frame(frame):
     return header_without_crc + struct.pack("!I", header_crc) + payload
 
 
-def decode_frame(buffer, max_payload_size=262144):
+def decode_frame(buffer, max_payload_size=MAX_PAYLOAD_SIZE):
     if len(buffer) < HEADER_LENGTH:
         return None, buffer
 

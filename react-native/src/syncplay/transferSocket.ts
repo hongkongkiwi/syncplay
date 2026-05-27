@@ -37,6 +37,9 @@ export function encodeTransferConnect(args: TransferConnectArgs): string {
 
 export function encodeTransferFrame(frame: TransferFrame): Uint8Array {
   const payload = Buffer.from(frame.payload);
+  if (payload.length > MAX_PAYLOAD_LENGTH) {
+    throw new Error('Transfer frame payload is too large');
+  }
   const buffer = Buffer.alloc(HEADER_LENGTH + payload.length);
   buffer.write(MAGIC, 0, 4, 'ascii');
   buffer.writeUInt16BE(1, 4);
@@ -133,8 +136,9 @@ export class TransferSocket {
 
   async upload(transferId: string, source: TransferFileSource, offset = 0, chunkSize = 262144): Promise<number> {
     let position = Math.max(0, offset);
+    const safeChunkSize = normalizeChunkSize(chunkSize);
     while (true) {
-      const chunk = await source.read(position, chunkSize);
+      const chunk = await source.read(position, safeChunkSize);
       if (!chunk.length) {
         break;
       }
@@ -171,6 +175,13 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
   result.set(a);
   result.set(b, a.length);
   return result;
+}
+
+function normalizeChunkSize(chunkSize: number): number {
+  if (!Number.isFinite(chunkSize) || chunkSize < 1) {
+    return MAX_PAYLOAD_LENGTH;
+  }
+  return Math.min(MAX_PAYLOAD_LENGTH, Math.floor(chunkSize));
 }
 
 function writeUInt64BE(buffer: Buffer, value: number, offset: number): void {

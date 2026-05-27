@@ -1,6 +1,15 @@
 # coding:utf8
 
-from syncplay.filetransfer_wire import TransferFrameError, TransferToken
+import pytest
+
+from syncplay.filetransfer_wire import (
+    FRAME_DATA,
+    MAX_PAYLOAD_SIZE,
+    TransferFrame,
+    TransferFrameError,
+    TransferToken,
+    encode_frame,
+)
 from syncplay.protocols import JSONCommandProtocol, SyncClientProtocol, SyncServerProtocol
 
 
@@ -51,6 +60,13 @@ def test_json_command_protocol_routes_transfer_messages():
 
     assert protocol.handled == {"progress": {"transferId": "abc"}}
     assert protocol.error is None
+
+
+def test_transfer_frame_encoder_rejects_oversized_payloads():
+    with pytest.raises(TransferFrameError, match="transfer frame payload is too large"):
+        encode_frame(
+            TransferFrame(frame_type=FRAME_DATA, offset=0, payload=b"x" * (MAX_PAYLOAD_SIZE + 1))
+        )
 
 
 def test_json_command_protocol_rejects_transfer_connect_without_handler():
