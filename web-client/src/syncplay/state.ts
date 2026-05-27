@@ -252,6 +252,7 @@ function applyUserUpdates(
   let next = { ...rooms };
   for (const [username, payload] of Object.entries(updates)) {
     const room = payload.room?.name;
+    const previous = findUser(next, username);
     if (payload.event?.left) {
       next = removeUser(next, username);
       continue;
@@ -263,21 +264,36 @@ function applyUserUpdates(
 
     next = removeUser(next, username);
     const users = next[room] ?? [];
-    next[room] = [...users, normalizeUser(username, room, payload)].sort((left, right) =>
+    next[room] = [...users, normalizeUser(username, room, payload, previous)].sort((left, right) =>
       left.username.localeCompare(right.username)
     );
   }
   return next;
 }
 
-function normalizeUser(username: string, fallbackRoom: string, user: ServerUserPayload): RoomUser {
+function normalizeUser(
+  username: string,
+  fallbackRoom: string,
+  user: ServerUserPayload,
+  previous?: RoomUser | null
+): RoomUser {
   return {
     username,
     room: user.room?.name ?? fallbackRoom,
-    file: isSyncplayFile(user.file) ? user.file : null,
-    isReady: typeof user.isReady === 'boolean' ? user.isReady : null,
-    isController: !!user.controller
+    file: resolveUserFile(user, previous),
+    isReady: typeof user.isReady === 'boolean' ? user.isReady : previous?.isReady ?? null,
+    isController: typeof user.controller === 'boolean' ? user.controller : previous?.isController ?? false
   };
+}
+
+function findUser(rooms: Record<string, RoomUser[]>, username: string): RoomUser | null {
+  for (const users of Object.values(rooms)) {
+    const match = users.find(user => user.username === username);
+    if (match) {
+      return match;
+    }
+  }
+  return null;
 }
 
 function removeUser(rooms: Record<string, RoomUser[]>, username: string): Record<string, RoomUser[]> {
@@ -298,6 +314,13 @@ function setUserReady(rooms: Record<string, RoomUser[]>, username: string, isRea
       users.map(user => (user.username === username ? { ...user, isReady } : user))
     ])
   );
+}
+
+function resolveUserFile(user: ServerUserPayload, previous?: RoomUser | null): SyncplayFile | null {
+  if (!Object.hasOwn(user, 'file')) {
+    return previous?.file ?? null;
+  }
+  return isSyncplayFile(user.file) ? user.file : null;
 }
 
 function isSyncplayFile(file: unknown): file is SyncplayFile {

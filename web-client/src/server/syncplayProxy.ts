@@ -101,6 +101,18 @@ function bridgeSyncplay(ws: WebSocket, target: ProxyTarget, request: IncomingMes
   const syncplaySocket = target.tls
     ? tls.connect({ host: target.host, port: target.port, servername: target.host })
     : net.connect({ host: target.host, port: target.port });
+  const connectTimer = setTimeout(() => {
+    const message = `Timed out connecting to ${target.host}:${target.port}.`;
+    if (ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify({ Error: { message } }) + '\r\n');
+      ws.close(1011, 'Upstream connect timeout');
+    }
+    syncplaySocket.destroy(new Error(message));
+  }, 10_000);
+
+  const clearConnectTimer = () => {
+    clearTimeout(connectTimer);
+  };
 
   const closeBoth = (code = 1000, reason = 'closed') => {
     if (ws.readyState === ws.OPEN) {
@@ -110,6 +122,7 @@ function bridgeSyncplay(ws: WebSocket, target: ProxyTarget, request: IncomingMes
   };
 
   syncplaySocket.on('connect', () => {
+    clearConnectTimer();
     ws.send(JSON.stringify({ Proxy: { connected: true, remoteAddress: request.socket.remoteAddress } }) + '\r\n');
   });
 
@@ -120,6 +133,7 @@ function bridgeSyncplay(ws: WebSocket, target: ProxyTarget, request: IncomingMes
   });
 
   syncplaySocket.on('error', error => {
+    clearConnectTimer();
     const message = formatSocketError(error, target);
     if (ws.readyState === ws.OPEN) {
       ws.send(JSON.stringify({ Error: { message } }) + '\r\n');
@@ -128,6 +142,7 @@ function bridgeSyncplay(ws: WebSocket, target: ProxyTarget, request: IncomingMes
   });
 
   syncplaySocket.on('close', () => {
+    clearConnectTimer();
     closeBoth(1000, 'Syncplay socket closed');
   });
 

@@ -49,7 +49,6 @@ function WebClient() {
   const [form, setForm] = useState(initialForm);
   const [chatDraft, setChatDraft] = useState('');
   const [syncPaused, setSyncPaused] = useState(false);
-  const [isReady, setIsReady] = useState(false);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<{ name: string; size: number } | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -58,6 +57,8 @@ function WebClient() {
   const hasMediaRef = useRef(false);
 
   const usersInRoom = state.rooms[state.profile.room] ?? [];
+  const currentUser = usersInRoom.find(user => user.username === state.profile.username);
+  const isReady = currentUser?.isReady ?? false;
   const connected = state.connection.status === 'connected';
   const connecting = state.connection.status === 'connecting';
 
@@ -76,6 +77,21 @@ function WebClient() {
 
   useEffect(() => {
     hasMediaRef.current = !!mediaUrl;
+  }, [mediaUrl]);
+
+  useEffect(() => {
+    if (!mediaUrl) {
+      return;
+    }
+
+    return () => {
+      const video = videoRef.current;
+      if (video?.src === mediaUrl) {
+        video.removeAttribute('src');
+        video.load();
+      }
+      URL.revokeObjectURL(mediaUrl);
+    };
   }, [mediaUrl]);
 
   useEffect(() => {
@@ -168,9 +184,6 @@ function WebClient() {
       return;
     }
 
-    if (mediaUrl) {
-      URL.revokeObjectURL(mediaUrl);
-    }
     const nextUrl = URL.createObjectURL(file);
     setMediaUrl(nextUrl);
     setSelectedFile({ name: file.name, size: file.size });
@@ -197,9 +210,7 @@ function WebClient() {
   };
 
   const toggleReady = () => {
-    const nextReady = !isReady;
-    setIsReady(nextReady);
-    connection.sendReady(nextReady);
+    connection.sendReady(!isReady);
   };
 
   const changeRoom = () => {

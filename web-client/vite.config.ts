@@ -1,6 +1,7 @@
 import { tanstackStart } from '@tanstack/react-start/plugin/vite';
 import viteReact from '@vitejs/plugin-react';
 import { nitro } from 'nitro/vite';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 import { syncplayProxyPlugin } from './src/server/syncplayProxy';
 
@@ -13,7 +14,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      '~': new URL('./src', import.meta.url).pathname
+      '~': fileURLToPath(new URL('./src', import.meta.url))
     }
   },
   plugins: [

@@ -73,10 +73,13 @@ export class SyncplayWebConnection {
   }
 
   disconnect(): void {
-    if (this.socket) {
-      this.socket.close(1000, 'Client disconnected');
-      this.socket = null;
+    const socket = this.socket;
+    if (!socket) {
+      return;
     }
+    this.socket = null;
+    socket.close(1000, 'Client disconnected');
+    this.onStatus('disconnected');
   }
 
   sendChat(text: string): void {
@@ -155,7 +158,11 @@ export class SyncplayWebConnection {
 
 function createProxyUrl(config: ConnectionConfig): string {
   const base = new URL(config.proxyUrl || '/syncplay-proxy', window.location.href);
-  base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
+  if (base.protocol === 'https:') {
+    base.protocol = 'wss:';
+  } else if (base.protocol === 'http:') {
+    base.protocol = 'ws:';
+  }
   base.searchParams.set('host', config.host.trim());
   base.searchParams.set('port', String(config.port));
   base.searchParams.set('tls', config.tls ? '1' : '0');
