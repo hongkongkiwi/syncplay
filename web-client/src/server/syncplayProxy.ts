@@ -40,6 +40,13 @@ function attachProxy(httpServer: UpgradeServer | null): void {
       return;
     }
 
+    const origin = validateOrigin(request);
+    if (!origin.ok) {
+      socket.write(`HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n${origin.error}`);
+      socket.destroy();
+      return;
+    }
+
     const target = parseTarget(url);
     if (!target.ok) {
       socket.write(`HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n${target.error}`);
@@ -60,6 +67,54 @@ type ProxyTarget = {
 };
 
 type ParseResult = { ok: true; value: ProxyTarget } | { ok: false; error: string };
+
+type ValidationResult = { ok: true } | { ok: false; error: string };
+
+function validateOrigin(request: IncomingMessage): ValidationResult {
+  const origin = request.headers.origin;
+  if (!origin) {
+    return { ok: true };
+  }
+
+  const normalizedOrigin = normalizeOrigin(origin);
+  if (!normalizedOrigin) {
+    return { ok: false, error: 'Invalid WebSocket origin.' };
+  }
+
+  const allowedOrigins = (process.env.SYNCPLAY_WEB_ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map(value => normalizeOrigin(value))
+    .filter((value): value is string => !!value);
+
+  if (allowedOrigins.includes('*') || allowedOrigins.includes(normalizedOrigin)) {
+    return { ok: true };
+  }
+
+  const host = request.headers.host?.toLowerCase();
+  if (host && normalizedOrigin === `http://${host}`) {
+    return { ok: true };
+  }
+  if (host && normalizedOrigin === `https://${host}`) {
+    return { ok: true };
+  }
+
+  return { ok: false, error: `Origin "${origin}" is not allowed.` };
+}
+
+function normalizeOrigin(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (trimmed === '*') {
+    return '*';
+  }
+  try {
+    return new URL(trimmed).origin.toLowerCase();
+  } catch {
+    return null;
+  }
+}
 
 function parseTarget(url: URL): ParseResult {
   const host = (url.searchParams.get('host') ?? '').trim();

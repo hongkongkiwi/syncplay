@@ -10,6 +10,8 @@ export type RoomUser = {
   isController: boolean;
 };
 
+type RoomMap = Record<string, RoomUser[]>;
+
 export type ChatMessage = {
   id: string;
   kind: 'system' | 'chat' | 'error';
@@ -38,7 +40,7 @@ export type SyncplayState = {
     setBy: string | null;
   };
   media: SyncplayFile | null;
-  rooms: Record<string, RoomUser[]>;
+  rooms: RoomMap;
   messages: ChatMessage[];
 };
 
@@ -73,7 +75,7 @@ export function createInitialSyncplayState(): SyncplayState {
       setBy: null
     },
     media: null,
-    rooms: {},
+    rooms: createRoomMap(),
     messages: []
   };
 }
@@ -235,8 +237,8 @@ function reduceSetMessage(state: SyncplayState, payload: Record<string, unknown>
   return next;
 }
 
-function normalizeRooms(payload: Record<string, Record<string, ServerUserPayload>>): Record<string, RoomUser[]> {
-  const rooms: Record<string, RoomUser[]> = {};
+function normalizeRooms(payload: Record<string, Record<string, ServerUserPayload>>): RoomMap {
+  const rooms = createRoomMap();
   for (const [room, users] of Object.entries(payload)) {
     rooms[room] = Object.entries(users)
       .map(([username, user]) => normalizeUser(username, room, user))
@@ -246,10 +248,10 @@ function normalizeRooms(payload: Record<string, Record<string, ServerUserPayload
 }
 
 function applyUserUpdates(
-  rooms: Record<string, RoomUser[]>,
+  rooms: RoomMap,
   updates: Record<string, ServerUserPayload>
-): Record<string, RoomUser[]> {
-  let next = { ...rooms };
+): RoomMap {
+  let next = cloneRoomMap(rooms);
   for (const [username, payload] of Object.entries(updates)) {
     const room = payload.room?.name;
     const previous = findUser(next, username);
@@ -286,7 +288,7 @@ function normalizeUser(
   };
 }
 
-function findUser(rooms: Record<string, RoomUser[]>, username: string): RoomUser | null {
+function findUser(rooms: RoomMap, username: string): RoomUser | null {
   for (const users of Object.values(rooms)) {
     const match = users.find(user => user.username === username);
     if (match) {
@@ -296,8 +298,8 @@ function findUser(rooms: Record<string, RoomUser[]>, username: string): RoomUser
   return null;
 }
 
-function removeUser(rooms: Record<string, RoomUser[]>, username: string): Record<string, RoomUser[]> {
-  const next: Record<string, RoomUser[]> = {};
+function removeUser(rooms: RoomMap, username: string): RoomMap {
+  const next = createRoomMap();
   for (const [room, users] of Object.entries(rooms)) {
     const remaining = users.filter(user => user.username !== username);
     if (remaining.length > 0) {
@@ -307,13 +309,12 @@ function removeUser(rooms: Record<string, RoomUser[]>, username: string): Record
   return next;
 }
 
-function setUserReady(rooms: Record<string, RoomUser[]>, username: string, isReady: boolean): Record<string, RoomUser[]> {
-  return Object.fromEntries(
-    Object.entries(rooms).map(([room, users]) => [
-      room,
-      users.map(user => (user.username === username ? { ...user, isReady } : user))
-    ])
-  );
+function setUserReady(rooms: RoomMap, username: string, isReady: boolean): RoomMap {
+  const next = createRoomMap();
+  for (const [room, users] of Object.entries(rooms)) {
+    next[room] = users.map(user => (user.username === username ? { ...user, isReady } : user));
+  }
+  return next;
 }
 
 function resolveUserFile(user: ServerUserPayload, previous?: RoomUser | null): SyncplayFile | null {
@@ -330,6 +331,18 @@ function isSyncplayFile(file: unknown): file is SyncplayFile {
     typeof (file as SyncplayFile).duration === 'number' &&
     typeof (file as SyncplayFile).size === 'number'
   );
+}
+
+function createRoomMap(): RoomMap {
+  return Object.create(null) as RoomMap;
+}
+
+function cloneRoomMap(rooms: RoomMap): RoomMap {
+  const next = createRoomMap();
+  for (const [room, users] of Object.entries(rooms)) {
+    next[room] = users;
+  }
+  return next;
 }
 
 function addMessage(state: SyncplayState, message: Omit<ChatMessage, 'id' | 'createdAt'>): SyncplayState {

@@ -137,17 +137,27 @@ function WebClient() {
 
   const connect = (event: FormEvent) => {
     event.preventDefault();
+    const parsedPort = Number(form.port);
+    if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+      dispatch({
+        type: 'connection-status',
+        status: 'error',
+        error: 'Port must be an integer between 1 and 65535.'
+      });
+      return;
+    }
+
     const config: ConnectionConfig = {
-      host: form.host,
-      port: Number(form.port),
+      host: form.host.trim(),
+      port: parsedPort,
       tls: form.tls,
-      username: form.username,
-      room: form.room,
+      username: form.username.trim() || initialForm.username,
+      room: form.room.trim() || initialForm.room,
       proxyUrl: form.proxyUrl,
       password: form.password || undefined
     };
 
-    dispatch({ type: 'profile-updated', username: form.username, room: form.room });
+    dispatch({ type: 'profile-updated', username: config.username, room: config.room });
     connection.connect(config);
   };
 
@@ -158,7 +168,11 @@ function WebClient() {
 
   const sendChat = (event: FormEvent) => {
     event.preventDefault();
-    connection.sendChat(chatDraft);
+    const text = chatDraft.trim();
+    if (!connected || !text) {
+      return;
+    }
+    connection.sendChat(text);
     setChatDraft('');
   };
 
@@ -206,16 +220,29 @@ function WebClient() {
     };
 
     dispatch({ type: 'media-updated', media });
-    connection.sendFile(media);
   };
+
+  useEffect(() => {
+    if (connected && state.media) {
+      connection.sendFile(state.media);
+    }
+  }, [connected, connection, state.media]);
 
   const toggleReady = () => {
     connection.sendReady(!isReady);
   };
 
   const changeRoom = () => {
-    connection.sendRoom(form.room);
-    dispatch({ type: 'profile-updated', username: state.profile.username, room: form.room });
+    const room = form.room.trim();
+    if (!connected) {
+      dispatch({ type: 'local-system-message', text: 'Connect before changing rooms.' });
+      return;
+    }
+    if (!room) {
+      dispatch({ type: 'local-system-message', text: 'Room name cannot be blank.' });
+      return;
+    }
+    connection.sendRoom(room);
   };
 
   return (
