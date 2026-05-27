@@ -9,7 +9,16 @@ from collections import namedtuple
 from twisted.internet import reactor
 from twisted.internet.protocol import Protocol
 
-from syncplay.filetransfer_wire import FRAME_COMPLETE, FRAME_CONTROL, FRAME_DATA, TransferFrame, TransferFrameError, decode_frame, encode_frame
+from syncplay.filetransfer_wire import (
+    FRAME_COMPLETE,
+    FRAME_CONTROL,
+    FRAME_DATA,
+    MAX_PAYLOAD_SIZE,
+    TransferFrame,
+    TransferFrameError,
+    decode_frame,
+    encode_frame,
+)
 
 
 TransferClientSession = namedtuple(
@@ -221,7 +230,13 @@ class FileTransferClient(object):
         path = session.approved_local_path
         if not path or not os.path.isfile(path):
             raise ValueError("loaded file is not readable")
-        chunk_size = int(chunkSize or session.chunk_size or 262144)
+        try:
+            chunk_size = int(chunkSize or session.chunk_size or MAX_PAYLOAD_SIZE)
+        except (TypeError, ValueError):
+            chunk_size = MAX_PAYLOAD_SIZE
+        if chunk_size < 1:
+            chunk_size = MAX_PAYLOAD_SIZE
+        chunk_size = min(chunk_size, MAX_PAYLOAD_SIZE)
         position = int(offset or 0)
         size = os.path.getsize(path)
         if position < 0 or position > size:
