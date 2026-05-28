@@ -358,7 +358,7 @@ class ConfigDialog(QtWidgets.QDialog):
                         self.config["lastCheckedForUpdates"] = self.lastCheckedForUpdates.toString("yyyy-MM-d HH:mm:ss.z")
                 else:
                     self.config["lastCheckedForUpdates"] = self.lastCheckedForUpdates.toString("yyyy-MM-d HH:mm:ss.z")
-        except:
+        except Exception:
             self.config["lastCheckedForUpdates"] = None
 
     def loadSavedPublicServerList(self):

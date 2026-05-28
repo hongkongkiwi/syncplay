@@ -194,24 +194,30 @@ export class SyncplayConnection {
     source?: TransferFileSource,
     chunkSize?: number,
     onError?: (error: Error) => void
-  ): TransferSocket {
+  ): TransferSocket | null {
     let transfer: TransferSocket;
     let uploadStarted = false;
-    const socket = this.createSocket(
-      {
-        host: (ticket.host ?? '').trim() || this.lastConfig?.host.trim() || 'localhost',
-        port: ticket.port ?? this.lastConfig?.port ?? 8999,
-        rejectUnauthorized: true
-      },
-      () => {
-        transfer.connect({
-          transferId: ticket.transferId,
-          token: ticket.token,
-          role: ticket.role,
-          offset: ticket.offset ?? 0
-        });
-      }
-    );
+    let socket: ReturnType<typeof this.createSocket>;
+    try {
+      socket = this.createSocket(
+        {
+          host: (ticket.host ?? '').trim() || this.lastConfig?.host.trim() || 'localhost',
+          port: ticket.port ?? this.lastConfig?.port ?? 8999,
+          rejectUnauthorized: true
+        },
+        () => {
+          transfer.connect({
+            transferId: ticket.transferId,
+            token: ticket.token,
+            role: ticket.role,
+            offset: ticket.offset ?? 0
+          });
+        }
+      );
+    } catch (error) {
+      onError?.(error instanceof Error ? error : new Error(String(error)));
+      return null;
+    }
     transfer = new TransferSocket(
       socket as TransferSocketLike,
       {
@@ -236,7 +242,10 @@ export class SyncplayConnection {
         }
         void transfer
           .upload(ticket.transferId, source, ticket.offset ?? 0, chunkSize)
-          .catch(error => onError?.(error instanceof Error ? error : new Error(String(error))));
+          .catch(error => {
+            socket.destroy();
+            onError?.(error instanceof Error ? error : new Error(String(error)));
+          });
       },
       ticket.file?.size
     );

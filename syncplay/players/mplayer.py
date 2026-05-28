@@ -222,7 +222,7 @@ class MplayerPlayer(BasePlayer):
         elif name == "length":
             try:
                 self._duration = float(value)
-            except:
+            except (ValueError, TypeError):
                 self._duration = 0
             self._durationAsk.set()
         elif name == "path":
@@ -348,7 +348,7 @@ class MplayerPlayer(BasePlayer):
                                                           text=True, env=dict())
                     pythonLibs = ast.literal_eval(pythonLibs)
                     pythonPath = ':'.join(pythonLibs[1:])
-                except:
+                except Exception:
                     pythonPath = None
                 if pythonPath is not None:
                     env['PATH'] = '/usr/bin:/usr/local/bin'
@@ -454,7 +454,7 @@ class MplayerPlayer(BasePlayer):
                                             "<mpv> Remove duplicate (delete both): {}".format(self.sendQueue[itemID]))
                                         self.__playerController._client.ui.showDebugMessage(self.sendQueue[itemID])
                                         return
-            except:
+            except Exception:
                 self.__playerController._client.ui.showDebugMessage("<mpv> Problem removing duplicates, etc")
             self.sendQueue.append(line)
             self.processSendQueue()

@@ -235,14 +235,14 @@ class ConsoleUI(threading.Thread):
             try:
                 username = command.group('parameter')
                 self._syncplayClient.setOthersReadiness(username, True)
-            except:
+            except Exception:
                 pass
 
         elif command.group('command') in constants.COMMANDS_SETNOTREADY:
             try:
                 username = command.group('parameter')
                 self._syncplayClient.setOthersReadiness(username, False)
-            except:
+            except Exception:
                 pass
 
         else:

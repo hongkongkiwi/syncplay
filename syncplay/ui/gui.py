@@ -515,7 +515,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.changeAutoplayState()
             self.changeAutoplayThreshold()
             self.updateAutoPlayIcon()
-        except:
+        except Exception:
             self.showErrorMessage("Failed to load some settings.")
         self.automaticUpdateCheck()
 
@@ -907,7 +907,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if IsPySide:
                     self.listTreeView.header().setResizeMode(3, QtWidgets.QHeaderView.Stretch)
             self.listTreeView.expandAll()
-        except:
+        except Exception:
             pass
 
     def updateReadyState(self, newState):
@@ -974,7 +974,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             if self.config['autosaveJoinsToList']:
                 self.addRoomToList(room)
-        except:
+        except Exception:
             pass
 
     def showDebugMessage(self, message):

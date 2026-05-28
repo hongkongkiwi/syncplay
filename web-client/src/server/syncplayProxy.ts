@@ -7,6 +7,8 @@ import { WebSocketServer, type WebSocket } from 'ws';
 
 const DEFAULT_ALLOWED_HOSTS = ['127.0.0.1', '::1', 'localhost'];
 const MAX_PORT = 65535;
+const MAX_CONNECTIONS_PER_IP = 10;
+const MAX_PAYLOAD = 1 * 1024 * 1024; // 1 MiB
 
 export function syncplayProxyPlugin(): Plugin {
   return {
@@ -44,7 +46,8 @@ function attachProxy(httpServer: UpgradeServer | null): void {
     );
   }
 
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD });
+  const connectionsPerIp = new Map<string, number>();
 
   httpServer.on('upgrade', (request, socket, head) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
@@ -66,10 +69,35 @@ function attachProxy(httpServer: UpgradeServer | null): void {
       return;
     }
 
+    // Rate limit: max connections per IP
+    const clientIp = request.socket.remoteAddress ?? 'unknown';
+    const count = (connectionsPerIp.get(clientIp) ?? 0) + 1;
+    if (count > MAX_CONNECTIONS_PER_IP) {
+      socket.write('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\nToo many connections.');
+      socket.destroy();
+      return;
+    }
+    connectionsPerIp.set(clientIp, count);
+
     wss.handleUpgrade(request, socket, head, ws => {
+      ws.on('close', () => {
+        const current = connectionsPerIp.get(clientIp) ?? 1;
+        if (current <= 1) {
+          connectionsPerIp.delete(clientIp);
+        } else {
+          connectionsPerIp.set(clientIp, current - 1);
+        }
+      });
       bridgeSyncplay(ws, target.value, request);
     });
   });
+
+  // Cleanup stale entries periodically
+  setInterval(() => {
+    if (connectionsPerIp.size > 1000) {
+      connectionsPerIp.clear();
+    }
+  }, 60_000).unref();
 }
 
 type ProxyTarget = {
@@ -84,13 +112,36 @@ type ValidationResult = { ok: true } | { ok: false; error: string };
 
 function validateOrigin(request: IncomingMessage): ValidationResult {
   const origin = request.headers.origin;
+
+  // In production with an origin allowlist, require the Origin header.
+  // Browsers always send Origin for WebSocket upgrades; non-browser clients
+  // (curl, scripts, SSRF) can omit it, bypassing the allowlist.
+  const hasAllowlist = !!(process.env.SYNCPLAY_WEB_ALLOWED_ORIGINS ?? '').trim();
   if (!origin) {
+    if (
+      process.env.NODE_ENV === 'production' &&
+      hasAllowlist
+    ) {
+      return { ok: false, error: 'WebSocket origin is required.' };
+    }
     return { ok: true };
   }
 
   const normalizedOrigin = normalizeOrigin(origin);
   if (!normalizedOrigin) {
     return { ok: false, error: 'Invalid WebSocket origin.' };
+  }
+
+  if (!hasAllowlist) {
+    // No allowlist configured: check against host header (same-origin)
+    const host = request.headers.host?.toLowerCase();
+    if (host && normalizedOrigin === `http://${host}`) {
+      return { ok: true };
+    }
+    if (host && normalizedOrigin === `https://${host}`) {
+      return { ok: true };
+    }
+    return { ok: false, error: 'WebSocket origin not allowed.' };
   }
 
   const allowedOrigins = (process.env.SYNCPLAY_WEB_ALLOWED_ORIGINS ?? '')
@@ -102,15 +153,7 @@ function validateOrigin(request: IncomingMessage): ValidationResult {
     return { ok: true };
   }
 
-  const host = request.headers.host?.toLowerCase();
-  if (host && normalizedOrigin === `http://${host}`) {
-    return { ok: true };
-  }
-  if (host && normalizedOrigin === `https://${host}`) {
-    return { ok: true };
-  }
-
-  return { ok: false, error: `Origin "${origin}" is not allowed.` };
+  return { ok: false, error: 'WebSocket origin not allowed.' };
 }
 
 function normalizeOrigin(value: string): string | null {
@@ -142,10 +185,7 @@ function parseTarget(url: URL): ParseResult {
   }
 
   if (!isAllowedHost(host)) {
-    return {
-      ok: false,
-      error: `Host "${host}" is not allowed by SYNCPLAY_WEB_ALLOWED_HOSTS.`
-    };
+    return { ok: false, error: 'Host not allowed.' };
   }
 
   return { ok: true, value: { host, port, tls: useTls } };
@@ -173,7 +213,7 @@ function bridgeSyncplay(ws: WebSocket, target: ProxyTarget, request: IncomingMes
     if (connected) {
       return;
     }
-    const message = `Timed out connecting to ${target.host}:${target.port}.`;
+    const message = 'Timed out connecting to upstream server.';
     if (ws.readyState === ws.OPEN) {
       const errorPayload = JSON.stringify({ Error: { message } }) + '\r\n';
       ws.send(errorPayload, () => ws.close(1011, 'Upstream connect timeout'));
@@ -195,7 +235,7 @@ function bridgeSyncplay(ws: WebSocket, target: ProxyTarget, request: IncomingMes
   syncplaySocket.on('connect', () => {
     connected = true;
     clearConnectTimer();
-    ws.send(JSON.stringify({ Proxy: { connected: true, remoteAddress: request.socket.remoteAddress } }) + '\r\n');
+    ws.send(JSON.stringify({ Proxy: { connected: true } }) + '\r\n');
   });
 
   syncplaySocket.on('data', chunk => {
@@ -206,13 +246,14 @@ function bridgeSyncplay(ws: WebSocket, target: ProxyTarget, request: IncomingMes
 
   syncplaySocket.on('error', error => {
     clearConnectTimer();
-    const message = formatSocketError(error, target);
+    const message = 'Could not connect to upstream server.';
     if (ws.readyState === ws.OPEN) {
       const errorPayload = JSON.stringify({ Error: { message } }) + '\r\n';
       ws.send(errorPayload, () => ws.close(1011, message.slice(0, 120)));
       return;
     }
     syncplaySocket.destroy();
+    console.error('[syncplay-web-proxy] Upstream error:', error.message);
   });
 
   syncplaySocket.on('close', () => {
@@ -234,19 +275,4 @@ function bridgeSyncplay(ws: WebSocket, target: ProxyTarget, request: IncomingMes
   ws.on('error', () => {
     syncplaySocket.destroy();
   });
-}
-
-function formatSocketError(error: Error, target: ProxyTarget): string {
-  if (error.message) {
-    return error.message;
-  }
-
-  const causeMessages = (error as Error & { errors?: Error[] }).errors
-    ?.map(cause => cause.message)
-    .filter(Boolean);
-  if (causeMessages?.length) {
-    return causeMessages.join('; ');
-  }
-
-  return `Could not connect to ${target.host}:${target.port}.`;
 }
