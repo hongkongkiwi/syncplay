@@ -10,6 +10,7 @@ from syncplay.filetransfer_wire import (
     TransferToken,
     encode_frame,
 )
+import zlib
 from syncplay.protocols import JSONCommandProtocol, SyncClientProtocol, SyncServerProtocol
 
 
@@ -232,3 +233,26 @@ def test_bad_transfer_connect_payload_closes_socket_without_crashing():
     protocol.handleTransferConnect("bad")
 
     assert protocol.transport.closed is True
+
+
+def test_crc32_golden_values_for_js_cross_validation():
+    """Verify Python zlib.crc32 output for known inputs.
+
+    These values serve as a golden reference for the JavaScript manual CRC32
+    implementation in react-native/src/syncplay/transferSocket.ts:headerCrc().
+    Any discrepancy means the JS implementation is incorrect.
+    """
+    golden = [
+        (b"", 0x00000000),
+        (b"\x00\x00\x00\x00", 0x2144df1c),
+        (b"SPFT", 0xf2f8e9c0),
+        (b"\x00" * 20, 0x5a695d9f),
+        (b"hello world", 0x0d4a1185),
+        (b"\xff" * 20, 0xbe24f6e8),
+        (b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13", 0x6a046b80),
+    ]
+    for data, expected in golden:
+        result = zlib.crc32(data) & 0xffffffff
+        assert result == expected, (
+            f"CRC32 mismatch for {data!r}: got 0x{result:08x}, expected 0x{expected:08x}"
+        )

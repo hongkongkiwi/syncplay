@@ -194,7 +194,7 @@ try:
     MPVNET_PATHS.append(os.path.expandvars(r'%LOCALAPPDATA%\Microsoft\WindowsApps\mpvnet.exe'))
     MPVNET_PATHS.append(os.path.expandvars(r'%LOCALAPPDATA%\Programs\mpv.net\mpvnet.exe'))
     MPV_PATHS.append(os.path.expandvars(r'%LOCALAPPDATA%\Microsoft\WindowsApps\mpv.exe'))
-except:
+except (OSError, KeyError):
     pass
 VLC_PATHS = [
     r"c:\program files (x86)\videolan\vlc\vlc.exe",

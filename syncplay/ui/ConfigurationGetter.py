@@ -248,13 +248,13 @@ class ConfigurationGetter(object):
                 if varToTest == "" or varToTest is None:
                     return False
                 if not str(varToTest).isdigit():
-                    return False
-                varToTest = int(varToTest)
-                if varToTest > 65535 or varToTest < 1:
-                    return False
-                return True
-            except:
-                return False
+                    try:
+                        varToTest = int(self._config[key])
+                        if varToTest > 65535 or varToTest < 1:
+                            return False
+                        return True
+                    except (ValueError, TypeError):
+                        return False
 
         for key in self._boolean:
             if self._config[key] == "True":
@@ -339,7 +339,7 @@ class ConfigurationGetter(object):
                     except ValueError:
                         try:
                             port = port.encode('ascii', 'ignore')
-                        except:
+                        except (UnicodeError, AttributeError):
                             port = ""
                 else:
                     #IPv6 address
@@ -413,7 +413,7 @@ class ConfigurationGetter(object):
                 for key, value in list(self._promptForMissingArguments(e).items()):
                     self._config[key] = value
                 self._checkConfig()
-            except:
+            except InvalidConfigValue:
                 sys.exit()
 
     def _promptForMissingArguments(self, error=None):
@@ -537,7 +537,7 @@ class ConfigurationGetter(object):
                         try:
                             from syncplay.vendor import darkdetect
                             isDarkMode = darkdetect.isDark()
-                        except:
+                        except (ImportError, AttributeError):
                             isDarkMode = False
                         if isDarkMode:
                             self.app.setStyle(QtWidgets.QStyleFactory.create("fusion"))
