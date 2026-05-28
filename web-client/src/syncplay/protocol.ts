@@ -103,6 +103,8 @@ export function buildHelloMessage(args: {
   };
 
   if (args.password) {
+    // NOTE: MD5 is used here for protocol compatibility with the Syncplay server.
+    // This is NOT intended as a secure password hash.
     hello.password = md5(args.password);
   }
 

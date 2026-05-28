@@ -55,6 +55,10 @@ function WebClient() {
   const isApplyingRemoteRef = useRef(false);
   const lastPlaybackSendRef = useRef(0);
   const hasMediaRef = useRef(false);
+  const autoplayBlockedRef = useRef(false);
+  const manualDisconnectRef = useRef(false);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastConnectionConfigRef = useRef<ConnectionConfig | null>(null);
 
   const usersInRoom = state.rooms[state.profile.room] ?? [];
   const currentUser = usersInRoom.find(user => user.username === state.profile.username);
@@ -90,7 +94,9 @@ function WebClient() {
         video.removeAttribute('src');
         video.load();
       }
-      URL.revokeObjectURL(mediaUrl);
+      if (mediaUrl) {
+        URL.revokeObjectURL(mediaUrl);
+      }
     };
   }, [mediaUrl]);
 
@@ -123,7 +129,11 @@ function WebClient() {
       video.pause();
     }
     if (correction.shouldPlay) {
+      if (autoplayBlockedRef.current) {
+        return;
+      }
       void video.play().catch(() => {
+        autoplayBlockedRef.current = true;
         dispatch({
           type: 'local-system-message',
           text: 'The browser blocked autoplay. Press play once and Syncplay can take over after that.'
@@ -134,6 +144,33 @@ function WebClient() {
       isApplyingRemoteRef.current = false;
     }, 250);
   }, [mediaUrl, state.playback, state.profile.username, syncPaused]);
+
+  useEffect(() => {
+    if (state.connection.status !== 'error' && state.connection.status !== 'disconnected') {
+      return;
+    }
+    if (!lastConnectionConfigRef.current || manualDisconnectRef.current) {
+      return;
+    }
+    if (reconnectTimerRef.current) {
+      return;
+    }
+
+    reconnectTimerRef.current = window.setTimeout(() => {
+      reconnectTimerRef.current = null;
+      const config = lastConnectionConfigRef.current;
+      if (config && !manualDisconnectRef.current) {
+        connection.connect(config);
+      }
+    }, 2500);
+
+    return () => {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+    };
+  }, [connection, state.connection.status]);
 
   const updateForm = (field: keyof ConnectForm, value: string | boolean) => {
     setForm(current => ({ ...current, [field]: value }));
@@ -162,10 +199,17 @@ function WebClient() {
     };
 
     dispatch({ type: 'profile-updated', username: config.username, room: config.room });
+    manualDisconnectRef.current = false;
+    lastConnectionConfigRef.current = config;
     connection.connect(config);
   };
 
   const disconnect = () => {
+    manualDisconnectRef.current = true;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
     connection.disconnect();
     dispatch({ type: 'connection-status', status: 'disconnected' });
   };
@@ -270,9 +314,17 @@ function WebClient() {
               onLoadedMetadata={() => {
                 publishMedia();
               }}
-              onPlay={() => sendPlayback()}
+              onPlay={() => {
+                autoplayBlockedRef.current = false;
+                sendPlayback();
+              }}
               onPause={() => sendPlayback()}
-              onSeeked={() => sendPlayback(true)}
+              onSeeked={() => {
+                if (isApplyingRemoteRef.current) {
+                  return;
+                }
+                sendPlayback(true);
+              }}
               onTimeUpdate={() => {
                 const now = Date.now();
                 if (now - lastPlaybackSendRef.current > 4000) {
