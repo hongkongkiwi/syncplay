@@ -165,14 +165,18 @@ function isAllowedHost(host: string): boolean {
 }
 
 function bridgeSyncplay(ws: WebSocket, target: ProxyTarget, request: IncomingMessage): void {
+  let connected = false;
   const syncplaySocket = target.tls
     ? tls.connect({ host: target.host, port: target.port, servername: target.host })
     : net.connect({ host: target.host, port: target.port });
   const connectTimer = setTimeout(() => {
+    if (connected) {
+      return;
+    }
     const message = `Timed out connecting to ${target.host}:${target.port}.`;
     if (ws.readyState === ws.OPEN) {
-      ws.send(JSON.stringify({ Error: { message } }) + '\r\n');
-      ws.close(1011, 'Upstream connect timeout');
+      const errorPayload = JSON.stringify({ Error: { message } }) + '\r\n';
+      ws.send(errorPayload, () => ws.close(1011, 'Upstream connect timeout'));
     }
     syncplaySocket.destroy(new Error(message));
   }, 10_000);
@@ -189,6 +193,7 @@ function bridgeSyncplay(ws: WebSocket, target: ProxyTarget, request: IncomingMes
   };
 
   syncplaySocket.on('connect', () => {
+    connected = true;
     clearConnectTimer();
     ws.send(JSON.stringify({ Proxy: { connected: true, remoteAddress: request.socket.remoteAddress } }) + '\r\n');
   });

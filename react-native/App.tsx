@@ -153,6 +153,7 @@ export default function App() {
   const lastAutoFileSwitchRef = useRef<string | null>(null);
   const openedTransferSocketsRef = useRef<Map<string, string>>(new Map());
   const wasConnectedRef = useRef(false);
+  const isApplyingRemoteRef = useRef(false);
 
   const player = useVideoPlayer(mediaUri, instance => {
     instance.timeUpdateEventInterval = 0.5;
@@ -329,6 +330,7 @@ export default function App() {
       doSeek: state.playback.doSeek
     });
 
+    isApplyingRemoteRef.current = true;
     player.playbackRate = correction.rate;
     if (typeof correction.seekTo === 'number') {
       player.currentTime = correction.seekTo;
@@ -339,6 +341,9 @@ export default function App() {
     } else if (correction.shouldPlay) {
       player.play();
     }
+    setTimeout(() => {
+      isApplyingRemoteRef.current = false;
+    }, 250);
   }, [
     player,
     state.media,
@@ -349,7 +354,7 @@ export default function App() {
   ]);
 
   useEventListener(player, 'playingChange', event => {
-    if (!state.media) {
+    if (!state.media || isApplyingRemoteRef.current) {
       return;
     }
 

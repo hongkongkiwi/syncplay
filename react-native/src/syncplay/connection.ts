@@ -89,6 +89,8 @@ export class SyncplayConnection {
         buildHelloMessage({
           username: config.username,
           room: config.room,
+          // NOTE: MD5 is used here for protocol compatibility with the Syncplay server.
+          // This is NOT intended as a secure password hash.
           ...(config.password ? { passwordHash: md5(config.password) } : {})
         })
       );
