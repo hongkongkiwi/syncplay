@@ -657,11 +657,17 @@ function normalizeUser(
 }
 
 function isSyncplayFile(file: ServerUserPayload['file']): file is SyncplayFile {
+  const duration = (file as SyncplayFile | null)?.duration;
+  const size = (file as SyncplayFile | null)?.size;
   return (
     !!file &&
-    typeof file.name === 'string' &&
-    typeof file.duration === 'number' &&
-    typeof file.size === 'number'
+    typeof (file as SyncplayFile).name === 'string' &&
+    typeof duration === 'number' &&
+    Number.isFinite(duration) &&
+    duration >= 0 &&
+    typeof size === 'number' &&
+    Number.isFinite(size) &&
+    size >= 0
   );
 }
 

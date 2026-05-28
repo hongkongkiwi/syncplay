@@ -13,7 +13,7 @@ try:
     from OpenSSL import crypto
     from OpenSSL.SSL import TLSv1_2_METHOD
     from twisted.internet import ssl
-except:
+except ImportError:
     pass
 
 import syncplay

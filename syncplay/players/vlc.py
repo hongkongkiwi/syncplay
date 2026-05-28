@@ -37,7 +37,7 @@ class VLCProtocol(LineReceiver):
                 self.transport.write(lineToSend)
                 if self.factory._playerController._client and self.factory._playerController._client.ui:
                     self.factory._playerController._client.ui.showDebugMessage("player >> {}".format(line))
-            except:
+            except Exception:
                 pass
 
     def connectionMade(self):
@@ -85,7 +85,7 @@ class VLCClientFactory(ReconnectingClientFactory):
         if self.timeVLCLaunched and time.time() - self.timeVLCLaunched < constants.VLC_OPEN_MAX_WAIT_TIME:
             try:
                 self._playerController._client.ui.showDebugMessage("Failed to connect to VLC, but reconnecting as within max wait time")
-            except:
+            except Exception:
                 pass
             self._playerController._vlcready.clear()
             connector.connect()
@@ -101,7 +101,7 @@ class VLCClientFactory(ReconnectingClientFactory):
             # For circumstances where Syncplay is not connected to VLC and is not reconnecting
             try:
                 self._process.terminate()
-            except:  # When VLC is already closed
+            except ProcessLookupError:  # When VLC is already closed
                 pass
 
 
@@ -135,7 +135,7 @@ class VlcPlayer(BasePlayer):
             self.radixChar = "{:n}".format(1.5)[1:2]
             if self.radixChar == "" or self.radixChar == "1" or self.radixChar == "5":
                 raise ValueError
-        except:
+        except (ValueError, TypeError):
             self._client.ui.showErrorMessage(
                 "Failed to determine locale. As a fallback Syncplay is using the following radix character: \".\".")
             self.radixChar = "."
@@ -163,7 +163,7 @@ class VlcPlayer(BasePlayer):
                 self._client.ui.showErrorMessage(getMessage("vlc-failed-connection"), True)
                 self.reactor.callFromThread(self._client.stop, True,)
             self.reactor.callFromThread(self._client.initPlayer, self,)
-        except:
+        except Exception:
             pass
 
     def _fileUpdateClearEvents(self):

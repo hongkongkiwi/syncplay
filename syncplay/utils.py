@@ -161,7 +161,7 @@ def formatSize(numOfBytes, precise=False):
         else:
             megabytes = int(megabytes)
         return str(megabytes) + getMessage("megabyte-suffix")
-    except:  # E.g. when filesize is hashed
+    except (TypeError, ValueError):  # E.g. when filesize is hashed
         return "???"
 
 

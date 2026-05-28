@@ -34,7 +34,7 @@ class MpvPlayer(BasePlayer):
     def run(client, playerPath, filePath, args):
         try:
             ver = MpvPlayer.RE_VERSION.search(subprocess.check_output([playerPath, '--version']).decode('utf-8'))
-        except:
+        except Exception:
             ver = None
         constants.MPV_NEW_VERSION = ver is None or int(ver.group(1)) > 0 or int(ver.group(2)) >= 23
         if not constants.MPV_NEW_VERSION:
@@ -288,7 +288,7 @@ class MpvPlayer(BasePlayer):
         elif name == "length":
             try:
                 self._duration = float(value)
-            except:
+            except (ValueError, TypeError):
                 self._duration = 0
             self._durationAsk.set()
         elif name == "path":
@@ -332,7 +332,7 @@ class MpvPlayer(BasePlayer):
             self._pathAsk.set()
             self._positionAsk.set()
             self._pausedAsk.set()
-        except:
+        except Exception:
             pass
 
 
@@ -754,7 +754,7 @@ class MpvPlayer(BasePlayer):
             self.readyToSend = False
             try:
                 self.mpvpipe.terminate()
-            except: #When mpv is already closed
+            except ProcessLookupError: #When mpv is already closed
                 pass
             self.__playerController._takeLocksDown()
             self.__playerController.reactor.callFromThread(self.__playerController._client.stop, False)
