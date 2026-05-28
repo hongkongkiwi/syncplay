@@ -239,6 +239,36 @@ class SyncFactory(Factory):
         elif "cancel" in payload:
             cancel = payload["cancel"]
             self.fileTransfers.cancel_transfer(watcher, cancel.get("transferId"), cancel.get("reason"))
+        elif "sdp" in payload or "ice" in payload:
+            self._forward_transfer_signal(watcher, payload)
+
+    def _forward_transfer_signal(self, watcher, payload):
+        key = "sdp" if "sdp" in payload else "ice"
+        inner = payload[key] if isinstance(payload.get(key), dict) else None
+        if not inner:
+            return
+        transfer_id = inner.get("transferId")
+        if not transfer_id:
+            return
+        session = self.fileTransfers.get_session(transfer_id)
+        if not session:
+            return
+        target_name = None
+        if watcher.getName() == session.source:
+            target_name = session.receiver
+        elif watcher.getName() == session.receiver:
+            target_name = session.source
+        if not target_name:
+            return
+        target = self._find_watcher_by_name(target_name, watcher)
+        if target:
+            target._connector.sendTransfer(payload)
+
+    def _find_watcher_by_name(self, username, reference_watcher):
+        for candidate in self.getAllWatchersForUser(reference_watcher):
+            if candidate.getName() == username:
+                return candidate
+        return None
 
     def forcePositionUpdate(self, watcher, doSeek, watcherPauseState):
         room = watcher.getRoom()

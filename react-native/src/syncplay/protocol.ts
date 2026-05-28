@@ -20,6 +20,7 @@ export type ClientFeatures = {
   setOthersReadiness: boolean;
   fileTransfer: boolean;
   fileTransferVersion: number;
+  webrtc: boolean;
 };
 
 export type TransferRequestPayload = {
@@ -58,6 +59,8 @@ export type ServerTransferMessage = {
   resume?: { transferId: string; offset: number };
   cancel?: { transferId: string; reason: string };
   error?: { transferId: string; code: string; message: string };
+  sdp?: Record<string, unknown>;
+  ice?: Record<string, unknown>;
 };
 
 export type HelloMessage = {
@@ -139,7 +142,8 @@ export function createClientFeatures(): ClientFeatures {
     persistentRooms: true,
     setOthersReadiness: true,
     fileTransfer: true,
-    fileTransferVersion: 1
+    fileTransferVersion: 1,
+    webrtc: false // react-native-webrtc not yet integrated
   };
 }
 

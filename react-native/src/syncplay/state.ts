@@ -406,6 +406,12 @@ function reduceTransferMessage(state: SyncplayState, payload: NonNullable<Syncpl
     return reduceTransferControl(state, payload.cancel.transferId, 'cancelled');
   }
 
+  // WebRTC signaling — currently not supported on mobile (react-native-webrtc pending).
+  // Silently acknowledged to prevent state corruption.
+  if (payload.sdp || payload.ice) {
+    return state;
+  }
+
   return state;
 }
 
