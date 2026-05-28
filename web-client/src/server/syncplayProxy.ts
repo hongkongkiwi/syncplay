@@ -32,6 +32,18 @@ function attachProxy(httpServer: UpgradeServer | null): void {
     return;
   }
 
+  if (
+    process.env.NODE_ENV === 'production' &&
+    !process.env.SYNCPLAY_WEB_ALLOWED_HOSTS
+  ) {
+    console.warn(
+      '[syncplay-web-proxy] SYNCPLAY_WEB_ALLOWED_HOSTS is not set. ' +
+        'The proxy will only allow connections to localhost. ' +
+        'Set SYNCPLAY_WEB_ALLOWED_HOSTS=* or a comma-separated host list ' +
+        'when deploying near public Syncplay servers.'
+    );
+  }
+
   const wss = new WebSocketServer({ noServer: true });
 
   httpServer.on('upgrade', (request, socket, head) => {
@@ -191,9 +203,11 @@ function bridgeSyncplay(ws: WebSocket, target: ProxyTarget, request: IncomingMes
     clearConnectTimer();
     const message = formatSocketError(error, target);
     if (ws.readyState === ws.OPEN) {
-      ws.send(JSON.stringify({ Error: { message } }) + '\r\n');
-      ws.close(1011, message.slice(0, 120));
+      const errorPayload = JSON.stringify({ Error: { message } }) + '\r\n';
+      ws.send(errorPayload, () => ws.close(1011, message.slice(0, 120)));
+      return;
     }
+    syncplaySocket.destroy();
   });
 
   syncplaySocket.on('close', () => {

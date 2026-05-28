@@ -1,3 +1,5 @@
+import { Buffer } from 'buffer';
+
 export const SYNCPLAY_COMPAT_VERSION = '1.2.255';
 export const SYNCPLAY_REAL_VERSION = '1.7.6-rn.1';
 
@@ -402,4 +404,3 @@ export class LineDecoder {
     return messages;
   }
 }
-import { Buffer } from 'buffer';

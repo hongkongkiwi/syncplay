@@ -127,9 +127,9 @@ class SyncClientProtocol(JSONCommandProtocol):
                     if reason.stack:
                         self._client.ui.showErrorMessage(str(reason.stack))
                     self._client.ui.showErrorMessage(str(reason.value))
-                except:
+                except (ValueError, TypeError, AttributeError):
                     pass
-        except:
+        except Exception:
             pass
         self._client.destroyProtocol()
 

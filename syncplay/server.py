@@ -355,7 +355,7 @@ class SyncFactory(Factory):
     def checkLastEditCertTime(self):
         try:
             outTime = os.path.getmtime(self.certPath+'/cert.pem')
-        except:
+        except OSError:
             outTime = None
         return outTime
 
@@ -375,7 +375,7 @@ class StatsRecorder(object):
         try:
             self._dbHandle.connect()
             reactor.callLater(delay, self._scheduleClientSnapshot)
-        except:
+        except Exception:
             print("--- Error in initializing the stats database. Server Stats not enabled. ---")
 
     def _scheduleClientSnapshot(self):
@@ -389,7 +389,7 @@ class StatsRecorder(object):
             for room in rooms.values():
                 for watcher in room.getWatchers():
                     self._dbHandle.addVersionLog(snapshotTime, watcher.getVersion())
-        except:
+        except Exception:
             pass
 
 class RoomsRecorder(StatsRecorder):
@@ -401,7 +401,7 @@ class RoomsRecorder(StatsRecorder):
         try:
             self._dbHandle.connect()
             reactor.callLater(delay, self._scheduleClientSnapshot) # TODO: FIX THIS!
-        except:
+        except Exception:
             print("--- Error in initializing the stats database. Server Stats not enabled. ---")
 
     def _scheduleClientSnapshot(self):
@@ -415,7 +415,7 @@ class RoomsRecorder(StatsRecorder):
             for room in rooms.values():
                 for watcher in room.getWatchers():
                     self._dbHandle.addVersionLog(snapshotTime, watcher.getVersion())
-        except:
+        except Exception:
             pass
 
 class StatsDBManager(object):

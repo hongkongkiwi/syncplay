@@ -281,12 +281,12 @@ def blackholeStdoutForFrozenWindow():
 def truncateText(unicodeText, maxLength):
     try:
         unicodeText = unicodeText.decode('utf-8')
-    except:
+    except (UnicodeError, AttributeError):
         pass
 
     try:
         return str(unicodeText.encode("utf-8"), "utf-8", errors="ignore")[:maxLength]
-    except:
+    except (UnicodeError, AttributeError, TypeError):
         pass
     return ""
 
@@ -294,13 +294,13 @@ def truncateText(unicodeText, maxLength):
 def splitText(unicodeText, maxLength):
     try:
         unicodeText = unicodeText.decode('utf-8')
-    except:
+    except (UnicodeError, AttributeError):
         pass
     try:
         unicodeText = str(unicodeText.encode("utf-8"), "utf-8", errors="ignore")
         unicodeArray = [unicodeText[i:i + maxLength] for i in range(0, len(unicodeText), maxLength)]
         return(unicodeArray)
-    except:
+    except (UnicodeError, AttributeError, TypeError):
         pass
     return [""]
 
@@ -502,7 +502,7 @@ def getListOfPublicServers():
             return response
         else:
             raise IOError
-    except:
+    except Exception:
         if constants.DEBUG_MODE == True:
             traceback.print_exc()
             raise

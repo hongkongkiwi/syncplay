@@ -90,7 +90,7 @@ def getInitialLanguage():
             initialLanguage = locale.getdefaultlocale()[0].split("_")[0]
         if initialLanguage not in messages:
             initialLanguage = constants.FALLBACK_INITIAL_LANGUAGE
-    except:
+    except (IndexError, AttributeError, TypeError):
         initialLanguage = constants.FALLBACK_INITIAL_LANGUAGE
     return initialLanguage
 

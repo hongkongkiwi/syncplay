@@ -35,7 +35,7 @@ try:
         tmpDir = tempfile.gettempdir()
         extractedPath = archive.extract(memberPath, tmpDir)
         SSL_CERT_FILE = extractedPath
-except:
+except ImportError:
     pass
 
 from syncplay import utils, constants, version
@@ -107,6 +107,9 @@ class SyncplayClient(object):
         self.setUsername(config['name'])
         self.setRoom(config['room'])
         if config['password']:
+            # NOTE: MD5 is used here for protocol compatibility with the Syncplay server.
+            # This is NOT intended as a secure password hash. Use a unique, high-entropy
+            # password for Syncplay servers, as MD5 is trivially reversible.
             config['password'] = hashlib.md5(config['password'].encode('utf-8')).hexdigest()
         self._serverPassword = config['password']
         self._host = "{}:{}".format(config['host'], config['port'])
@@ -549,11 +552,11 @@ class SyncplayClient(object):
             return
         try:
             size = os.path.getsize(path)
-        except:
+        except (OSError, ValueError, UnicodeDecodeError):
             try:
                 path = path.decode('utf-8')
                 size = os.path.getsize(path)
-            except:
+            except (OSError, ValueError, UnicodeDecodeError):
                 size = 0
         if not utils.isURL(path) and os.path.exists(path):
             self.fileSwitch.notifyUserIfFileNotInMediaDirectory(filename, path)
@@ -838,7 +841,6 @@ class SyncplayClient(object):
             return self._serverPassword
 
     def thisIsPublicServer(self):
-        self._publicServers = []
         if self._publicServers and self._host in self._publicServers:
             return True
         i = 0
@@ -999,7 +1001,7 @@ class SyncplayClient(object):
         if self._protocol and self._protocol.logged:
             try:
                 message = message.replace("\n", "").replace("\r", "")
-            except:
+            except (AttributeError, TypeError):
                 pass
             message = utils.truncateText(message, constants.MAX_CHAT_MESSAGE_LENGTH)
             self._protocol.sendChatMessage(message)
@@ -1171,7 +1173,7 @@ class SyncplayClient(object):
             try:
                 if self._config['autosaveJoinsToList']:
                     self.ui.addRoomToList(room+":"+password)
-            except:
+            except (KeyError, AttributeError):
                 pass
 
     def getControlledRoomPassword(self, room):
@@ -1183,11 +1185,11 @@ class SyncplayClient(object):
             import urllib.request, urllib.parse, urllib.error, syncplay, sys, json, platform
             try:
                 architecture = platform.architecture()[0]
-            except:
+            except (AttributeError, IndexError):
                 architecture = "Unknown"
             try:
                 machine = platform.machine()
-            except:
+            except AttributeError:
                 machine = "Unknown"
             params = urllib.parse.urlencode({'version': syncplay.version, 'milestone': syncplay.milestone, 'release_number': syncplay.release_number, 'language': syncplay.messages.messages["CURRENT"], 'platform': sys.platform, 'architecture': architecture, 'machine': machine, 'userInitiated': userInitiated})
             if isMacOS():
@@ -1317,7 +1319,7 @@ class SyncplayClient(object):
                 self._warnings[warningName]["displayedFor"] = 0
                 try:
                     self._warnings[warningName]["timer"].stop()
-                except:
+                except (AttributeError, KeyError):
                     pass
 
         def __displayPausedMessagesOnOSD(self):
@@ -1978,7 +1980,7 @@ class SyncplayPlaylist():
                 else:
                     path = self._client.fileSwitch.findFilepath(filename, highPriority=True)
                 return True if path else False
-            except:
+            except (ValueError, TypeError):
                 return False
         return False
 
@@ -1986,7 +1988,7 @@ class SyncplayPlaylist():
     def switchToNewPlaylistIndex(self, index, resetPosition = False):
         try:
             self.queuedIndexFilename = self._playlist[index]
-        except:
+        except (IndexError, TypeError):
             self.queuedIndexFilename = None
             self._ui.showDebugMessage("Failed to find index {} in playlist".format(index))
         if resetPosition and index is not None:
@@ -2035,7 +2037,7 @@ class SyncplayPlaylist():
                 filename = self._playlist[i]
                 validIndex = newPlaylist.index(filename)
                 return validIndex
-            except:
+            except (IndexError, ValueError):
                 i += 1
 
         i = self._playlistIndex
@@ -2044,7 +2046,7 @@ class SyncplayPlaylist():
                 filename = self._playlist[i]
                 validIndex = newPlaylist.index(filename)
                 return validIndex+1 if validIndex < len(newPlaylist)-1 else validIndex
-            except:
+            except (IndexError, ValueError):
                 i -= 1
         return 0
 
@@ -2328,7 +2330,6 @@ class FileSwitchManager(object):
                         startTime = time.time()
                         if os.path.isfile(os.path.join(directory, randomFilename)):
                             randomFilename = "RandomFile"+str(random.randrange(10000, 99999))+".txt"
-                            print("Found random file (?)")
                         if time.time() - startTime > constants.FOLDER_SEARCH_FIRST_FILE_TIMEOUT:
                             self.folderSearchEnabled = False
                             self.directorySearchError = getMessage("folder-search-first-file-timeout-error").format(directory)
