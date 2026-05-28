@@ -9,12 +9,19 @@ import {
   buildReadyMessage,
   buildRoomMessage,
   buildStateMessage,
+  buildTransferCancelMessage,
+  buildTransferDecisionMessage,
+  buildTransferIceMessage,
+  buildTransferPauseMessage,
+  buildTransferRequestMessage,
+  buildTransferResumeMessage,
+  buildTransferSdpMessage,
   encodeMessage,
   type ClientMessage,
   type SyncplayFile,
-  type SyncplayServerMessage
+  type SyncplayServerMessage,
 } from './protocol';
-import type { ConnectionStatus } from './state';
+import type { ConnectionStatus, SyncplayState } from './state';
 
 export type ConnectionConfig = {
   proxyUrl: string;
@@ -35,6 +42,10 @@ export class SyncplayWebConnection {
   private socket: WebSocket | null = null;
   private decoder = new LineDecoder();
   private rtt = 0;
+  private onTransferSignal?: (message: {
+    sdp?: RTCSessionDescriptionInit;
+    ice?: RTCIceCandidateInit;
+  }) => void;
 
   constructor(
     private readonly onStatus: (status: ConnectionStatus, error?: string | null) => void,
@@ -141,8 +152,80 @@ export class SyncplayWebConnection {
     this.send(buildPlaylistIndexMessage(index));
   }
 
+  // ── Transfer methods ─────────────────────────────────────────────────
+
+  requestTransfer(username: string, file?: SyncplayFile | null): void {
+    this.send(buildTransferRequestMessage(username, file));
+  }
+
+  acceptTransfer(transferId: string, fingerprint?: string): void {
+    this.send(buildTransferDecisionMessage(transferId, true, fingerprint));
+  }
+
+  rejectTransfer(transferId: string, _reason?: string): void {
+    this.send(buildTransferDecisionMessage(transferId, false));
+  }
+
+  sendTransferSdp(
+    transferId: string,
+    sdp: RTCSessionDescriptionInit,
+    role: 'offer' | 'answer',
+  ): void {
+    this.send(
+      buildTransferSdpMessage({
+        transferId,
+        sdp: { type: sdp.type ?? 'offer', sdp: sdp.sdp ?? '' },
+        role,
+      }),
+    );
+  }
+
+  sendTransferIce(transferId: string, ice: RTCIceCandidateInit): void {
+    this.send(buildTransferIceMessage({ transferId, ice }));
+  }
+
+  sendTransferPause(transferId: string): void {
+    this.send(buildTransferPauseMessage(transferId));
+  }
+
+  sendTransferResume(transferId: string): void {
+    this.send(buildTransferResumeMessage(transferId));
+  }
+
+  sendTransferCancel(transferId: string): void {
+    this.send(buildTransferCancelMessage(transferId));
+  }
+
+  onTransferSignalReceived(
+    callback: (message: {
+      sdp?: RTCSessionDescriptionInit;
+      ice?: RTCIceCandidateInit;
+    }) => void,
+  ): void {
+    this.onTransferSignal = callback;
+  }
+
   private handleData(data: string): void {
     for (const message of this.decoder.push(data)) {
+      // Route WebRTC signaling messages to the transfer callback
+      if (message.Transfer && this.onTransferSignal) {
+        const t = message.Transfer;
+        if (t.sdp) {
+          const sdpMsg = t.sdp as Record<string, unknown>;
+          this.onTransferSignal({
+            sdp: {
+              type: (sdpMsg.sdp as Record<string, unknown>)?.type as RTCSdpType,
+              sdp: (sdpMsg.sdp as Record<string, unknown>)?.sdp as string,
+            },
+          });
+        }
+        if (t.ice) {
+          const iceMsg = t.ice as Record<string, unknown>;
+          this.onTransferSignal({
+            ice: iceMsg.ice as RTCIceCandidateInit,
+          });
+        }
+      }
       this.onMessage(message);
       if (message.State) {
         this.replyToState(message);
