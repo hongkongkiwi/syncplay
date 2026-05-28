@@ -31,6 +31,7 @@ export type TransferOfferPayload = {
   transferId: string;
   username: string;
   file?: SyncplayFile;
+  supportWebRTC?: boolean;
 };
 
 export type TransferDecisionPayload = {
@@ -84,6 +85,7 @@ export type ClientFeatures = {
   setOthersReadiness: boolean;
   fileTransfer: boolean;
   fileTransferVersion: number;
+  webrtc: boolean;
 };
 
 export type ServerUserPayload = {
@@ -151,7 +153,8 @@ export function createClientFeatures(): ClientFeatures {
     persistentRooms: true,
     setOthersReadiness: false,
     fileTransfer: true,
-    fileTransferVersion: 1
+    fileTransferVersion: 1,
+    webrtc: true
   };
 }
 

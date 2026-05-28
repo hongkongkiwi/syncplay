@@ -70,6 +70,42 @@ class FileTransferClient(object):
             self.handleCancel(payload["cancel"])
         elif "error" in payload:
             self.handleError(payload["error"])
+        elif "sdp" in payload:
+            self.handleSdp(payload["sdp"])
+        elif "ice" in payload:
+            self.handleIce(payload["ice"])
+
+    def handleSdp(self, payload):
+        transfer_id = payload.get("transferId")
+        sdp_data = payload.get("sdp")
+        role = payload.get("role")
+        self._client.ui.showDebugMessage(
+            "WebRTC SDP received: transferId={}, role={}, type={}".format(
+                transfer_id, role, sdp_data.get("type") if isinstance(sdp_data, dict) else "?"
+            )
+        )
+        # WebRTC signaling is handled by webrtc_transfer module when available.
+        # Fall through to TCP relay if WebRTC is not available.
+        webrtc = self._get_webrtc_handler()
+        if webrtc:
+            webrtc.handle_sdp(transfer_id, sdp_data, role)
+
+    def handleIce(self, payload):
+        transfer_id = payload.get("transferId")
+        ice_data = payload.get("ice")
+        self._client.ui.showDebugMessage(
+            "WebRTC ICE received: transferId={}".format(transfer_id)
+        )
+        webrtc = self._get_webrtc_handler()
+        if webrtc:
+            webrtc.handle_ice(transfer_id, ice_data)
+
+    def _get_webrtc_handler(self):
+        try:
+            from syncplay.webrtc_transfer import get_webrtc_transfer_handler
+            return get_webrtc_transfer_handler(self._client)
+        except ImportError:
+            return None
 
     def handleOffer(self, payload):
         transfer_id = payload["transferId"]

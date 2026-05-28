@@ -769,8 +769,16 @@ class SyncplayClient(object):
         features["fileTransfer"] = self.ui.canHandleFileTransfers()
         if features["fileTransfer"]:
             features["fileTransferVersion"] = 1
+        features["webrtc"] = self._has_webrtc_support()
 
         return features
+
+    def _has_webrtc_support(self):
+        try:
+            from syncplay.webrtc_transfer import is_webrtc_available
+            return is_webrtc_available()
+        except ImportError:
+            return False
 
     def setRoom(self, roomName, resetAutoplay=False):
         self.lastSetRoomTime = time.time()

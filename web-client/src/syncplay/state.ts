@@ -24,6 +24,7 @@ export type RoomUser = {
   file: SyncplayFile | null;
   isReady: boolean | null;
   isController: boolean;
+  features: Record<string, unknown> | null;
 };
 
 type RoomMap = Record<string, RoomUser[]>;
@@ -970,6 +971,10 @@ function normalizeUser(
       typeof user.controller === 'boolean'
         ? user.controller
         : previous?.isController ?? false,
+    features:
+      user.features && typeof user.features === 'object'
+        ? user.features
+        : previous?.features ?? null,
   };
 }
 
@@ -1062,4 +1067,22 @@ function addMessage(
       },
     ],
   };
+}
+
+/**
+ * Check if a specific user in the room supports WebRTC.
+ * Returns true if the user has webrtc feature set to true.
+ */
+export function userSupportsWebRTC(
+  state: SyncplayState,
+  username: string,
+): boolean {
+  for (const users of Object.values(state.rooms)) {
+    for (const user of users) {
+      if (user.username === username) {
+        return user.features?.webrtc === true;
+      }
+    }
+  }
+  return false;
 }

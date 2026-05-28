@@ -89,13 +89,17 @@ class TransferManager(object):
             status=TransferStatus.WAITING_FOR_APPROVAL,
         )
         self._sessions[transfer_id] = session
-        source.sendTransferOffer({
+        offer_payload = {
             "transferId": transfer_id,
             "source": source.getName(),
             "receiver": receiver.getName(),
             "file": self._public_file(file_),
             "offset": session.offset,
-        })
+        }
+        receiver_features = receiver.getFeatures() if hasattr(receiver, "getFeatures") else {}
+        if receiver_features.get("webrtc"):
+            offer_payload["supportWebRTC"] = True
+        source.sendTransferOffer(offer_payload)
         return session
 
     def accept_transfer(self, source, transfer_id, fingerprint):

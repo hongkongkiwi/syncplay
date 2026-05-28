@@ -28,7 +28,7 @@ import {
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from 'react';
 import { SyncplayWebConnection, type ConnectionConfig } from '~/syncplay/connection';
 import type { SyncplayFile } from '~/syncplay/protocol';
-import { createInitialSyncplayState, syncplayReducer, type TransferSession } from '~/syncplay/state';
+import { createInitialSyncplayState, syncplayReducer, type TransferSession, userSupportsWebRTC } from '~/syncplay/state';
 import { calculateSyncCorrection } from '~/syncplay/syncControl';
 import { TransferWebRTC, type TransferFileSink, type TransferFileSource } from '~/syncplay/transferWebRTC';
 
@@ -317,19 +317,38 @@ function WebClient() {
   // Watch for transfer state changes to start WebRTC when approved or ticketed
   useEffect(() => {
     for (const session of Object.values(state.transfer.transfers)) {
-      const { transferId, status, role, token, file, offset } = session;
+      const { transferId, status, role, token, file, offset, source, receiver } = session;
 
       // Already have an instance for this transfer
       if (transferInstancesRef.current[transferId]) continue;
 
+      // Determine the peer (other participant) for capability checks
+      const peerUsername = role === 'sender' ? receiver : source;
+      const peerSupportsWebRTC = peerUsername ? userSupportsWebRTC(state, peerUsername) : false;
+      const weCanWebRTC = typeof RTCPeerConnection !== 'undefined';
+
       // Sender: transfer was approved by receiver
       if (status === 'approved' && role === 'sender' && file) {
+        if (!peerSupportsWebRTC || !weCanWebRTC) {
+          dispatch({
+            type: 'local-system-message',
+            text: `Transfer ${transferId}: Peer does not support WebRTC. TCP fallback not yet available in web client.`,
+          });
+          continue;
+        }
         startSenderWebRTC(transferId, file);
         continue;
       }
 
       // Receiver: got a ticket from the server
       if (status === 'approved' && role === 'receiver' && token) {
+        if (!peerSupportsWebRTC || !weCanWebRTC) {
+          dispatch({
+            type: 'local-system-message',
+            text: `Transfer ${transferId}: Peer does not support WebRTC. TCP fallback not yet available in web client.`,
+          });
+          continue;
+        }
         startReceiverWebRTC(transferId, token, file, offset);
         continue;
       }
