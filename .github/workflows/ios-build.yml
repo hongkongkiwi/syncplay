@@ -16,9 +16,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test:
+    name: Typecheck + unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: react-native
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: react-native/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test -- --watch=false
+
   build:
     name: Build iOS app
     runs-on: macos-15
+    needs: test
     defaults:
       run:
         working-directory: react-native
@@ -42,6 +70,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install CocoaPods
+        run: |
+          if ! command -v pod &>/dev/null; then
+            brew install cocoapods
+          fi
+        timeout-minutes: 5
+
       - name: Cache CocoaPods
         uses: actions/cache@v4
         with:
@@ -50,8 +85,8 @@ jobs:
           restore-keys: |
             pods-${{ runner.os }}-
 
-      - name: Install CocoaPods
-        run: cd ios && pod install
+      - name: Install pods
+        run: cd ios && pod install --repo-update
         timeout-minutes: 10
 
       - name: Build iOS archive
