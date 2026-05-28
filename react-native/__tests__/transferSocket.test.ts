@@ -229,18 +229,19 @@ describe('TransferSocket', () => {
       const encoded = encodeTransferFrame({ frameType: 1, offset: 0, payload: data });
       const decoded = decodeTransferFrame(encoded);
       expect(decoded.frame).toBeTruthy();
-      expect(decoded.frame.payload).toEqual(data);
+      // Normalize to Uint8Array for Jest comparison (Buffer != Uint8Array in deep equal)
+      expect(Buffer.from(decoded.frame.payload)).toEqual(Buffer.from(data));
     }
 
     // Direct verification: encode a frame and verify the CRC field in the header
     const frame = encodeTransferFrame({ frameType: 1, offset: 0, payload: Buffer.from('SPFT') });
-    const buffer = Buffer.from(frame);
-    const storedCrc = buffer.readUInt32BE(20);
+    const frameBuffer = Buffer.from(frame);
+    const storedCrc = frameBuffer.readUInt32BE(20);
     // The CRC is computed over the first 20 bytes (header minus CRC field)
-    // We verify it's non-zero and matches the expected value for the SPFT magic
+    // We verify it's non-zero as proof the CRC field is populated
     expect(storedCrc).toBeGreaterThan(0);
     // Verify the frame decodes correctly as the real proof of correctness
     const verified = decodeTransferFrame(frame);
-    expect(verified.frame.payload).toEqual(Buffer.from('SPFT'));
+    expect(Buffer.from(verified.frame.payload)).toEqual(Buffer.from('SPFT'));
   });
 });
