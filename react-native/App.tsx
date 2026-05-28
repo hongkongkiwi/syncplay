@@ -11,6 +11,7 @@ import {
   Download,
   Film,
   FolderOpen,
+  Globe,
   KeyRound,
   Link,
   Library,
@@ -29,11 +30,12 @@ import {
   UserCheck,
   Users
 } from 'lucide-react-native';
-import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { useEffect, useMemo, useReducer, useRef, useState, useCallback } from 'react';
 import {
   AppState,
   FlatList,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   Pressable,
   SafeAreaView,
@@ -46,7 +48,7 @@ import {
 } from 'react-native';
 
 import { SyncplayConnection, type ConnectionConfig, type PlaybackSnapshot } from './src/syncplay/connection';
-import { type SyncplayFile } from './src/syncplay/protocol';
+import { type PrivacyMode, type SyncplayFile } from './src/syncplay/protocol';
 import {
   createInitialSyncplayState,
   syncplayReducer,
@@ -63,9 +65,11 @@ import { parseTimestamp } from './src/syncplay/playback';
 import {
   assetToMediaLibraryItem,
   formatBytes,
+  formatClockTime,
   formatTime,
   getTransferDisplay,
   isManagedRoomName,
+  parseSlashCommand,
   shouldAnnounceMediaOnConnection,
   shuffleFiles,
   statusLabel,
@@ -77,10 +81,13 @@ import {
   PREFERENCES_STORAGE_KEY,
   createPersistedPreferences,
   parsePersistedPreferences,
-  serializePersistedPreferences
+  serializePersistedPreferences,
+  type LoopMode
 } from './src/app/preferences';
 import { resolvePlaylistItem } from './src/app/playlistPlayback';
 import { calculateSyncCorrection } from './src/app/syncControl';
+import { shouldAutoPlay, startAutoPlayCountdown } from './src/app/autoPlay';
+import { ErrorBoundary } from './src/app/ErrorBoundary';
 import {
   addRoomToSavedList,
   buildRoomOptions,
@@ -140,6 +147,12 @@ export default function App() {
   const [autoReconnect, setAutoReconnect] = useState(true);
   const [autoFileSwitch, setAutoFileSwitch] = useState(true);
   const [keepPlayingInBackground, setKeepPlayingInBackground] = useState(true);
+  const [privacyMode, setPrivacyMode] = useState<PrivacyMode>('full');
+  const [autoPlayEnabled, setAutoPlayEnabled] = useState(false);
+  const [autoPlayThreshold, setAutoPlayThreshold] = useState(2);
+  const [timeOffset, setTimeOffset] = useState(0);
+  const [loopMode, setLoopMode] = useState<LoopMode>('none');
+  const [autoPlayCountdown, setAutoPlayCountdown] = useState<number | null>(null);
   const [missingMediaName, setMissingMediaName] = useState<string | null>(null);
   const [preferencesLoaded, setPreferencesLoaded] = useState(false);
   const [activeScreen, setActiveScreen] = useState<AppScreenId>(getInitialScreen(false));
@@ -205,6 +218,11 @@ export default function App() {
           setAutoReconnect(preferences.autoReconnect);
           setAutoFileSwitch(preferences.autoFileSwitch);
           setKeepPlayingInBackground(preferences.keepPlayingInBackground);
+          setPrivacyMode(preferences.privacyMode);
+          setAutoPlayEnabled(preferences.autoPlayEnabled);
+          setAutoPlayThreshold(preferences.autoPlayThreshold);
+          setTimeOffset(preferences.timeOffset);
+          setLoopMode(preferences.loopMode);
         }
       })
       .finally(() => {
@@ -233,7 +251,12 @@ export default function App() {
       syncPaused,
       autoReconnect,
       autoFileSwitch,
-      keepPlayingInBackground
+      keepPlayingInBackground,
+      privacyMode,
+      autoPlayEnabled,
+      autoPlayThreshold,
+      timeOffset,
+      loopMode
     });
     AsyncStorage.setItem(PREFERENCES_STORAGE_KEY, serializePersistedPreferences(preferences));
   }, [
@@ -247,7 +270,12 @@ export default function App() {
     mediaLibrary,
     preferencesLoaded,
     savedRooms,
-    syncPaused
+    syncPaused,
+    privacyMode,
+    autoPlayEnabled,
+    autoPlayThreshold,
+    timeOffset,
+    loopMode
   ]);
 
   useEffect(() => {
@@ -327,7 +355,8 @@ export default function App() {
       remotePosition: state.playback.position,
       remotePaused: state.playback.paused,
       localPlaying: player.playing,
-      doSeek: state.playback.doSeek
+      doSeek: state.playback.doSeek,
+      timeOffset
     });
 
     isApplyingRemoteRef.current = true;
@@ -371,7 +400,7 @@ export default function App() {
       duration: Math.round(event.duration || state.media.duration)
     };
     dispatch({ type: 'media-updated', media });
-    connection.sendFile(media);
+    connection.sendFile(media, privacyMode);
   });
 
   const roomUsers = state.rooms[state.profile.room] ?? [];
@@ -388,10 +417,10 @@ export default function App() {
 
   useEffect(() => {
     if (shouldAnnounceMediaOnConnection(wasConnectedRef.current, connected, state.media)) {
-      connection.sendFile(state.media);
+      connection.sendFile(state.media, privacyMode);
     }
     wasConnectedRef.current = connected;
-  }, [connected, connection, state.media]);
+  }, [connected, connection, state.media, privacyMode]);
 
   useEffect(() => {
     const index = state.playlist.index;
@@ -515,6 +544,62 @@ export default function App() {
   useEffect(() => {
     setRoomListDraft(savedRooms.join('\n'));
   }, [savedRooms]);
+
+  // Auto-play countdown effect
+  useEffect(() => {
+    if (!connected || !autoPlayEnabled || !state.media) {
+      setAutoPlayCountdown(null);
+      return;
+    }
+
+    const shouldStart = shouldAutoPlay(roomUsers, state.profile.username, {
+      enabled: autoPlayEnabled,
+      threshold: autoPlayThreshold
+    });
+
+    if (!shouldStart) {
+      setAutoPlayCountdown(null);
+      return;
+    }
+
+    const cleanup = startAutoPlayCountdown(
+      remaining => setAutoPlayCountdown(remaining),
+      () => {
+        setAutoPlayCountdown(null);
+        connection.sendPlayback(player.currentTime, false, false);
+      },
+      3
+    );
+
+    return cleanup;
+  }, [autoPlayEnabled, autoPlayThreshold, connected, player, roomUsers, state.media, state.profile.username, connection]);
+
+  // Playlist auto-advance effect
+  useEffect(() => {
+    if (!state.media || loopMode === 'single') {
+      return;
+    }
+
+    const playerStatus = player.status;
+    const nearEnd = player.duration > 0 && player.currentTime >= player.duration - 0.5;
+
+    if (playerStatus === 'readyToPlay' && nearEnd) {
+      const currentIndex = state.playlist.index;
+      const nextIndex = typeof currentIndex === 'number' ? currentIndex + 1 : 0;
+
+      if (nextIndex < state.playlist.files.length) {
+        connection.sendPlaylistIndex(nextIndex);
+        openPlaylistItem(state.playlist.files[nextIndex]!);
+      } else if (loopMode === 'playlist') {
+        // Loop back to start
+        connection.sendPlaylistIndex(0);
+        const first = state.playlist.files[0];
+        if (first) {
+          openPlaylistItem(first);
+        }
+      }
+    }
+  }, [loopMode, player.currentTime, player.duration, player.status, state.media, state.playlist.files, state.playlist.index, connection]);
 
   function updateForm(key: ConnectionTextField, value: string) {
     setForm(current => ({ ...current, [key]: value }));
@@ -660,7 +745,7 @@ export default function App() {
     setMissingMediaName(null);
     dispatch({ type: 'media-updated', media });
     if (connected) {
-      connection.sendFile(media);
+      connection.sendFile(media, privacyMode);
     }
   }
 
@@ -694,12 +779,49 @@ export default function App() {
     setMissingMediaName(null);
     dispatch({ type: 'media-updated', media });
     if (connected) {
-      connection.sendFile(media);
+      connection.sendFile(media, privacyMode);
     }
   }
 
   function sendChat() {
-    connection.sendChat(chatDraft);
+    const trimmed = chatDraft.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    const commandResult = parseSlashCommand(trimmed, state.profile.username);
+
+    if (commandResult) {
+      switch (commandResult.kind) {
+        case 'chat':
+          connection.sendChat(commandResult.text);
+          break;
+        case 'me':
+          connection.sendChat(`\\* ${state.profile.username} ${commandResult.action}`);
+          break;
+        case 'nick':
+          connection.sendUsername(commandResult.username);
+          dispatch({
+            type: 'profile-updated',
+            username: commandResult.username,
+            room: state.profile.room
+          });
+          break;
+        case 'topic':
+          connection.sendTopic(commandResult.topic);
+          break;
+        case 'help':
+          dispatch({
+            type: 'connection-status',
+            status: state.connection.status,
+            error: commandResult.commands
+          });
+          break;
+      }
+    } else {
+      connection.sendChat(trimmed);
+    }
+
     setChatDraft('');
   }
 
@@ -1064,6 +1186,17 @@ export default function App() {
                   {item.name}
                 </Text>
                 <Text style={styles.countText}>{formatBytes(item.size)}</Text>
+                <Pressable
+                  style={styles.userReadyButton}
+                  onPress={() => {
+                    const dir = item.uri.substring(0, item.uri.lastIndexOf('/'));
+                    if (dir) {
+                      void Linking.openURL(dir);
+                    }
+                  }}
+                >
+                  <FolderOpen color="#d7e5ef" size={14} />
+                </Pressable>
               </Pressable>
             )}
           />
@@ -1456,6 +1589,106 @@ export default function App() {
         </View>
         <View style={styles.settingRow}>
           <View style={styles.settingText}>
+            <Text style={styles.userName}>Privacy mode</Text>
+            <Text style={styles.smallText}>Full info / hashed filename / send nothing.</Text>
+          </View>
+          <View style={styles.inlineRow}>
+            {(['full', 'hashed', 'none'] as PrivacyMode[]).map(mode => (
+              <Pressable
+                key={mode}
+                style={[
+                  styles.switchPill,
+                  privacyMode === mode && styles.switchPillOn
+                ]}
+                onPress={() => setPrivacyMode(mode)}
+              >
+                <Text style={[styles.switchText, privacyMode === mode && styles.switchTextOn]}>
+                  {mode === 'full' ? 'Full' : mode === 'hashed' ? 'Hashed' : 'None'}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+        <View style={styles.settingRow}>
+          <View style={styles.settingText}>
+            <Text style={styles.userName}>Auto-play</Text>
+            <Text style={styles.smallText}>Unpause everyone when all users in the room are ready.</Text>
+          </View>
+          <Pressable
+            style={[styles.switchPill, autoPlayEnabled && styles.switchPillOn]}
+            onPress={() => setAutoPlayEnabled(value => !value)}
+          >
+            <Text style={[styles.switchText, autoPlayEnabled && styles.switchTextOn]}>
+              {autoPlayEnabled ? 'On' : 'Off'}
+            </Text>
+          </Pressable>
+        </View>
+        {autoPlayEnabled ? (
+          <View style={styles.settingRow}>
+            <View style={styles.settingText}>
+              <Text style={styles.userName}>Auto-play users</Text>
+              <Text style={styles.smallText}>Minimum users needed (2–10).</Text>
+            </View>
+            <TextInput
+              style={[styles.input, { width: 60, textAlign: 'center' }]}
+              value={String(autoPlayThreshold)}
+              onChangeText={value => {
+                const num = parseInt(value, 10);
+                if (num >= 2 && num <= 10) {
+                  setAutoPlayThreshold(num);
+                } else if (value === '') {
+                  setAutoPlayThreshold(2);
+                }
+              }}
+              keyboardType="number-pad"
+              placeholderTextColor="#64788b"
+            />
+          </View>
+        ) : null}
+        <View style={styles.settingRow}>
+          <View style={styles.settingText}>
+            <Text style={styles.userName}>Time offset</Text>
+            <Text style={styles.smallText}>Seconds to shift your playback. +1.5 or -0.5.</Text>
+          </View>
+          <TextInput
+            style={[styles.input, { width: 80, textAlign: 'center' }]}
+            value={String(timeOffset)}
+            onChangeText={value => {
+              const num = parseFloat(value);
+              if (!Number.isNaN(num)) {
+                setTimeOffset(num);
+              } else if (value === '' || value === '-') {
+                setTimeOffset(0);
+              }
+            }}
+            keyboardType="numeric"
+            placeholderTextColor="#64788b"
+          />
+        </View>
+        <View style={styles.settingRow}>
+          <View style={styles.settingText}>
+            <Text style={styles.userName}>Loop mode</Text>
+            <Text style={styles.smallText}>Single loop / playlist loop / no loop.</Text>
+          </View>
+          <View style={styles.inlineRow}>
+            {(['none', 'single', 'playlist'] as LoopMode[]).map(mode => (
+              <Pressable
+                key={mode}
+                style={[
+                  styles.switchPill,
+                  loopMode === mode && styles.switchPillOn
+                ]}
+                onPress={() => setLoopMode(mode)}
+              >
+                <Text style={[styles.switchText, loopMode === mode && styles.switchTextOn]}>
+                  {mode === 'none' ? 'Off' : mode === 'single' ? 'Single' : 'List'}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+        <View style={styles.settingRow}>
+          <View style={styles.settingText}>
             <Text style={styles.userName}>Current connection</Text>
             <Text style={styles.smallText}>
               {form.serverAddress} · {state.profile.username} · {state.profile.room}
@@ -1472,6 +1705,7 @@ export default function App() {
     );
 
   return (
+    <ErrorBoundary>
     <SafeAreaView style={styles.safe}>
       <StatusBar barStyle="light-content" />
       <KeyboardAvoidingView
@@ -1486,6 +1720,7 @@ export default function App() {
               <Text style={styles.statusText}>
                 {statusLabel(state.connection.status)}
                 {state.server.version ? ` · server ${state.server.version}` : ''}
+                {autoPlayCountdown !== null ? ` · Auto-play in ${autoPlayCountdown}` : ''}
               </Text>
             </View>
             <View style={[styles.statusDot, connected ? styles.dotLive : styles.dotIdle]} />
@@ -1496,6 +1731,7 @@ export default function App() {
         <BottomTabs activeScreen={activeScreen} onSelect={setActiveScreen} connected={connected} />
       </KeyboardAvoidingView>
     </SafeAreaView>
+    </ErrorBoundary>
   );
 }
 
@@ -1659,8 +1895,20 @@ function UserRow({
       ) : null}
       {canOpenFile ? (
         <Pressable style={styles.userReadyButton} onPress={onOpenFile}>
-          <Film color="#d7e5ef" size={16} />
+          {user.file?.name && /^[a-z][a-z\d+.-]*:\/\//i.test(user.file.name) ? (
+            <Globe color="#d7e5ef" size={16} />
+          ) : (
+            <Film color="#d7e5ef" size={16} />
+          )}
         </Pressable>
+      ) : user.file?.name && !canOpenFile ? (
+        <View style={[styles.userReadyButton, styles.disabledButton]}>
+          {/^[a-z][a-z\d+.-]*:\/\//i.test(user.file.name) ? (
+            <Globe color={colors.muted} size={16} />
+          ) : (
+            <Film color={colors.muted} size={16} />
+          )}
+        </View>
       ) : null}
       {canRequestDownload ? (
         <Pressable style={styles.userReadyButton} onPress={onRequestDownload}>
@@ -1675,9 +1923,14 @@ function MessageRow({ message }: { message: SyncplayMessage }) {
   const isChat = message.kind === 'chat';
   return (
     <View style={styles.messageRow}>
-      <Text style={isChat ? styles.messageUser : styles.messageKind}>
-        {isChat ? message.username : message.kind}
-      </Text>
+      <View style={styles.messageHeader}>
+        <Text style={isChat ? styles.messageUser : styles.messageKind}>
+          {isChat ? message.username : message.kind}
+        </Text>
+        <Text style={styles.messageTime}>
+          {formatClockTime(message.createdAt)}
+        </Text>
+      </View>
       <Text style={styles.messageText}>{message.text}</Text>
     </View>
   );
@@ -2206,6 +2459,11 @@ const styles = StyleSheet.create({
     borderTopColor: colors.line,
     borderTopWidth: StyleSheet.hairlineWidth
   },
+  messageHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between'
+  },
   messageUser: {
     color: colors.accent,
     fontSize: 12,
@@ -2216,6 +2474,10 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
     textTransform: 'uppercase'
+  },
+  messageTime: {
+    color: colors.faint,
+    fontSize: 11
   },
   messageText: {
     color: colors.text,
