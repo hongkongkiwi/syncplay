@@ -2,17 +2,24 @@ import { createFileRoute } from '@tanstack/react-router';
 import {
   Check,
   Circle,
+  Crown,
   Link2,
   LoaderCircle,
   MessageSquare,
   Pause,
   Play,
+  PlaySquare,
   PlugZap,
+  Plus,
   Radio,
+  RefreshCw,
   Send,
+  Shuffle,
+  Trash2,
   Unplug,
   Upload,
-  UsersRound
+  UsersRound,
+  KeyRound
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from 'react';
 import { SyncplayWebConnection, type ConnectionConfig } from '~/syncplay/connection';
@@ -34,7 +41,9 @@ type ConnectForm = {
   proxyUrl: string;
 };
 
-const initialForm: ConnectForm = {
+const STORAGE_KEY = 'syncplay-web-form';
+
+const defaultForm: ConnectForm = {
   host: 'localhost',
   port: '8999',
   tls: false,
@@ -44,27 +53,70 @@ const initialForm: ConnectForm = {
   proxyUrl: '/syncplay-proxy'
 };
 
+function loadForm(): ConnectForm {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      return { ...defaultForm, ...JSON.parse(saved) };
+    }
+  } catch {
+    // ignore
+  }
+  return defaultForm;
+}
+
+function saveForm(form: ConnectForm): void {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(form));
+  } catch {
+    // ignore
+  }
+}
+
+function formatTime(ts: number): string {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function generateRoomPassword(): string {
+  const letters = String.fromCharCode(65 + Math.floor(Math.random() * 26)) +
+    String.fromCharCode(65 + Math.floor(Math.random() * 26));
+  const d1 = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
+  const d2 = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
+  return `${letters}-${d1}-${d2}`;
+}
+
 function WebClient() {
   const [state, dispatch] = useReducer(syncplayReducer, undefined, createInitialSyncplayState);
-  const [form, setForm] = useState(initialForm);
+  const [form, setForm] = useState(loadForm);
   const [chatDraft, setChatDraft] = useState('');
   const [syncPaused, setSyncPaused] = useState(false);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<{ name: string; size: number } | null>(null);
+  const [newPlaylistUrl, setNewPlaylistUrl] = useState('');
+  const [showPlaylistPanel, setShowPlaylistPanel] = useState(false);
+  const [controllerPassword, setControllerPassword] = useState('');
+  const [roomPassword, setRoomPassword] = useState('');
+  const [newManagedRoomName, setNewManagedRoomName] = useState('');
+  const [unreadChat, setUnreadChat] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const isApplyingRemoteRef = useRef(false);
   const lastPlaybackSendRef = useRef(0);
   const hasMediaRef = useRef(false);
   const autoplayBlockedRef = useRef(false);
   const manualDisconnectRef = useRef(false);
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
   const lastConnectionConfigRef = useRef<ConnectionConfig | null>(null);
+  const chatInputRef = useRef<HTMLInputElement | null>(null);
+  const chatFocusedRef = useRef(false);
+  const prevMessageCountRef = useRef(0);
 
   const usersInRoom = state.rooms[state.profile.room] ?? [];
   const currentUser = usersInRoom.find(user => user.username === state.profile.username);
   const isReady = currentUser?.isReady ?? false;
   const connected = state.connection.status === 'connected';
   const connecting = state.connection.status === 'connecting';
+  const controllerCount = usersInRoom.filter(u => u.isController).length;
 
   const connection = useMemo(() => {
     return new SyncplayWebConnection(
@@ -82,6 +134,14 @@ function WebClient() {
   useEffect(() => {
     hasMediaRef.current = !!mediaUrl;
   }, [mediaUrl]);
+
+  // Chat unread indicator
+  useEffect(() => {
+    if (!chatFocusedRef.current && state.messages.length > prevMessageCountRef.current) {
+      setUnreadChat(true);
+    }
+    prevMessageCountRef.current = state.messages.length;
+  }, [state.messages]);
 
   useEffect(() => {
     if (!mediaUrl) {
@@ -173,7 +233,11 @@ function WebClient() {
   }, [connection, state.connection.status]);
 
   const updateForm = (field: keyof ConnectForm, value: string | boolean) => {
-    setForm(current => ({ ...current, [field]: value }));
+    setForm(current => {
+      const next = { ...current, [field]: value };
+      saveForm(next);
+      return next;
+    });
   };
 
   const connect = (event: FormEvent) => {
@@ -188,16 +252,22 @@ function WebClient() {
       return;
     }
 
+    // Parse room:password syntax
+    const roomParts = form.room.split(':');
+    const roomName = roomParts[0]?.trim() || defaultForm.room;
+    const roomPass = roomParts.length > 1 ? roomParts.slice(1).join(':') : '';
+
     const config: ConnectionConfig = {
       host: form.host.trim(),
       port: parsedPort,
       tls: form.tls,
-      username: form.username.trim() || initialForm.username,
-      room: form.room.trim() || initialForm.room,
+      username: form.username.trim() || defaultForm.username,
+      room: roomName,
       proxyUrl: form.proxyUrl,
-      password: form.password || undefined
+      password: form.password || roomPass || undefined
     };
 
+    setRoomPassword(roomPass);
     dispatch({ type: 'profile-updated', username: config.username, room: config.room });
     manualDisconnectRef.current = false;
     lastConnectionConfigRef.current = config;
@@ -214,12 +284,73 @@ function WebClient() {
     dispatch({ type: 'connection-status', status: 'disconnected' });
   };
 
+  const handleSlashCommand = (text: string): boolean => {
+    if (!text.startsWith('/')) {
+      return false;
+    }
+
+    const parts = text.slice(1).split(/\s+/);
+    const command = parts[0]?.toLowerCase();
+    const rest = parts.slice(1).join(' ');
+
+    if (command === 'help') {
+      dispatch({
+        type: 'local-system-message',
+        text: 'Commands: /help - Show this help\n' +
+          '/me <action> - Send an action message\n' +
+          '/nick <name> - Change your displayed name'
+      });
+      return true;
+    }
+
+    if (command === 'me') {
+      if (!rest || !connected) {
+        return true;
+      }
+      connection.sendChat(`* ${state.profile.username} ${rest}`);
+      return true;
+    }
+
+    if (command === 'nick') {
+      if (!rest) {
+        dispatch({ type: 'local-system-message', text: 'Usage: /nick <new-name>' });
+        return true;
+      }
+      dispatch({ type: 'profile-updated', username: rest.trim(), room: state.profile.room });
+      dispatch({ type: 'local-system-message', text: `Your name is now "${rest.trim()}".` });
+      const current = loadForm();
+      saveForm({ ...current, username: rest.trim() });
+      setForm(current => ({ ...current, username: rest.trim() }));
+      // Reconnect with new name
+      if (connected && lastConnectionConfigRef.current) {
+        const config = { ...lastConnectionConfigRef.current, username: rest.trim() };
+        lastConnectionConfigRef.current = config;
+        connection.connect(config);
+      }
+      return true;
+    }
+
+    return false;
+  };
+
   const sendChat = (event: FormEvent) => {
     event.preventDefault();
     const text = chatDraft.trim();
-    if (!connected || !text) {
+    if (!text) {
       return;
     }
+
+    if (handleSlashCommand(text)) {
+      setChatDraft('');
+      return;
+    }
+
+    if (!connected) {
+      dispatch({ type: 'local-system-message', text: 'You are not connected.' });
+      setChatDraft('');
+      return;
+    }
+
     connection.sendChat(text);
     setChatDraft('');
   };
@@ -293,6 +424,60 @@ function WebClient() {
     connection.sendRoom(room);
   };
 
+  // Managed room actions
+  const createManagedRoom = () => {
+    const room = newManagedRoomName.trim() || state.profile.room || 'default';
+    const password = generateRoomPassword();
+    setControllerPassword(password);
+    dispatch({
+      type: 'local-system-message',
+      text: `Creating controlled room "${room}"...`
+    });
+    connection.createControlledRoom(room, password);
+  };
+
+  const identifyAsController = () => {
+    const pw = controllerPassword.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
+    if (!pw) {
+      dispatch({ type: 'local-system-message', text: 'Enter a controller password.' });
+      return;
+    }
+    setControllerPassword(pw);
+    connection.identifyAsController(pw);
+  };
+
+  // Playlist actions
+  const playlistAddCurrent = () => {
+    const file = selectedFile?.name ?? 'Current media';
+    const newFiles = [...state.playlist.files, file];
+    connection.sendPlaylist(newFiles);
+  };
+
+  const playlistAddUrl = () => {
+    const url = newPlaylistUrl.trim();
+    if (!url) return;
+    const newFiles = [...state.playlist.files, url];
+    connection.sendPlaylist(newFiles);
+    setNewPlaylistUrl('');
+  };
+
+  const playlistShuffle = () => {
+    const shuffled = [...state.playlist.files];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    connection.sendPlaylist(shuffled);
+  };
+
+  const playlistClear = () => {
+    connection.sendPlaylist([]);
+  };
+
+  const playlistPlay = (index: number) => {
+    connection.sendPlaylistIndex(index);
+  };
+
   return (
     <main className="client-shell">
       <section className="stage-panel">
@@ -301,7 +486,9 @@ function WebClient() {
             <p className="eyebrow">Syncplay Web</p>
             <h1>Join a watch room from the browser.</h1>
           </div>
-          <StatusPill status={state.connection.status} />
+          <div className="brand-right">
+            <StatusPill status={state.connection.status} version={state.server.version} />
+          </div>
         </div>
 
         <div className="video-frame">
@@ -372,6 +559,15 @@ function WebClient() {
             <Check size={18} />
             {isReady ? 'Ready' : 'Not ready'}
           </button>
+          <button
+            type="button"
+            onClick={() => setShowPlaylistPanel(v => !v)}
+            className={showPlaylistPanel ? 'active' : ''}
+            disabled={!connected}
+          >
+            <PlaySquare size={18} />
+            Playlist
+          </button>
         </div>
       </section>
 
@@ -396,7 +592,7 @@ function WebClient() {
             </label>
             <label>
               Room
-              <input value={form.room} onChange={event => updateForm('room', event.target.value)} />
+              <input value={form.room} onChange={event => updateForm('room', event.target.value)} placeholder="room:password" />
             </label>
           </div>
           <label>
@@ -436,16 +632,27 @@ function WebClient() {
           <div className="card-title">
             <UsersRound size={20} />
             <h2>{state.profile.room}</h2>
+            {usersInRoom.length > 0 ? (
+              <span className="user-count-badge">{usersInRoom.length}</span>
+            ) : null}
           </div>
+          {controllerCount > 0 ? (
+            <p className="controller-info">
+              <Crown size={14} /> {controllerCount} controller{controllerCount > 1 ? 's' : ''}
+            </p>
+          ) : null}
           <div className="user-list">
             {usersInRoom.length === 0 ? (
               <p className="muted">No room list yet.</p>
             ) : (
               usersInRoom.map(user => (
                 <div className="user-row" key={user.username}>
-                  <Circle size={10} className={user.isReady ? 'ready-dot' : 'idle-dot'} />
+                  {user.isController ? <Crown size={12} className="crown-icon" /> : <Circle size={10} className={user.isReady ? 'ready-dot' : 'idle-dot'} />}
                   <div>
-                    <strong>{user.username}</strong>
+                    <strong>
+                      {user.username}
+                      {user.isController ? <Crown size={11} className="crown-inline" /> : null}
+                    </strong>
                     <span>{user.file?.name ?? 'No media announced'}</span>
                   </div>
                 </div>
@@ -454,17 +661,113 @@ function WebClient() {
           </div>
         </section>
 
+        {/* Managed Room Controls */}
+        {connected ? (
+          <section className="managed-room-card">
+            <div className="card-title">
+              <KeyRound size={20} />
+              <h2>Room Controls</h2>
+            </div>
+            <div className="managed-room-form">
+              <label>
+                New room name
+                <input
+                  value={newManagedRoomName}
+                  placeholder="Room name"
+                  onChange={e => setNewManagedRoomName(e.target.value)}
+                />
+              </label>
+              <button type="button" onClick={createManagedRoom} className="secondary-wide">
+                Create Controlled Room
+              </button>
+              <label>
+                Controller password
+                <input
+                  value={controllerPassword}
+                  placeholder="XX-NNN-NNN"
+                  onChange={e => setControllerPassword(e.target.value)}
+                />
+              </label>
+              <button type="button" onClick={identifyAsController} className="secondary-wide">
+                Identify as Controller
+              </button>
+            </div>
+          </section>
+        ) : null}
+
+        {/* Playlist Panel */}
+        {showPlaylistPanel && connected ? (
+          <section className="playlist-card">
+            <div className="card-title">
+              <PlaySquare size={20} />
+              <h2>Playlist</h2>
+              {state.playlist.updatedBy ? (
+                <span className="playlist-updated-by">by {state.playlist.updatedBy}</span>
+              ) : null}
+            </div>
+            <div className="playlist-list">
+              {state.playlist.files.length === 0 ? (
+                <p className="muted">Playlist is empty.</p>
+              ) : (
+                state.playlist.files.map((file, index) => (
+                  <div
+                    key={`${file}-${index}`}
+                    className={`playlist-item ${index === state.playlist.index ? 'active' : ''}`}
+                    onClick={() => playlistPlay(index)}
+                  >
+                    <span className="playlist-index">{index + 1}</span>
+                    <span className="playlist-name">{file}</span>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="playlist-actions">
+              <button type="button" onClick={playlistAddCurrent} disabled={!selectedFile} title="Add current media">
+                <Plus size={14} /> Current
+              </button>
+              <div className="playlist-url-row">
+                <input
+                  value={newPlaylistUrl}
+                  placeholder="Media URL or name..."
+                  onChange={e => setNewPlaylistUrl(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      playlistAddUrl();
+                    }
+                  }}
+                />
+                <button type="button" onClick={playlistAddUrl} disabled={!newPlaylistUrl.trim()} title="Add URL">
+                  <Plus size={14} />
+                </button>
+              </div>
+              <button type="button" onClick={playlistShuffle} title="Shuffle" disabled={state.playlist.files.length === 0}>
+                <Shuffle size={14} />
+              </button>
+              <button type="button" onClick={playlistClear} title="Clear" disabled={state.playlist.files.length === 0}>
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </section>
+        ) : null}
+
         <section className="chat-card">
           <div className="card-title">
             <MessageSquare size={20} />
             <h2>Chat</h2>
+            {unreadChat ? <span className="unread-dot" /> : null}
           </div>
-          <div className="chat-log">
+          <div className="chat-log" ref={el => {
+            if (el) {
+              el.scrollTop = el.scrollHeight;
+            }
+          }}>
             {state.messages.length === 0 ? (
               <p className="muted">Server messages and room chat will show here.</p>
             ) : (
               state.messages.map(message => (
                 <p key={message.id} className={`message ${message.kind}`}>
+                  <span className="msg-time">{formatTime(message.createdAt)}</span>
                   {message.username ? <strong>{message.username}</strong> : null}
                   <span>{message.text}</span>
                 </p>
@@ -473,11 +776,19 @@ function WebClient() {
           </div>
           <form className="chat-form" onSubmit={sendChat}>
             <input
+              ref={chatInputRef}
               value={chatDraft}
-              placeholder="Message the room"
+              placeholder={connected ? 'Message the room' : 'Use /help for commands'}
+              onFocus={() => {
+                chatFocusedRef.current = true;
+                setUnreadChat(false);
+              }}
+              onBlur={() => {
+                chatFocusedRef.current = false;
+              }}
               onChange={event => setChatDraft(event.target.value)}
             />
-            <button type="submit" disabled={!connected || !chatDraft.trim()} aria-label="Send chat">
+            <button type="submit" disabled={!chatDraft.trim()} aria-label="Send chat">
               <Send size={18} />
             </button>
           </form>
@@ -487,11 +798,16 @@ function WebClient() {
   );
 }
 
-function StatusPill({ status }: { status: string }) {
+function StatusPill({ status, version }: { status: string; version: string | null }) {
   return (
-    <div className={`status-pill ${status}`}>
-      <span />
-      {status}
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.3rem' }}>
+      <div className={`status-pill ${status}`}>
+        <span />
+        {status}
+      </div>
+      {version ? (
+        <span className="version-label">v{version}</span>
+      ) : null}
     </div>
   );
 }

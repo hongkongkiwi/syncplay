@@ -41,6 +41,16 @@ export type SyncplayState = {
   };
   media: SyncplayFile | null;
   rooms: RoomMap;
+  playlist: {
+    files: string[];
+    index: number | null;
+    updatedBy: string | null;
+  };
+  managedRoom: {
+    lastCreatedRoom: string | null;
+    lastPassword: string | null;
+    controllerRooms: Record<string, string>;
+  };
   messages: ChatMessage[];
 };
 
@@ -76,6 +86,16 @@ export function createInitialSyncplayState(): SyncplayState {
     },
     media: null,
     rooms: createRoomMap(),
+    playlist: {
+      files: [],
+      index: null,
+      updatedBy: null
+    },
+    managedRoom: {
+      lastCreatedRoom: null,
+      lastPassword: null,
+      controllerRooms: {}
+    },
     messages: []
   };
 }
@@ -220,10 +240,7 @@ function reduceSetMessage(state: SyncplayState, payload: Record<string, unknown>
 
   const userPayload = payload.user as Record<string, ServerUserPayload> | undefined;
   if (userPayload) {
-    next = {
-      ...next,
-      rooms: applyUserUpdates(next.rooms, userPayload)
-    };
+    next = applyUserWithEvents(next, userPayload);
   }
 
   const readyPayload = payload.ready as { username?: string; isReady?: boolean } | undefined;
@@ -234,7 +251,102 @@ function reduceSetMessage(state: SyncplayState, payload: Record<string, unknown>
     };
   }
 
+  const newControlledRoomPayload = payload.newControlledRoom as
+    | { roomName?: string; password?: string }
+    | undefined;
+  if (newControlledRoomPayload?.roomName) {
+    next = {
+      ...next,
+      profile: {
+        ...next.profile,
+        room: newControlledRoomPayload.roomName
+      },
+      managedRoom: {
+        ...next.managedRoom,
+        lastCreatedRoom: newControlledRoomPayload.roomName,
+        lastPassword: newControlledRoomPayload.password ?? null
+      }
+    };
+    next = addMessage(next, {
+      kind: 'system',
+      text: `Controlled room "${newControlledRoomPayload.roomName}" created. Password: ${newControlledRoomPayload.password ?? '(none)'}`
+    });
+  }
+
+  const controllerAuthPayload = payload.controllerAuth as
+    | { user?: string; room?: string; success?: boolean }
+    | undefined;
+  if (controllerAuthPayload?.success && controllerAuthPayload.room && controllerAuthPayload.user) {
+    next = {
+      ...next,
+      rooms: setUserController(next.rooms, controllerAuthPayload.user, true),
+      managedRoom: {
+        ...next.managedRoom,
+        controllerRooms: {
+          ...next.managedRoom.controllerRooms,
+          [controllerAuthPayload.room]: controllerAuthPayload.user
+        }
+      }
+    };
+    next = addMessage(next, {
+      kind: 'system',
+      text: `${controllerAuthPayload.user} is now controller of ${controllerAuthPayload.room}.`
+    });
+  }
+
+  const playlistChangePayload = payload.playlistChange as
+    | { user?: string; files?: unknown }
+    | undefined;
+  if (Array.isArray(playlistChangePayload?.files)) {
+    next = {
+      ...next,
+      playlist: {
+        ...next.playlist,
+        files: playlistChangePayload.files.filter((file): file is string => typeof file === 'string'),
+        updatedBy: playlistChangePayload.user ?? null
+      }
+    };
+  }
+
+  const playlistIndexPayload = payload.playlistIndex as
+    | { user?: string; index?: number }
+    | undefined;
+  if (typeof playlistIndexPayload?.index === 'number') {
+    next = {
+      ...next,
+      playlist: {
+        ...next.playlist,
+        index: playlistIndexPayload.index,
+        updatedBy: playlistIndexPayload.user ?? next.playlist.updatedBy
+      }
+    };
+  }
+
   return next;
+}
+
+function applyUserWithEvents(state: SyncplayState, updates: Record<string, ServerUserPayload>): SyncplayState {
+  let next = state;
+
+  for (const [username, payload] of Object.entries(updates)) {
+    if (payload.event?.joined) {
+      next = addMessage(next, {
+        kind: 'system',
+        text: `${username} joined the room.`
+      });
+    }
+    if (payload.event?.left) {
+      next = addMessage(next, {
+        kind: 'system',
+        text: `${username} left the room.`
+      });
+    }
+  }
+
+  return {
+    ...next,
+    rooms: applyUserUpdates(next.rooms, updates)
+  };
 }
 
 function normalizeRooms(payload: Record<string, Record<string, ServerUserPayload>>): RoomMap {
@@ -313,6 +425,14 @@ function setUserReady(rooms: RoomMap, username: string, isReady: boolean): RoomM
   const next = createRoomMap();
   for (const [room, users] of Object.entries(rooms)) {
     next[room] = users.map(user => (user.username === username ? { ...user, isReady } : user));
+  }
+  return next;
+}
+
+function setUserController(rooms: RoomMap, username: string, isController: boolean): RoomMap {
+  const next = createRoomMap();
+  for (const [room, users] of Object.entries(rooms)) {
+    next[room] = users.map(user => (user.username === username ? { ...user, isController } : user));
   }
   return next;
 }

@@ -81,7 +81,7 @@ export function createClientFeatures(): ClientFeatures {
     uiMode: 'Web',
     featureList: true,
     readiness: true,
-    managedRooms: false,
+    managedRooms: true,
     persistentRooms: true,
     setOthersReadiness: false,
     fileTransfer: false,
@@ -131,6 +131,48 @@ export function buildRoomMessage(room: string): ClientMessage {
     Set: {
       room: {
         name: room.trim()
+      }
+    }
+  };
+}
+
+export function buildNewControlledRoomMessage(roomName: string, password: string): ClientMessage {
+  return {
+    Set: {
+      newControlledRoom: {
+        roomName: roomName.trim(),
+        password
+      }
+    }
+  };
+}
+
+export function buildControllerAuthMessage(room: string, password: string): ClientMessage {
+  return {
+    Set: {
+      controllerAuth: {
+        room: room.trim(),
+        password: password.toUpperCase()
+      }
+    }
+  };
+}
+
+export function buildPlaylistChangeMessage(files: string[]): ClientMessage {
+  return {
+    Set: {
+      playlistChange: {
+        files
+      }
+    }
+  };
+}
+
+export function buildPlaylistIndexMessage(index: number): ClientMessage {
+  return {
+    Set: {
+      playlistIndex: {
+        index
       }
     }
   };
