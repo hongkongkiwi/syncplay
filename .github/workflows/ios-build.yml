@@ -86,18 +86,8 @@ jobs:
             pods-${{ runner.os }}-
 
       - name: Install pods
-        run: cd ios && pod install --repo-update
+        run: cd ios && pod install
         timeout-minutes: 10
-
-      - name: Resolve SPM packages
-        run: |
-          cd ios
-          xcodebuild \
-            -workspace SyncplayMobile.xcworkspace \
-            -scheme SyncplayMobile \
-            -resolvePackageDependencies \
-            -onlyUsePackageVersionsFromResolvedFile
-        timeout-minutes: 5
 
       - name: Build iOS archive
         run: |
