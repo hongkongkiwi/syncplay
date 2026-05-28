@@ -1,7 +1,11 @@
 import {
   LineDecoder,
+  buildControllerAuthMessage,
   buildFileMessage,
   buildHelloMessage,
+  buildNewControlledRoomMessage,
+  buildPlaylistChangeMessage,
+  buildPlaylistIndexMessage,
   buildReadyMessage,
   buildRoomMessage,
   buildStateMessage,
@@ -119,6 +123,22 @@ export class SyncplayWebConnection {
         clientRtt: this.rtt
       })
     );
+  }
+
+  createControlledRoom(roomName: string, password: string): void {
+    this.send(buildNewControlledRoomMessage(roomName, password));
+  }
+
+  identifyAsController(password: string): void {
+    this.send(buildControllerAuthMessage('', password));
+  }
+
+  sendPlaylist(files: string[]): void {
+    this.send(buildPlaylistChangeMessage(files));
+  }
+
+  sendPlaylistIndex(index: number): void {
+    this.send(buildPlaylistIndexMessage(index));
   }
 
   private handleData(data: string): void {
