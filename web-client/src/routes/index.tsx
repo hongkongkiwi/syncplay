@@ -1,8 +1,11 @@
 import { createFileRoute } from '@tanstack/react-router';
 import {
+  ArrowDownToLine,
+  ArrowUpFromLine,
   Check,
   Circle,
   Crown,
+  Download,
   Link2,
   LoaderCircle,
   MessageSquare,
@@ -19,16 +22,18 @@ import {
   Unplug,
   Upload,
   UsersRound,
-  KeyRound
+  KeyRound,
+  X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from 'react';
 import { SyncplayWebConnection, type ConnectionConfig } from '~/syncplay/connection';
 import type { SyncplayFile } from '~/syncplay/protocol';
-import { createInitialSyncplayState, syncplayReducer } from '~/syncplay/state';
+import { createInitialSyncplayState, syncplayReducer, type TransferSession } from '~/syncplay/state';
 import { calculateSyncCorrection } from '~/syncplay/syncControl';
+import { TransferWebRTC, type TransferFileSink, type TransferFileSource } from '~/syncplay/transferWebRTC';
 
 export const Route = createFileRoute('/')({
-  component: WebClient
+  component: WebClient,
 });
 
 type ConnectForm = {
@@ -42,6 +47,9 @@ type ConnectForm = {
 };
 
 const STORAGE_KEY = 'syncplay-web-form';
+const RTC_CONFIG: RTCConfiguration = {
+  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+};
 
 const defaultForm: ConnectForm = {
   host: 'localhost',
@@ -50,7 +58,7 @@ const defaultForm: ConnectForm = {
   username: 'WebGuest',
   room: 'default',
   password: '',
-  proxyUrl: '/syncplay-proxy'
+  proxyUrl: '/syncplay-proxy',
 };
 
 function loadForm(): ConnectForm {
@@ -79,11 +87,57 @@ function formatTime(ts: number): string {
 }
 
 function generateRoomPassword(): string {
-  const letters = String.fromCharCode(65 + Math.floor(Math.random() * 26)) +
+  const letters =
+    String.fromCharCode(65 + Math.floor(Math.random() * 26)) +
     String.fromCharCode(65 + Math.floor(Math.random() * 26));
   const d1 = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
   const d2 = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
   return `${letters}-${d1}-${d2}`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  const val = bytes / Math.pow(1024, i);
+  return `${val.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+/** Create a sink that builds a file in memory and triggers download on completion. */
+function createBlobDownloadSink(fileName: string, onPath: (path: string | null) => void): TransferFileSink {
+  const chunks: BlobPart[] = [];
+  let completedPath: string | null = null;
+
+  return {
+    write(chunk: Uint8Array): void {
+      chunks.push(chunk as unknown as BlobPart);
+    },
+    finalize(): string | null {
+      const blob = new Blob(chunks, { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      completedPath = fileName;
+      onPath(fileName);
+      return fileName;
+    },
+  };
+}
+
+/** Create a source from a File object using slice + arrayBuffer. */
+function createFileSource(file: File): TransferFileSource {
+  return {
+    async read(offset: number, length: number): Promise<Uint8Array> {
+      const slice = file.slice(offset, offset + length);
+      const buf = await slice.arrayBuffer();
+      return new Uint8Array(buf);
+    },
+  };
 }
 
 function WebClient() {
@@ -99,6 +153,11 @@ function WebClient() {
   const [roomPassword, setRoomPassword] = useState('');
   const [newManagedRoomName, setNewManagedRoomName] = useState('');
   const [unreadChat, setUnreadChat] = useState(false);
+
+  // Transfer UI state
+  const [showTransferPanel, setShowTransferPanel] = useState(false);
+  const [transferFileInput, setTransferFileInput] = useState<File | null>(null);
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const isApplyingRemoteRef = useRef(false);
   const lastPlaybackSendRef = useRef(0);
@@ -111,6 +170,9 @@ function WebClient() {
   const chatFocusedRef = useRef(false);
   const prevMessageCountRef = useRef(0);
 
+  // Active WebRTC transfer instances, keyed by transferId
+  const transferInstancesRef = useRef<Record<string, TransferWebRTC>>({});
+
   const usersInRoom = state.rooms[state.profile.room] ?? [];
   const currentUser = usersInRoom.find(user => user.username === state.profile.username);
   const isReady = currentUser?.isReady ?? false;
@@ -118,16 +180,34 @@ function WebClient() {
   const connecting = state.connection.status === 'connecting';
   const controllerCount = usersInRoom.filter(u => u.isController).length;
 
+  // Active transfers for display
+  const activeTransfers = Object.values(state.transfer.transfers);
+
   const connection = useMemo(() => {
     return new SyncplayWebConnection(
       (status, error) => dispatch({ type: 'connection-status', status, error }),
       message => dispatch({ type: 'server-message', message }),
       () => ({
         position: videoRef.current && hasMediaRef.current ? videoRef.current.currentTime : null,
-        paused: videoRef.current && hasMediaRef.current ? videoRef.current.paused : null
-      })
+        paused: videoRef.current && hasMediaRef.current ? videoRef.current.paused : null,
+      }),
     );
   }, []);
+
+  // Wire transfer signaling through the connection
+  useEffect(() => {
+    connection.onTransferSignalReceived(signal => {
+      // Find the transferId from recent state — walk all active instances
+      for (const [transferId, instance] of Object.entries(transferInstancesRef.current)) {
+        try {
+          instance.handleSignal(signal);
+          return;
+        } catch {
+          // ignore — may not be this instance's signal
+        }
+      }
+    });
+  }, [connection]);
 
   useEffect(() => () => connection.disconnect(), [connection]);
 
@@ -177,7 +257,7 @@ function WebClient() {
       remotePosition: state.playback.position,
       remotePaused: state.playback.paused,
       localPlaying: !video.paused,
-      doSeek: state.playback.doSeek
+      doSeek: state.playback.doSeek,
     });
 
     isApplyingRemoteRef.current = true;
@@ -196,7 +276,7 @@ function WebClient() {
         autoplayBlockedRef.current = true;
         dispatch({
           type: 'local-system-message',
-          text: 'The browser blocked autoplay. Press play once and Syncplay can take over after that.'
+          text: 'The browser blocked autoplay. Press play once and Syncplay can take over after that.',
         });
       });
     }
@@ -232,6 +312,161 @@ function WebClient() {
     };
   }, [connection, state.connection.status]);
 
+  // ── Transfer WebRTC lifecycle ──────────────────────────────────────────
+
+  // Watch for transfer state changes to start WebRTC when approved or ticketed
+  useEffect(() => {
+    for (const session of Object.values(state.transfer.transfers)) {
+      const { transferId, status, role, token, file, offset } = session;
+
+      // Already have an instance for this transfer
+      if (transferInstancesRef.current[transferId]) continue;
+
+      // Sender: transfer was approved by receiver
+      if (status === 'approved' && role === 'sender' && file) {
+        startSenderWebRTC(transferId, file);
+        continue;
+      }
+
+      // Receiver: got a ticket from the server
+      if (status === 'approved' && role === 'receiver' && token) {
+        startReceiverWebRTC(transferId, token, file, offset);
+        continue;
+      }
+    }
+  }, [state.transfer]);
+
+  function startSenderWebRTC(transferId: string, file: SyncplayFile): void {
+    const sourceFile = transferFileInput;
+    if (!sourceFile) {
+      dispatch({
+        type: 'local-system-message',
+        text: `Cannot start transfer: no file selected for upload.`,
+      });
+      return;
+    }
+
+    const onControl = (msg: string) => {
+      dispatch({ type: 'local-system-message', text: `Transfer: ${msg}` });
+    };
+
+    const instance = new TransferWebRTC(
+      RTC_CONFIG,
+      signal => {
+        if (signal.sdp) {
+          connection.sendTransferSdp(
+            transferId,
+            signal.sdp,
+            signal.sdp.type === 'offer' ? 'offer' : 'answer',
+          );
+        }
+        if (signal.ice) {
+          connection.sendTransferIce(transferId, signal.ice);
+        }
+      },
+      createNullSink(),
+      onControl,
+      file.size,
+    );
+
+    transferInstancesRef.current[transferId] = instance;
+
+    // DataChannel open is handled internally; we need to wait for it to open,
+    // then start uploading. We'll poll for open state.
+    const checkAndUpload = () => {
+      if (instance.isOpen()) {
+        dispatch({
+          type: 'local-system-message',
+          text: `DataChannel open — uploading ${file.name}...`,
+        });
+        dispatch({ type: 'transfer-set-status', transferId, status: 'downloading' });
+        const source = createFileSource(sourceFile);
+        instance
+          .upload(transferId, source, 0)
+          .then(totalBytes => {
+            dispatch({ type: 'transfer-completed', transferId, size: totalBytes });
+            dispatch({
+              type: 'local-system-message',
+              text: `Transfer complete: ${file.name} (${formatBytes(totalBytes)})`,
+            });
+          })
+          .catch(err => {
+            dispatch({
+              type: 'transfer-error',
+              transferId,
+              errorCode: 'upload-failed',
+              errorMessage: err instanceof Error ? err.message : String(err),
+            });
+          });
+      } else {
+        setTimeout(checkAndUpload, 100);
+      }
+    };
+
+    instance.connect({ transferId, token: '', role: 'sender', offset: 0 });
+    checkAndUpload();
+  }
+
+  function startReceiverWebRTC(
+    transferId: string,
+    token: string,
+    file: SyncplayFile | null | undefined,
+    offset: number,
+  ): void {
+    const fileName = file?.name ?? `download-${transferId}`;
+
+    const onPath = (path: string | null) => {
+      if (path) {
+        dispatch({ type: 'transfer-set-completed-path', transferId, path });
+      }
+    };
+
+    const sink = createBlobDownloadSink(fileName, onPath);
+
+    const onControl = (msg: string) => {
+      if (msg === 'DataChannel opened') {
+        dispatch({ type: 'transfer-set-status', transferId, status: 'downloading' });
+      }
+    };
+
+    const instance = new TransferWebRTC(
+      RTC_CONFIG,
+      signal => {
+        if (signal.sdp) {
+          connection.sendTransferSdp(
+            transferId,
+            signal.sdp,
+            signal.sdp.type === 'offer' ? 'offer' : 'answer',
+          );
+        }
+        if (signal.ice) {
+          connection.sendTransferIce(transferId, signal.ice);
+        }
+      },
+      sink,
+      onControl,
+      file?.size ?? null,
+    );
+
+    transferInstancesRef.current[transferId] = instance;
+    instance.connect({ transferId, token, role: 'receiver', offset });
+
+    dispatch({
+      type: 'local-system-message',
+      text: `Waiting for WebRTC connection for ${fileName}...`,
+    });
+  }
+
+  function cancelTransfer(transferId: string): void {
+    const instance = transferInstancesRef.current[transferId];
+    if (instance) {
+      instance.pause();
+      delete transferInstancesRef.current[transferId];
+    }
+    connection.sendTransferCancel(transferId);
+    dispatch({ type: 'transfer-cancel', transferId });
+  }
+
   const updateForm = (field: keyof ConnectForm, value: string | boolean) => {
     setForm(current => {
       const next = { ...current, [field]: value };
@@ -247,7 +482,7 @@ function WebClient() {
       dispatch({
         type: 'connection-status',
         status: 'error',
-        error: 'Port must be an integer between 1 and 65535.'
+        error: 'Port must be an integer between 1 and 65535.',
       });
       return;
     }
@@ -264,7 +499,7 @@ function WebClient() {
       username: form.username.trim() || defaultForm.username,
       room: roomName,
       proxyUrl: form.proxyUrl,
-      password: form.password || roomPass || undefined
+      password: form.password || roomPass || undefined,
     };
 
     setRoomPassword(roomPass);
@@ -280,6 +515,11 @@ function WebClient() {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
+    // Clean up all transfer instances
+    for (const instance of Object.values(transferInstancesRef.current)) {
+      instance.pause();
+    }
+    transferInstancesRef.current = {};
     connection.disconnect();
     dispatch({ type: 'connection-status', status: 'disconnected' });
   };
@@ -296,9 +536,10 @@ function WebClient() {
     if (command === 'help') {
       dispatch({
         type: 'local-system-message',
-        text: 'Commands: /help - Show this help\n' +
+        text:
+          'Commands: /help - Show this help\n' +
           '/me <action> - Send an action message\n' +
-          '/nick <name> - Change your displayed name'
+          '/nick <name> - Change your displayed name',
       });
       return true;
     }
@@ -365,11 +606,11 @@ function WebClient() {
       dispatch({
         type: 'local-playback-updated',
         position: video.currentTime,
-        paused: video.paused
+        paused: video.paused,
       });
       connection.sendPlayback(video.currentTime, video.paused, doSeek);
     },
-    [connected, connection]
+    [connected, connection],
   );
 
   const selectMedia = (file: File | null) => {
@@ -382,7 +623,7 @@ function WebClient() {
     setSelectedFile({ name: file.name, size: file.size });
     dispatch({
       type: 'local-system-message',
-      text: `Loaded ${file.name}. Metadata will be sent after the browser reads the duration.`
+      text: `Loaded ${file.name}. Metadata will be sent after the browser reads the duration.`,
     });
   };
 
@@ -395,7 +636,7 @@ function WebClient() {
     const media: SyncplayFile = {
       name: selectedFile?.name ?? 'Browser media',
       duration: Number.isFinite(video.duration) ? video.duration : 0,
-      size: selectedFile?.size ?? 0
+      size: selectedFile?.size ?? 0,
     };
 
     dispatch({ type: 'media-updated', media });
@@ -431,7 +672,7 @@ function WebClient() {
     setControllerPassword(password);
     dispatch({
       type: 'local-system-message',
-      text: `Creating controlled room "${room}"...`
+      text: `Creating controlled room "${room}"...`,
     });
     connection.createControlledRoom(room, password);
   };
@@ -476,6 +717,54 @@ function WebClient() {
 
   const playlistPlay = (index: number) => {
     connection.sendPlaylistIndex(index);
+  };
+
+  // ── Transfer actions ──────────────────────────────────────────────────
+
+  const requestTransfer = (username: string) => {
+    connection.requestTransfer(username, state.media);
+
+    // Create a transfer placeholder
+    const transferId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dispatch({
+      type: 'transfer-set-status',
+      transferId,
+      status: 'incoming-request',
+      role: 'sender',
+    });
+  };
+
+  const selectTransferFile = (file: File | null) => {
+    setTransferFileInput(file);
+    if (file) {
+      dispatch({
+        type: 'local-system-message',
+        text: `Selected ${file.name} (${formatBytes(file.size)}) for transfer.`,
+      });
+    }
+  };
+
+  const acceptTransfer = (transferId: string) => {
+    connection.acceptTransfer(transferId);
+    dispatch({ type: 'transfer-set-status', transferId, status: 'approved' });
+  };
+
+  const rejectTransfer = (transferId: string) => {
+    connection.rejectTransfer(transferId);
+    dispatch({ type: 'transfer-set-status', transferId, status: 'cancelled' });
+  };
+
+  const statusLabel: Record<string, string> = {
+    'incoming-request': 'Requested',
+    'approved': 'Approved',
+    'downloading': 'Transferring',
+    'paused-local': 'Paused',
+    'paused-source-offline': 'Source offline',
+    'paused-source-changed-media': 'Source changed',
+    'paused-receiver-offline': 'Receiver offline',
+    'complete': 'Complete',
+    'failed': 'Failed',
+    'cancelled': 'Cancelled',
   };
 
   return (
@@ -551,7 +840,11 @@ function WebClient() {
             <Radio size={18} />
             Sync now
           </button>
-          <button type="button" onClick={() => setSyncPaused(value => !value)} className={syncPaused ? 'active' : ''}>
+          <button
+            type="button"
+            onClick={() => setSyncPaused(value => !value)}
+            className={syncPaused ? 'active' : ''}
+          >
             {syncPaused ? <Pause size={18} /> : <Play size={18} />}
             {syncPaused ? 'Sync paused' : 'Sync active'}
           </button>
@@ -567,6 +860,15 @@ function WebClient() {
           >
             <PlaySquare size={18} />
             Playlist
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowTransferPanel(v => !v)}
+            className={showTransferPanel ? 'active' : ''}
+            disabled={!connected}
+          >
+            <ArrowUpFromLine size={18} />
+            {activeTransfers.length > 0 ? `Transfers (${activeTransfers.length})` : 'Transfers'}
           </button>
         </div>
       </section>
@@ -584,15 +886,26 @@ function WebClient() {
             </label>
             <label>
               Port
-              <input value={form.port} inputMode="numeric" onChange={event => updateForm('port', event.target.value)} />
+              <input
+                value={form.port}
+                inputMode="numeric"
+                onChange={event => updateForm('port', event.target.value)}
+              />
             </label>
             <label>
               Name
-              <input value={form.username} onChange={event => updateForm('username', event.target.value)} />
+              <input
+                value={form.username}
+                onChange={event => updateForm('username', event.target.value)}
+              />
             </label>
             <label>
               Room
-              <input value={form.room} onChange={event => updateForm('room', event.target.value)} placeholder="room:password" />
+              <input
+                value={form.room}
+                onChange={event => updateForm('room', event.target.value)}
+                placeholder="room:password"
+              />
             </label>
           </div>
           <label>
@@ -609,7 +922,11 @@ function WebClient() {
             <input value={form.proxyUrl} onChange={event => updateForm('proxyUrl', event.target.value)} />
           </label>
           <label className="check-row">
-            <input type="checkbox" checked={form.tls} onChange={event => updateForm('tls', event.target.checked)} />
+            <input
+              type="checkbox"
+              checked={form.tls}
+              onChange={event => updateForm('tls', event.target.checked)}
+            />
             Use TLS to the Syncplay server
           </label>
           <div className="button-row">
@@ -622,7 +939,12 @@ function WebClient() {
               Disconnect
             </button>
           </div>
-          <button type="button" className="secondary-wide" onClick={changeRoom} disabled={!connected}>
+          <button
+            type="button"
+            className="secondary-wide"
+            onClick={changeRoom}
+            disabled={!connected}
+          >
             Change room
           </button>
           {state.connection.error ? <p className="error-line">{state.connection.error}</p> : null}
@@ -638,7 +960,8 @@ function WebClient() {
           </div>
           {controllerCount > 0 ? (
             <p className="controller-info">
-              <Crown size={14} /> {controllerCount} controller{controllerCount > 1 ? 's' : ''}
+              <Crown size={14} /> {controllerCount} controller
+              {controllerCount > 1 ? 's' : ''}
             </p>
           ) : null}
           <div className="user-list">
@@ -647,7 +970,11 @@ function WebClient() {
             ) : (
               usersInRoom.map(user => (
                 <div className="user-row" key={user.username}>
-                  {user.isController ? <Crown size={12} className="crown-icon" /> : <Circle size={10} className={user.isReady ? 'ready-dot' : 'idle-dot'} />}
+                  {user.isController ? (
+                    <Crown size={12} className="crown-icon" />
+                  ) : (
+                    <Circle size={10} className={user.isReady ? 'ready-dot' : 'idle-dot'} />
+                  )}
                   <div>
                     <strong>
                       {user.username}
@@ -655,11 +982,118 @@ function WebClient() {
                     </strong>
                     <span>{user.file?.name ?? 'No media announced'}</span>
                   </div>
+                  {/* Request transfer from this user */}
+                  {user.username !== state.profile.username && user.file && connected ? (
+                    <button
+                      type="button"
+                      className="transfer-request-btn"
+                      title={`Request file transfer from ${user.username}`}
+                      onClick={() => requestTransfer(user.username)}
+                    >
+                      <Download size={14} />
+                    </button>
+                  ) : null}
                 </div>
               ))
             )}
           </div>
         </section>
+
+        {/* Transfer Panel */}
+        {showTransferPanel && connected ? (
+          <section className="transfer-card">
+            <div className="card-title">
+              <ArrowUpFromLine size={20} />
+              <h2>File Transfers</h2>
+            </div>
+
+            {/* Select file to upload for outgoing transfers */}
+            <div className="transfer-upload-section">
+              <label className="file-button transfer-file-pick">
+                <Upload size={14} />
+                <span>{transferFileInput ? transferFileInput.name : 'Choose file to share...'}</span>
+                <input
+                  type="file"
+                  onChange={event => {
+                    selectTransferFile(event.target.files?.[0] ?? null);
+                  }}
+                />
+              </label>
+            </div>
+
+            {/* Active transfers */}
+            <div className="transfer-list">
+              {activeTransfers.length === 0 ? (
+                <p className="muted">
+                  No active transfers. Request a file from a user in the room list above, or
+                  select a file to share and wait for a request.
+                </p>
+              ) : (
+                activeTransfers.map(session => (
+                  <div className="transfer-item" key={session.transferId}>
+                    <div className="transfer-item-info">
+                      <span className="transfer-name">
+                        {session.file?.name ?? `Transfer ${session.transferId.slice(0, 8)}`}
+                      </span>
+                      <span className="transfer-meta">
+                        {session.role === 'sender' ? '↑ Sending' : '↓ Receiving'}
+                        {' • '}
+                        {statusLabel[session.status] ?? session.status}
+                        {session.size ? ` • ${formatBytes(session.transferred)} / ${formatBytes(session.size)}` : ''}
+                      </span>
+                      {session.status === 'downloading' && session.size ? (
+                        <div className="transfer-progress-bar">
+                          <div
+                            className="transfer-progress-fill"
+                            style={{
+                              width: `${session.size > 0 ? Math.min(100, (session.transferred / session.size) * 100) : 0}%`,
+                            }}
+                          />
+                        </div>
+                      ) : null}
+                      {session.status === 'incoming-request' && session.role === 'receiver' ? (
+                        <div className="transfer-actions">
+                          <button
+                            type="button"
+                            className="transfer-accept"
+                            onClick={() => acceptTransfer(session.transferId)}
+                          >
+                            <Check size={14} /> Accept
+                          </button>
+                          <button
+                            type="button"
+                            className="transfer-reject"
+                            onClick={() => rejectTransfer(session.transferId)}
+                          >
+                            <X size={14} /> Reject
+                          </button>
+                        </div>
+                      ) : null}
+                      {session.status !== 'complete' &&
+                      session.status !== 'cancelled' &&
+                      session.status !== 'failed' ? (
+                        <div className="transfer-actions">
+                          <button
+                            type="button"
+                            className="transfer-reject"
+                            onClick={() => cancelTransfer(session.transferId)}
+                          >
+                            <X size={14} /> Cancel
+                          </button>
+                        </div>
+                      ) : null}
+                      {session.status === 'complete' && session.completedPath ? (
+                        <span className="transfer-complete-label">
+                          ✓ Saved as {session.completedPath}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </section>
+        ) : null}
 
         {/* Managed Room Controls */}
         {connected ? (
@@ -722,7 +1156,12 @@ function WebClient() {
               )}
             </div>
             <div className="playlist-actions">
-              <button type="button" onClick={playlistAddCurrent} disabled={!selectedFile} title="Add current media">
+              <button
+                type="button"
+                onClick={playlistAddCurrent}
+                disabled={!selectedFile}
+                title="Add current media"
+              >
                 <Plus size={14} /> Current
               </button>
               <div className="playlist-url-row">
@@ -737,14 +1176,29 @@ function WebClient() {
                     }
                   }}
                 />
-                <button type="button" onClick={playlistAddUrl} disabled={!newPlaylistUrl.trim()} title="Add URL">
+                <button
+                  type="button"
+                  onClick={playlistAddUrl}
+                  disabled={!newPlaylistUrl.trim()}
+                  title="Add URL"
+                >
                   <Plus size={14} />
                 </button>
               </div>
-              <button type="button" onClick={playlistShuffle} title="Shuffle" disabled={state.playlist.files.length === 0}>
+              <button
+                type="button"
+                onClick={playlistShuffle}
+                title="Shuffle"
+                disabled={state.playlist.files.length === 0}
+              >
                 <Shuffle size={14} />
               </button>
-              <button type="button" onClick={playlistClear} title="Clear" disabled={state.playlist.files.length === 0}>
+              <button
+                type="button"
+                onClick={playlistClear}
+                title="Clear"
+                disabled={state.playlist.files.length === 0}
+              >
                 <Trash2 size={14} />
               </button>
             </div>
@@ -757,11 +1211,14 @@ function WebClient() {
             <h2>Chat</h2>
             {unreadChat ? <span className="unread-dot" /> : null}
           </div>
-          <div className="chat-log" ref={el => {
-            if (el) {
-              el.scrollTop = el.scrollHeight;
-            }
-          }}>
+          <div
+            className="chat-log"
+            ref={el => {
+              if (el) {
+                el.scrollTop = el.scrollHeight;
+              }
+            }}
+          >
             {state.messages.length === 0 ? (
               <p className="muted">Server messages and room chat will show here.</p>
             ) : (
@@ -798,6 +1255,11 @@ function WebClient() {
   );
 }
 
+/** Returns a no-op sink for sender instances (they don't download). */
+function createNullSink(): TransferFileSink {
+  return { write() {} };
+}
+
 function StatusPill({ status, version }: { status: string; version: string | null }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.3rem' }}>
@@ -805,9 +1267,7 @@ function StatusPill({ status, version }: { status: string; version: string | nul
         <span />
         {status}
       </div>
-      {version ? (
-        <span className="version-label">v{version}</span>
-      ) : null}
+      {version ? <span className="version-label">v{version}</span> : null}
     </div>
   );
 }

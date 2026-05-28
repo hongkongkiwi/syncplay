@@ -9,6 +9,70 @@ export type SyncplayFile = {
   size: number;
 };
 
+// ── Transfer message types ────────────────────────────────────────────────
+
+export type TransferSdpMessage = {
+  transferId: string;
+  sdp: { type: RTCSdpType; sdp: string };
+  role: 'offer' | 'answer';
+};
+
+export type TransferIceMessage = {
+  transferId: string;
+  ice: RTCIceCandidateInit;
+};
+
+export type TransferRequestPayload = {
+  username: string;
+  file?: SyncplayFile;
+};
+
+export type TransferOfferPayload = {
+  transferId: string;
+  username: string;
+  file?: SyncplayFile;
+};
+
+export type TransferDecisionPayload = {
+  transferId: string;
+  accepted: boolean;
+  fingerprint?: string;
+};
+
+export type TransferTicketPayload = {
+  transferId: string;
+  token: string;
+  fingerprint?: string;
+};
+
+export type TransferProgressPayload = {
+  transferId: string;
+  transferred: number;
+  size: number | null;
+};
+
+export type TransferErrorPayload = {
+  transferId: string;
+  errorCode: string;
+  errorMessage?: string;
+};
+
+export type TransferStatusChangePayload = {
+  transferId: string;
+  status: string;
+};
+
+export type TransferCompletePayload = {
+  transferId: string;
+  size: number;
+};
+
+export type TransferFailedPayload = {
+  transferId: string;
+  errorCode: string;
+  errorMessage?: string;
+};
+
 export type ClientFeatures = {
   sharedPlaylists: boolean;
   chat: boolean;
@@ -65,6 +129,7 @@ export type SyncplayServerMessage = {
   Error?: {
     message: string;
   };
+  Transfer?: Record<string, unknown>;
 };
 
 export type ClientMessage =
@@ -72,7 +137,8 @@ export type ClientMessage =
   | { Set: Record<string, unknown> }
   | { State: Record<string, unknown> }
   | { Chat: string }
-  | { List: null };
+  | { List: null }
+  | { Transfer: Record<string, unknown> };
 
 export function createClientFeatures(): ClientFeatures {
   return {
@@ -84,8 +150,8 @@ export function createClientFeatures(): ClientFeatures {
     managedRooms: true,
     persistentRooms: true,
     setOthersReadiness: false,
-    fileTransfer: false,
-    fileTransferVersion: 0
+    fileTransfer: true,
+    fileTransferVersion: 1
   };
 }
 
@@ -223,6 +289,63 @@ export function buildStateMessage(args: {
 
 export function encodeMessage(message: ClientMessage): string {
   return `${JSON.stringify(message)}\r\n`;
+}
+
+// ── Transfer message builders ──────────────────────────────────────────────
+
+export function buildTransferSdpMessage(payload: TransferSdpMessage): ClientMessage {
+  return {
+    Transfer: {
+      sdp: {
+        transferId: payload.transferId,
+        sdp: { type: payload.sdp.type, sdp: payload.sdp.sdp },
+        role: payload.role,
+      },
+    },
+  };
+}
+
+export function buildTransferIceMessage(payload: TransferIceMessage): ClientMessage {
+  return {
+    Transfer: {
+      ice: {
+        transferId: payload.transferId,
+        ice: payload.ice,
+      },
+    },
+  };
+}
+
+export function buildTransferRequestMessage(username: string, file?: SyncplayFile | null): ClientMessage {
+  const request: Record<string, unknown> = { username };
+  if (file) {
+    request.file = file;
+  }
+  return { Transfer: { request } };
+}
+
+export function buildTransferDecisionMessage(
+  transferId: string,
+  accepted: boolean,
+  fingerprint?: string,
+): ClientMessage {
+  const decision: Record<string, unknown> = { transferId, accepted };
+  if (fingerprint) {
+    decision.fingerprint = fingerprint;
+  }
+  return { Transfer: { decision } };
+}
+
+export function buildTransferPauseMessage(transferId: string): ClientMessage {
+  return { Transfer: { pause: { transferId } } };
+}
+
+export function buildTransferResumeMessage(transferId: string): ClientMessage {
+  return { Transfer: { resume: { transferId } } };
+}
+
+export function buildTransferCancelMessage(transferId: string): ClientMessage {
+  return { Transfer: { cancel: { transferId } } };
 }
 
 const MAX_SERVER_LINE_BYTES = 1_048_576;
