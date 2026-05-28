@@ -10,7 +10,8 @@ describe('sync correction', () => {
         remotePosition: 20,
         remotePaused: false,
         localPlaying: true,
-        doSeek: true
+        doSeek: true,
+        timeOffset: 0
       })
     ).toMatchObject({
       seekTo: 20,
@@ -27,7 +28,8 @@ describe('sync correction', () => {
         remotePosition: 10,
         remotePaused: false,
         localPlaying: true,
-        doSeek: false
+        doSeek: false,
+        timeOffset: 0
       })
     ).toMatchObject({ rate: 1.04 });
 
@@ -39,7 +41,8 @@ describe('sync correction', () => {
         remotePosition: 10,
         remotePaused: false,
         localPlaying: true,
-        doSeek: false
+        doSeek: false,
+        timeOffset: 0
       })
     ).toMatchObject({ rate: 0.96 });
   });
@@ -53,7 +56,8 @@ describe('sync correction', () => {
         remotePosition: 10,
         remotePaused: true,
         localPlaying: true,
-        doSeek: false
+        doSeek: false,
+        timeOffset: 0
       })
     ).toMatchObject({ shouldPause: true });
 
@@ -65,7 +69,8 @@ describe('sync correction', () => {
         remotePosition: 10,
         remotePaused: false,
         localPlaying: false,
-        doSeek: false
+        doSeek: false,
+        timeOffset: 0
       })
     ).toMatchObject({ shouldPlay: true });
 
@@ -77,7 +82,8 @@ describe('sync correction', () => {
         remotePosition: 10,
         remotePaused: false,
         localPlaying: false,
-        doSeek: false
+        doSeek: false,
+        timeOffset: 0
       })
     ).toEqual({ rate: 1 });
   });

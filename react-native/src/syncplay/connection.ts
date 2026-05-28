@@ -12,14 +12,17 @@ import {
   buildReadyMessage,
   buildRoomMessage,
   buildStateMessage,
+  buildTopicMessage,
   buildTransferCancelMessage,
   buildTransferDecisionMessage,
   buildTransferPauseMessage,
   buildTransferRequestMessage,
   buildTransferResumeMessage,
   buildUserReadyMessage,
+  buildUsernameMessage,
   encodeMessage,
   type ClientMessage,
+  type PrivacyMode,
   type SyncplayFile,
   type SyncplayServerMessage
 } from './protocol';
@@ -136,9 +139,21 @@ export class SyncplayConnection {
     }
   }
 
-  sendFile(file: SyncplayFile): void {
-    this.send(buildFileMessage(file));
+  sendFile(file: SyncplayFile, privacyMode: PrivacyMode = 'full'): void {
+    this.send(buildFileMessage(file, privacyMode));
     this.send({ List: null });
+  }
+
+  sendTopic(topic: string): void {
+    if (topic.trim()) {
+      this.send(buildTopicMessage(topic.trim()));
+    }
+  }
+
+  sendUsername(username: string): void {
+    if (username.trim()) {
+      this.send(buildUsernameMessage(username));
+    }
   }
 
   sendReady(isReady: boolean): void {

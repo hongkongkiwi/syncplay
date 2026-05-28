@@ -6,6 +6,7 @@ export type SyncCorrectionInput = {
   remotePaused: boolean;
   localPlaying: boolean;
   doSeek: boolean;
+  timeOffset: number;
 };
 
 export type SyncCorrection = {
@@ -25,11 +26,12 @@ export function calculateSyncCorrection(input: SyncCorrectionInput): SyncCorrect
     return { rate: 1 };
   }
 
-  const drift = input.remotePosition - input.localPosition;
+  const adjustedRemote = input.remotePosition + input.timeOffset;
+  const drift = adjustedRemote - input.localPosition;
   const correction: SyncCorrection = { rate: 1 };
 
   if (input.doSeek || Math.abs(drift) > HARD_SEEK_DRIFT_SECONDS) {
-    correction.seekTo = input.remotePosition;
+    correction.seekTo = adjustedRemote;
   } else if (!input.remotePaused && Math.abs(drift) > RATE_CORRECTION_DRIFT_SECONDS) {
     correction.rate = drift > 0 ? CATCH_UP_RATE : SLOW_DOWN_RATE;
   }

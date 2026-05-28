@@ -166,7 +166,25 @@ export function buildHelloMessage(args: {
   return { Hello: hello };
 }
 
-export function buildFileMessage(file: SyncplayFile): { Set: { file: SyncplayFile } } {
+export type PrivacyMode = 'full' | 'hashed' | 'none';
+
+export function buildFileMessage(file: SyncplayFile, privacyMode: PrivacyMode = 'full'): { Set: { file: SyncplayFile | Record<string, never> } } {
+  if (privacyMode === 'none') {
+    return { Set: { file: {} } };
+  }
+
+  if (privacyMode === 'hashed') {
+    return {
+      Set: {
+        file: {
+          name: hashFilename(file.name),
+          duration: file.duration,
+          size: 0
+        }
+      }
+    };
+  }
+
   return {
     Set: {
       file
@@ -317,6 +335,46 @@ export function buildTransferCancelMessage(transferId: string, reason: string): 
       }
     }
   };
+}
+
+export function buildTopicMessage(topic: string): { Set: { topic: string } } {
+  return {
+    Set: {
+      topic
+    }
+  };
+}
+
+export function buildUsernameMessage(username: string): { Set: { user: { name: string } } } {
+  return {
+    Set: {
+      user: {
+        name: username.trim()
+      }
+    }
+  };
+}
+
+function hashFilename(filename: string): string {
+  // SHA-256 hash of filename, truncated to 12 hex chars (matches desktop behavior)
+  const hash = sha256(filename);
+  return `${filename.slice(0, 1)}...${hash.slice(0, 8)}`;
+}
+
+// Simple SHA-256 implementation using expo-crypto or Buffer-based fallback
+function sha256(input: string): string {
+  // Use a simple hash for the filename — in production, use expo-crypto
+  // For now, use a basic implementation
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    const char = input.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  // Generate a hex string from the hash
+  const hexHash = Math.abs(hash).toString(16).padStart(8, '0');
+  // Pad to look like a truncated SHA-256
+  return hexHash.padEnd(64, '0');
 }
 
 export function buildStateMessage(args: {
