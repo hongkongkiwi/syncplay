@@ -57,6 +57,13 @@ export function formatTime(seconds: number): string {
   return `${minutes}:${String(remaining).padStart(2, '0')}`;
 }
 
+export function formatClockTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${hours}:${minutes}`;
+}
+
 export function formatBytes(bytes: number): string {
   if (!bytes) {
     return 'unknown size';
@@ -180,4 +187,57 @@ export function shuffleFiles(files: string[], random = Math.random): string[] {
   }
 
   return shuffled;
+}
+
+export type SlashCommandResult =
+  | { kind: 'chat'; text: string }
+  | { kind: 'me'; action: string }
+  | { kind: 'nick'; username: string }
+  | { kind: 'topic'; topic: string }
+  | { kind: 'help'; commands: string };
+
+export function parseSlashCommand(input: string, username: string): SlashCommandResult | null {
+  const trimmed = input.trim();
+
+  if (trimmed === '/help') {
+    const commands = [
+      '/help — Show this help',
+      '/me <action> — Send an action message',
+      '/nick <username> — Change your username',
+      '/topic <text> — Set room topic'
+    ].join('\n');
+    return { kind: 'help', commands };
+  }
+
+  if (trimmed.startsWith('/me ')) {
+    const action = trimmed.slice(4).trim();
+    if (!action) {
+      return null;
+    }
+    return { kind: 'me', action };
+  }
+
+  if (trimmed.startsWith('/nick ')) {
+    const newUsername = trimmed.slice(6).trim();
+    if (!newUsername) {
+      return null;
+    }
+    return { kind: 'nick', username: newUsername };
+  }
+
+  if (trimmed.startsWith('/topic ')) {
+    const topic = trimmed.slice(7).trim();
+    if (!topic) {
+      return null;
+    }
+    return { kind: 'topic', topic };
+  }
+
+  if (trimmed.startsWith('/')) {
+    // Unknown command, send as plain chat
+    return { kind: 'chat', text: trimmed };
+  }
+
+  // Not a command
+  return null;
 }

@@ -1,6 +1,9 @@
 import type { MediaLibraryItem } from '../syncplay/mediaLibrary';
+import type { PrivacyMode } from '../syncplay/protocol';
 
 export const PREFERENCES_STORAGE_KEY = 'syncplay-mobile/preferences/v1';
+
+export type LoopMode = 'none' | 'single' | 'playlist';
 
 export type PersistedConnectionForm = {
   serverAddress: string;
@@ -22,6 +25,11 @@ export type PersistedPreferences = {
   autoReconnect: boolean;
   autoFileSwitch: boolean;
   keepPlayingInBackground: boolean;
+  privacyMode: PrivacyMode;
+  autoPlayEnabled: boolean;
+  autoPlayThreshold: number;
+  timeOffset: number;
+  loopMode: LoopMode;
 };
 
 export function createPersistedPreferences(
@@ -62,7 +70,12 @@ export function parsePersistedPreferences(value: string | null): PersistedPrefer
       syncPaused: parsed.syncPaused === true,
       autoReconnect: parsed.autoReconnect !== false,
       autoFileSwitch: parsed.autoFileSwitch !== false,
-      keepPlayingInBackground: parsed.keepPlayingInBackground === true
+      keepPlayingInBackground: parsed.keepPlayingInBackground === true,
+      privacyMode: isPrivacyMode(parsed.privacyMode) ? parsed.privacyMode : 'full',
+      autoPlayEnabled: parsed.autoPlayEnabled === true,
+      autoPlayThreshold: typeof parsed.autoPlayThreshold === 'number' && parsed.autoPlayThreshold >= 2 ? parsed.autoPlayThreshold : 2,
+      timeOffset: typeof parsed.timeOffset === 'number' ? parsed.timeOffset : 0,
+      loopMode: isLoopMode(parsed.loopMode) ? parsed.loopMode : 'none'
     };
   } catch {
     return null;
@@ -110,4 +123,12 @@ function isRecord(value: unknown): value is Record<string, string> {
     typeof value === 'object' &&
     Object.values(value).every(item => typeof item === 'string')
   );
+}
+
+function isPrivacyMode(value: unknown): value is PrivacyMode {
+  return value === 'full' || value === 'hashed' || value === 'none';
+}
+
+function isLoopMode(value: unknown): value is LoopMode {
+  return value === 'none' || value === 'single' || value === 'playlist';
 }

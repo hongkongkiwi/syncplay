@@ -30,7 +30,12 @@ describe('persisted preferences', () => {
       syncPaused: false,
       autoReconnect: true,
       autoFileSwitch: true,
-      keepPlayingInBackground: true
+      keepPlayingInBackground: true,
+      privacyMode: 'full',
+      autoPlayEnabled: false,
+      autoPlayThreshold: 2,
+      timeOffset: 0,
+      loopMode: 'none'
     });
 
     expect(preferences.form.password).toBe('');
