@@ -89,6 +89,16 @@ jobs:
         run: cd ios && pod install --repo-update
         timeout-minutes: 10
 
+      - name: Resolve SPM packages
+        run: |
+          cd ios
+          xcodebuild \
+            -workspace SyncplayMobile.xcworkspace \
+            -scheme SyncplayMobile \
+            -resolvePackageDependencies \
+            -onlyUsePackageVersionsFromResolvedFile
+        timeout-minutes: 5
+
       - name: Build iOS archive
         run: |
           cd ios
@@ -102,7 +112,8 @@ jobs:
             archive \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
+            CODE_SIGN_IDENTITY="" \
+            SWIFT_VERSION=6.1
         timeout-minutes: 30
 
       - name: Upload archive
