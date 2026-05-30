@@ -1,4 +1,4 @@
-name: Build
+name: Rust CI
 
 on:
   push:
@@ -13,190 +13,107 @@ on:
       - '.github/ISSUE_TEMPLATE/**'
 
 concurrency:
-  group: build-${{ github.ref }}
+  group: rust-ci-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
-  windows:
-    name: Build for Windows
-    runs-on: windows-2022
-    timeout-minutes: 45
+  check:
+    name: cargo check + test + clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: p2p/rust
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: '3.8'
-          architecture: x86
+          components: clippy, rustfmt
 
-      - name: Check Python install
-        run: |
-          which python
-          python --version
-          python -c "import struct; print(struct.calcsize('P') * 8)"
-          which pip
-          pip --version
-
-      - name: Install Python dependencies
-        run: |
-          pip3 install -U setuptools wheel pip
-          pip3 install -r requirements.txt
-          pip3 install -r requirements_gui.txt
-          pip3 install py2exe
-
-      - name: Check Python dependencies
-        run: |
-          python3 -c "from PySide2 import __version__; print(__version__)"
-          python3 -c "from PySide2.QtCore import __version__; print(__version__)"
-          python3 -c "from PySide2.QtCore import QLibraryInfo; print(QLibraryInfo.location(QLibraryInfo.LibrariesPath))"
-
-      - name: Build
-        run: |
-          $ver = (findstr version .\syncplay\__init__.py).split("'")[1]
-          echo $ver
-          echo "VER=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          python buildPy2exe.py
-          New-Item -Path syncplay_v$ver -Name "syncplay.ini" -Value " "
-
-      - name: Prepare for deployment
-        run: dir
-
-      - name: Deploy portable
-        uses: actions/upload-artifact@v4
+      - name: Cache cargo
+        uses: actions/cache@v4
         with:
-          name: Syncplay_${{ env.VER }}_Portable
           path: |
-            syncplay_v${{ env.VER }}
+            ~/.cargo/registry
+            ~/.cargo/git
+            p2p/rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('p2p/rust/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Deploy installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: Syncplay-${{ env.VER }}-Setup.exe
-          path: |
-            Syncplay-${{ env.VER }}-Setup.exe
+      - name: Check (lib)
+        run: cargo check --features tui
 
-  macos:
-    name: Build for macOS
-    runs-on: macos-15-intel
-    timeout-minutes: 45
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
+      - name: Check (binaries)
         run: |
-          wget https://www.python.org/ftp/python/3.10.6/python-3.10.6-macos11.pkg
-          sudo installer -verbose -pkg ./python-3.10.6-macos11.pkg -target /
-          echo "/Library/Frameworks/Python.framework/Versions/3.10/bin" >> $GITHUB_PATH
-
-      - name: Check Python install
-        run: |
-          which python3
-          python3 --version
-          which pip3
-          pip3 --version
-          file $(which python3)
-
-      - name: Install Python dependencies
-        run: |
-          pip3 install -U pip setuptools==70.3.0 wheel
-          pip3 install -r requirements.txt
-          pip3 install -r requirements_gui.txt
-          pip3 install py2app
-
-      - name: Install universal2 dependencies
-        env:
-          CFLAGS: -arch x86_64 -arch arm64
-          ARCHFLAGS: -arch x86_64 -arch arm64
-        run: |
-          pip3 uninstall zope.interface -y
-          pip3 install --no-binary :all: zope.interface
-
-          pip3 uninstall cffi -y
-          pip3 install --no-binary :all: cffi
-
-          pip3 uninstall cryptography -y
-          pip3 download --platform macosx_10_10_universal2 --only-binary :all: --no-deps --dest . cryptography
-          pip3 install --no-cache-dir --no-index --find-links . cryptography
-
-          pip3 uninstall charset-normalizer -y
-          pip3 download --platform macosx_10_9_universal2 --only-binary :all: --no-deps --dest . charset-normalizer
-          pip3 install --no-cache-dir --no-index --find-links . charset-normalizer
-
-      - name: Check Python dependencies
-        run: |
-          python3 -c "from PySide6 import __version__; print(__version__)"
-          python3 -c "from PySide6.QtCore import __version__; print(__version__)"
-          python3 -c "from PySide6.QtCore import QLibraryInfo; print(QLibraryInfo.path(QLibraryInfo.LibrariesPath))"
-          python3 -c "import ssl; print(ssl)"
-          python3 -c "from py2app.recipes import pyside6"
-          python3 -c 'from distutils.sysconfig import get_config_var; print(get_config_var("LDLIBRARY"))'
-
-      - name: Build
-        run: |
-          python3 buildPy2app.py py2app
-
-      - name: Prepare for deployment
-        run: |
-          ls -al
-          export VER="$(cat syncplay/__init__.py | awk '/version/ {gsub("\047", "", $3); print $NF}')"
-          echo "VER=$VER" >> $GITHUB_ENV
-          mkdir dist_actions
-          ci/macos-deploy.sh
-          ls -al dist_actions
-
-      - name: Deploy
-        uses: actions/upload-artifact@v4
-        with:
-          name: Syncplay_${{ env.VER }}.dmg
-          path: |
-            dist_actions/Syncplay_${{ env.VER }}.dmg
-
-  deb:
-    name: Build Debian package
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build
-        run: ci/deb-script.sh
-
-      - name: Build server
-        run: ci/deb-server-script.sh
+          cargo check --bin syncplay-signaling
+          cargo check --bin syncplay-tui --features tui
 
       - name: Test
-        run: ci/deb-installation-test.sh
+        run: cargo test --lib
 
-      - name: Prepare for deployment
+      - name: Clippy
+        run: cargo clippy --features tui --lib -- -D warnings
+
+      - name: Format check
+        run: cargo fmt --check
+
+  release:
+    name: Build release artifacts
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: check
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            suffix: linux-amd64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: macos-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            suffix: macos-amd64
+    defaults:
+      run:
+        working-directory: p2p/rust
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build signaling server
+        run: cargo build --release --target ${{ matrix.target }} --bin syncplay-signaling
+
+      - name: Build TUI
+        run: cargo build --release --target ${{ matrix.target }} --bin syncplay-tui --features tui
+
+      - name: Package artifacts
         run: |
-          ls -al
-          export VER="$(cat syncplay/__init__.py | awk '/version/ {gsub("\047", "", $3); print $NF}')"
-          echo "VER=$VER" >> $GITHUB_ENV
-          mkdir dist_actions
-          mv /tmp/syncplay.deb dist_actions/syncplay_${VER}.deb
-          mv /tmp/syncplay-server.deb dist_actions/syncplay-server_${VER}.deb
-          ls -al dist_actions
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/syncplay-signaling dist/
+          cp target/${{ matrix.target }}/release/syncplay-tui dist/
+          cd dist && tar czf ../syncplay-p2p-${{ matrix.suffix }}.tar.gz *
 
-      - name: Deploy full deb
+      - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: syncplay.deb
-          path: |
-            dist_actions/syncplay_*.deb
-
-      - name: Deploy server deb
-        uses: actions/upload-artifact@v4
-        with:
-          name: syncplay-server.deb
-          path: |
-            dist_actions/syncplay-server_*.deb
+          name: syncplay-p2p-${{ matrix.suffix }}
+          path: p2p/rust/syncplay-p2p-${{ matrix.suffix }}.tar.gz
