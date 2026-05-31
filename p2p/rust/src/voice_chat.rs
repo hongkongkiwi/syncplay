@@ -51,7 +51,7 @@ pub struct VoiceChat {
     muted: Arc<AtomicBool>,
     local_track: Option<LocalAudioTrack>,
     peer_voices: Arc<Mutex<HashMap<String, PeerVoice>>>,
-    events_tx: Arc<Mutex<Option<mpsc::UnboundedSender<VoiceEvent>>>>,
+    events_tx: Arc<Mutex<Option<mpsc::Sender<VoiceEvent>>>>,
     _capture_handle: Mutex<Option<cpal::Stream>>,
     _playback_streams: Mutex<HashMap<String, cpal::Stream>>,
 }
@@ -77,7 +77,7 @@ impl VoiceChat {
         self.muted.store(muted, Ordering::SeqCst);
         info!("Mic muted: {muted}");
         if let Some(tx) = self.events_tx.lock().as_ref() {
-            let _ = tx.send(VoiceEvent::MuteChanged(muted));
+            let _ = tx.try_send(VoiceEvent::MuteChanged(muted));
         }
     }
 
@@ -134,8 +134,9 @@ impl VoiceChat {
                                 speaking: true,
                                 track_id: Some("local".into()),
                             });
-                            if let Some(tx) = e2.lock().as_ref() {
-                                let _ = tx.send(VoiceEvent::TrackAdded { peer_id });
+                            let sender = { e2.lock().clone() };
+                            if let Some(tx) = sender {
+                                let _ = tx.send(VoiceEvent::TrackAdded { peer_id }).await;
                             }
                         }
                         Err(e) => {
@@ -154,11 +155,11 @@ impl VoiceChat {
 
     /// Start mic capture, returns event stream. Uses cpal for cross-platform audio.
     /// Only call once; subsequent calls return an error.
-    pub fn start_capture(&mut self) -> Result<mpsc::UnboundedReceiver<VoiceEvent>> {
+    pub fn start_capture(&mut self) -> Result<mpsc::Receiver<VoiceEvent>> {
         if self._capture_handle.lock().is_some() {
             return Err(anyhow::anyhow!("Voice capture already started"));
         }
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(64);
         *self.events_tx.lock() = Some(tx.clone());
 
         let host = cpal::default_host();
@@ -201,7 +202,7 @@ impl VoiceChat {
             },
             move |err| {
                 error!("Voice capture error: {err}");
-                let _ = tx_err.send(VoiceEvent::Error(format!("{err}")));
+                let _ = tx_err.try_send(VoiceEvent::Error(format!("{err}")));
             },
             None,
         )?;
@@ -227,7 +228,7 @@ impl VoiceChat {
                 track_id: Some("remote".into()),
             });
         if let Some(tx) = self.events_tx.lock().as_ref() {
-            let _ = tx.send(VoiceEvent::TrackAdded { peer_id: pid });
+            let _ = tx.try_send(VoiceEvent::TrackAdded { peer_id: pid });
         }
     }
 

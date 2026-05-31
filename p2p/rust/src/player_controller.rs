@@ -48,7 +48,7 @@ pub enum PlayerEvent {
 pub struct PlayerController {
     player_type: PlayerType,
     child: Option<Child>,
-    event_tx: Option<mpsc::UnboundedSender<PlayerEvent>>,
+    event_tx: Option<mpsc::Sender<PlayerEvent>>,
 }
 
 impl PlayerController {
@@ -66,7 +66,7 @@ impl PlayerController {
         player_path: &str,
         file: Option<&str>,
         ipc_socket: &str,
-    ) -> Result<mpsc::UnboundedReceiver<PlayerEvent>> {
+    ) -> Result<mpsc::Receiver<PlayerEvent>> {
         // Clean up old socket
         let _ = std::fs::remove_file(ipc_socket);
 
@@ -121,7 +121,7 @@ impl PlayerController {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(256);
         self.event_tx = Some(tx.clone());
 
         // Spawn the IPC reader task
@@ -141,11 +141,13 @@ impl PlayerController {
             tokio::spawn(async move {
                 let status = child.wait();
                 let code = status.ok().and_then(|s| s.code());
-                let _ = tx3.send(PlayerEvent::PlayerExited { code });
+                let _ = tx3.send(PlayerEvent::PlayerExited { code }).await;
             });
         } else {
             error!("No child process to watch — launch may have failed");
-            let _ = tx.send(PlayerEvent::Error("player process not started".into()));
+            let _ = tx
+                .send(PlayerEvent::Error("player process not started".into()))
+                .await;
         }
 
         Ok(rx)
@@ -242,7 +244,7 @@ impl Drop for PlayerController {
 }
 
 /// Background task that reads mpv JSON IPC events.
-async fn mpv_ipc_loop(socket_path: &str, tx: mpsc::UnboundedSender<PlayerEvent>) -> Result<()> {
+async fn mpv_ipc_loop(socket_path: &str, tx: mpsc::Sender<PlayerEvent>) -> Result<()> {
     // Wait for socket
     for _ in 0..50 {
         if std::path::Path::new(socket_path).exists() {
@@ -324,18 +326,20 @@ async fn mpv_ipc_loop(socket_path: &str, tx: mpsc::UnboundedSender<PlayerEvent>)
                                 }
                                 _ => {}
                             }
-                            let _ = tx.send(PlayerEvent::StateUpdated(state.clone()));
+                            let _ = tx.send(PlayerEvent::StateUpdated(state.clone())).await;
                         }
                         // File loaded event
                         else if msg["event"].as_str() == Some("file-loaded") {
-                            let _ = tx.send(PlayerEvent::FileLoaded {
-                                filename: state.filename.clone().unwrap_or_default(),
-                                duration: state.duration,
-                            });
+                            let _ = tx
+                                .send(PlayerEvent::FileLoaded {
+                                    filename: state.filename.clone().unwrap_or_default(),
+                                    duration: state.duration,
+                                })
+                                .await;
                         }
                         // End file
                         else if msg["event"].as_str() == Some("end-file") {
-                            let _ = tx.send(PlayerEvent::EndOfFile);
+                            let _ = tx.send(PlayerEvent::EndOfFile).await;
                         }
                     }
                     Err(e) => {
