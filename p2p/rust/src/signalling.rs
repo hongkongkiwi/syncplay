@@ -135,7 +135,7 @@ struct PeerInfo {
     id: String,
     username: String,
     features: Vec<String>,
-    tx: mpsc::UnboundedSender<String>,
+    tx: mpsc::Sender<String>,
 }
 
 // ── Free helpers ─────────────────────────────────────────────────────
@@ -159,11 +159,11 @@ fn peer_info(p: &PeerInfo) -> serde_json::Value {
     })
 }
 
-fn send_json(tx: &mpsc::UnboundedSender<String>, msg: &ServerMessage) {
+fn send_json(tx: &mpsc::Sender<String>, msg: &ServerMessage) {
     match serde_json::to_string(msg) {
         Ok(s) => {
-            if tx.send(s).is_err() {
-                // Receiver dropped — client disconnected, harmless
+            if let Err(e) = tx.try_send(s) {
+                log::warn!("[signalling] channel full, dropping message: {e}");
             }
         }
         Err(e) => log::error!("JSON serialize failed: {e}"),
@@ -236,8 +236,8 @@ async fn handle_connection(
     let ws = accept_async(stream).await?;
     let (mut write, mut read) = ws.split();
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<()>();
+    let (tx, mut rx) = mpsc::channel::<String>(1024);
+    let (done_tx, mut done_rx) = mpsc::channel::<()>(1024);
 
     let mut peer_id: Option<String> = None;
     let mut room_name: Option<String> = None;
@@ -473,7 +473,7 @@ async fn handle_connection(
         }
     }
 
-    let _ = done_tx.send(());
+    let _ = done_tx.try_send(());
     let _ = write_handle.await;
     Ok(())
 }
@@ -521,7 +521,7 @@ mod tests {
 
     #[test]
     fn test_peer_info_json() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(1024);
         let info = PeerInfo {
             id: "peer-1".into(),
             username: "alice".into(),
