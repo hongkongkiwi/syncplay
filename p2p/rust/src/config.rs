@@ -42,9 +42,13 @@ pub struct P2pConfig {
     /// Enable voice chat
     #[serde(default)]
     pub voice_enabled: bool,
+
+    /// Directory for downloaded files (default: ~/Downloads/syncplay)
+    #[serde(default = "default_download_dir")]
+    pub download_dir: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PlayerConfig {
     /// Path to player binary (auto-detected if empty)
     #[serde(default)]
@@ -122,16 +126,25 @@ fn default_stun() -> Vec<String> {
     ]
 }
 
-fn default_reconnect_delay() -> u64 { 5 }
-fn default_sync_interval() -> u64 { 500 }
-fn default_ping_interval() -> u64 { 2000 }
-fn default_max_playlist() -> usize { 250 }
-fn default_max_chat() -> usize { 2000 }
+fn default_reconnect_delay() -> u64 {
+    5
+}
+fn default_sync_interval() -> u64 {
+    500
+}
+fn default_ping_interval() -> u64 {
+    2000
+}
+fn default_max_playlist() -> usize {
+    250
+}
+fn default_max_chat() -> usize {
+    2000
+}
 
-impl Default for PlayerConfig {
-    fn default() -> Self {
-        Self { path: String::new(), args: vec![], file: None }
-    }
+fn default_download_dir() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    format!("{home}/Downloads/syncplay")
 }
 
 impl Default for NetworkConfig {
@@ -169,6 +182,7 @@ impl Default for P2pConfig {
             sync: SyncConfig::default(),
             features: default_features(),
             voice_enabled: false,
+            download_dir: default_download_dir(),
         }
     }
 }
@@ -190,12 +204,24 @@ impl P2pConfig {
 
     /// Merge CLI overrides into config.
     pub fn apply_overrides(&mut self, overrides: &ConfigOverrides) {
-        if let Some(ref u) = overrides.username { self.username = u.clone(); }
-        if let Some(ref r) = overrides.room { self.room = r.clone(); }
-        if let Some(ref p) = overrides.password { self.password = p.clone(); }
-        if let Some(ref url) = overrides.signaling_url { self.signaling_url = url.clone(); }
-        if let Some(ref path) = overrides.player_path { self.player.path = path.clone(); }
-        if let Some(ref file) = overrides.file { self.player.file = Some(file.clone()); }
+        if let Some(ref u) = overrides.username {
+            self.username = u.clone();
+        }
+        if let Some(ref r) = overrides.room {
+            self.room = r.clone();
+        }
+        if let Some(ref p) = overrides.password {
+            self.password = p.clone();
+        }
+        if let Some(ref url) = overrides.signaling_url {
+            self.signaling_url = url.clone();
+        }
+        if let Some(ref path) = overrides.player_path {
+            self.player.path = path.clone();
+        }
+        if let Some(ref file) = overrides.file {
+            self.player.file = Some(file.clone());
+        }
     }
 
     /// Build ICE server config from STUN + TURN servers.
@@ -214,7 +240,6 @@ impl P2pConfig {
                 urls: vec![url],
                 username,
                 credential,
-                ..Default::default()
             });
         }
         if servers.is_empty() {
@@ -303,8 +328,6 @@ mod tests {
         assert_eq!(cfg.room, "movie-night");
         assert_eq!(cfg.password, "letmein");
     }
-}
-
     #[test]
     fn test_default_stun_not_empty() {
         let servers = default_stun();
@@ -390,3 +413,4 @@ mod tests {
         assert!(!cfg.features.is_empty());
         assert!(cfg.features.contains(&"chat".to_string()));
     }
+}

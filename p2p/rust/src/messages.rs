@@ -10,24 +10,25 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum MessageType {
-    Hello             = 0x01,
-    Playstate         = 0x02,  // host → peers: authoritative position/paused
-    PlaystateRequest  = 0x03,  // peer → host: "I want to seek/pause/play"
-    Chat              = 0x04,  // peer → host → all (relayed)
-    Readiness         = 0x05,  // peer → host → all: ready/not-ready
-    PlaylistChange    = 0x06,  // host → peers: playlist updated
-    PlaylistRequest   = 0x07,  // peer → host: request playlist change
-    FileInfo          = 0x08,  // broadcast current file metadata
-    FileTransfer      = 0x09,  // P2P direct file chunk
-    FileRequest       = 0x0A,  // request file from peer
-    FileResponse      = 0x0B,  // accept/reject file request
-    LatencyPing       = 0x0C,  // RTT measurement
-    LatencyPong       = 0x0D,  // RTT response
-    HostElected       = 0x0E,  // new host announcement
-    UserInfo          = 0x0F,  // username + features on connect
-    PeerDisconnect    = 0x10,  // graceful disconnect notification
-    VoiceMute         = 0x11,  // peer muted/unmuted voice
-    SubtitleInfo      = 0x12,  // available subtitle tracks for a file
+    Hello = 0x01,
+    Playstate = 0x02,        // host → peers: authoritative position/paused
+    PlaystateRequest = 0x03, // peer → host: "I want to seek/pause/play"
+    Chat = 0x04,             // peer → host → all (relayed)
+    Readiness = 0x05,        // peer → host → all: ready/not-ready
+    PlaylistChange = 0x06,   // host → peers: playlist updated
+    PlaylistRequest = 0x07,  // peer → host: request playlist change
+    FileInfo = 0x08,         // broadcast current file metadata
+    FileTransfer = 0x09,     // P2P direct file chunk
+    FileRequest = 0x0A,      // request file from peer
+    FileResponse = 0x0B,     // accept/reject file request
+    LatencyPing = 0x0C,      // RTT measurement
+    LatencyPong = 0x0D,      // RTT response
+    HostElected = 0x0E,      // new host announcement
+    UserInfo = 0x0F,         // username + features on connect
+    PeerDisconnect = 0x10,   // graceful disconnect notification
+    VoiceMute = 0x11,        // peer muted/unmuted voice
+    SubtitleInfo = 0x12,     // available subtitle tracks for a file
+    ControllerChange = 0x13, // host adds/removes playback controller
 }
 
 // ── Payload types ────────────────────────────────────────────────────
@@ -210,45 +211,83 @@ pub struct SubtitleTrack {
     pub language: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ControllerChangePayload {
+    pub peer_id: String,
+    pub action: String, // "add" or "remove"
+}
+
 impl SubtitleInfoPayload {
-    pub fn new(subtitles: Vec<SubtitleTrack>) -> Self { Self { subtitles } }
+    pub fn new(subtitles: Vec<SubtitleTrack>) -> Self {
+        Self { subtitles }
+    }
 }
 
 // ── Convenience builders ─────────────────────────────────────────────
 
 impl HelloPayload {
     pub fn new(username: &str, version: &str, features: Vec<String>) -> Self {
-        Self { username: username.into(), version: version.into(), features }
+        Self {
+            username: username.into(),
+            version: version.into(),
+            features,
+        }
     }
 }
 
 impl PlaystatePayload {
     pub fn new(position: f64, paused: bool, do_seek: bool, set_by: &str, seq: u64) -> Self {
-        Self { position, paused, do_seek, set_by: set_by.into(), seq }
+        Self {
+            position,
+            paused,
+            do_seek,
+            set_by: set_by.into(),
+            seq,
+        }
     }
 }
 
 impl PlaystateRequestPayload {
     pub fn seek(position: f64) -> Self {
-        Self { action: PlaystateAction::Seek, position, request_id: Uuid::new_v4().to_string() }
+        Self {
+            action: PlaystateAction::Seek,
+            position,
+            request_id: Uuid::new_v4().to_string(),
+        }
     }
     pub fn pause() -> Self {
-        Self { action: PlaystateAction::Pause, position: 0.0, request_id: Uuid::new_v4().to_string() }
+        Self {
+            action: PlaystateAction::Pause,
+            position: 0.0,
+            request_id: Uuid::new_v4().to_string(),
+        }
     }
     pub fn play() -> Self {
-        Self { action: PlaystateAction::Play, position: 0.0, request_id: Uuid::new_v4().to_string() }
+        Self {
+            action: PlaystateAction::Play,
+            position: 0.0,
+            request_id: Uuid::new_v4().to_string(),
+        }
     }
 }
 
 impl ChatPayload {
     pub fn new(from: &str, message: &str) -> Self {
-        Self { from: from.into(), message: message.into() }
+        Self {
+            from: from.into(),
+            message: message.into(),
+        }
     }
 }
 
 impl ReadinessPayload {
     pub fn new(username: &str, is_ready: bool, manually_initiated: bool, set_by: &str) -> Self {
-        Self { username: username.into(), is_ready, manually_initiated, set_by: set_by.into() }
+        Self {
+            username: username.into(),
+            is_ready,
+            manually_initiated,
+            set_by: set_by.into(),
+        }
     }
 }
 
@@ -265,22 +304,39 @@ impl FileRequestPayload {
 
 impl FileResponsePayload {
     pub fn accept(transfer_id: &str, fingerprint: &str, chunk_size: u32) -> Self {
-        Self { transfer_id: transfer_id.into(), accepted: true, reason: String::new(), fingerprint: fingerprint.into(), chunk_size }
+        Self {
+            transfer_id: transfer_id.into(),
+            accepted: true,
+            reason: String::new(),
+            fingerprint: fingerprint.into(),
+            chunk_size,
+        }
     }
     pub fn reject(transfer_id: &str, reason: &str) -> Self {
-        Self { transfer_id: transfer_id.into(), accepted: false, reason: reason.into(), fingerprint: String::new(), chunk_size: 0 }
+        Self {
+            transfer_id: transfer_id.into(),
+            accepted: false,
+            reason: reason.into(),
+            fingerprint: String::new(),
+            chunk_size: 0,
+        }
     }
 }
 
 impl LatencyPingPayload {
     pub fn now() -> Self {
-        Self { send_time: crate::now_ms() }
+        Self {
+            send_time: crate::now_ms(),
+        }
     }
 }
 
 impl LatencyPongPayload {
     pub fn reply(ping: &LatencyPingPayload) -> Self {
-        Self { send_time: ping.send_time, receive_time: crate::now_ms() }
+        Self {
+            send_time: ping.send_time,
+            receive_time: crate::now_ms(),
+        }
     }
 }
 
@@ -307,6 +363,9 @@ mod tests {
         assert_eq!(MessageType::HostElected as u8, 0x0E);
         assert_eq!(MessageType::UserInfo as u8, 0x0F);
         assert_eq!(MessageType::PeerDisconnect as u8, 0x10);
+        assert_eq!(MessageType::VoiceMute as u8, 0x11);
+        assert_eq!(MessageType::SubtitleInfo as u8, 0x12);
+        assert_eq!(MessageType::ControllerChange as u8, 0x13);
     }
 
     #[test]
@@ -434,17 +493,28 @@ mod tests {
         let _c = ready.clone();
         let _s = format!("{ready:?}");
 
-        let pl = PlaylistChangePayload { files: vec![], index: 0, set_by: "x".into() };
+        let pl = PlaylistChangePayload {
+            files: vec![],
+            index: 0,
+            set_by: "x".into(),
+        };
         let _c = pl.clone();
         let _s = format!("{pl:?}");
 
-        let fi = FileInfoPayload { username: "x".into(), file: None };
+        let fi = FileInfoPayload {
+            username: "x".into(),
+            file: None,
+        };
         let _c = fi.clone();
         let _s = format!("{fi:?}");
 
         let ft = FileTransferPayload {
-            transfer_id: "x".into(), chunk_index: 0, offset: 0,
-            total_size: 0, chunk_size: 0, data: vec![],
+            transfer_id: "x".into(),
+            chunk_index: 0,
+            offset: 0,
+            total_size: 0,
+            chunk_size: 0,
+            data: vec![],
         };
         let _c = ft.clone();
         let _s = format!("{ft:?}");
@@ -453,11 +523,17 @@ mod tests {
         let _c = latency.clone();
         let _s = format!("{latency:?}");
 
-        let host = HostElectedPayload { host_id: "x".into(), reason: "x".into() };
+        let host = HostElectedPayload {
+            host_id: "x".into(),
+            reason: "x".into(),
+        };
         let _c = host.clone();
         let _s = format!("{host:?}");
 
-        let ui = UserInfoPayload { username: "x".into(), features: vec![] };
+        let ui = UserInfoPayload {
+            username: "x".into(),
+            features: vec![],
+        };
         let _c = ui.clone();
         let _s = format!("{ui:?}");
 
@@ -479,7 +555,10 @@ mod tests {
 
     #[test]
     fn test_file_entry() {
-        let entry = FileEntry { name: "test.mkv".into(), duration: 3600.0 };
+        let entry = FileEntry {
+            name: "test.mkv".into(),
+            duration: 3600.0,
+        };
         assert_eq!(entry.name, "test.mkv");
         assert!((entry.duration - 3600.0).abs() < 0.001);
     }
@@ -497,7 +576,10 @@ mod tests {
         assert_eq!(meta.checksum.as_deref(), Some("sha256:abc"));
 
         let no_checksum = FileMetadata {
-            name: "x".into(), duration: 0.0, size: 0, checksum: None,
+            name: "x".into(),
+            duration: 0.0,
+            size: 0,
+            checksum: None,
         };
         assert!(no_checksum.checksum.is_none());
     }

@@ -32,7 +32,7 @@ enum ClientMessage {
         #[serde(default)]
         username: String,
         #[serde(default)]
-        persistent: bool,
+        _persistent: bool,
         #[serde(default)]
         features: Vec<String>,
     },
@@ -119,20 +119,14 @@ enum ServerMessage {
     #[serde(rename = "pong")]
     Pong,
     #[serde(rename = "error")]
-    Error {
-        code: String,
-        message: String,
-    },
+    Error { code: String, message: String },
 }
 
 // ── Room ─────────────────────────────────────────────────────────────
 
 struct Room {
-    #[allow(dead_code)]
-    name: String,
     password: Option<String>,
     host_id: String,
-    persistent: bool,
     peers: HashMap<String, PeerInfo>,
     join_order: Vec<String>,
 }
@@ -145,6 +139,8 @@ struct PeerInfo {
 }
 
 // ── Free helpers ─────────────────────────────────────────────────────
+
+const MAX_PEERS_PER_ROOM: usize = 100;
 
 fn make_peer_id() -> String {
     use std::time::SystemTime;
@@ -172,6 +168,13 @@ fn send_json(tx: &mpsc::UnboundedSender<String>, msg: &ServerMessage) {
         }
         Err(e) => log::error!("JSON serialize failed: {e}"),
     }
+}
+
+fn valid_name(s: &str, min: usize, max: usize) -> bool {
+    !s.is_empty()
+        && s.len() >= min
+        && s.len() <= max
+        && s.chars().all(|c| c.is_ascii_graphic() || c == ' ')
 }
 
 fn err(code: &str, message: &str) -> ServerMessage {
@@ -275,7 +278,15 @@ async fn handle_connection(
                         };
 
                         match msg {
-                            ClientMessage::Create { room, password, username, persistent, features } => {
+                            ClientMessage::Create { room, password, username, features, .. } => {
+                                if !valid_name(&room, 1, 64) {
+                                    send_json(&tx, &err("invalid_name", "Room name must be 1-64 printable chars"));
+                                    continue;
+                                }
+                                if !valid_name(&username, 1, 32) {
+                                    send_json(&tx, &err("invalid_name", "Username must be 1-32 printable chars"));
+                                    continue;
+                                }
                                 if rooms.contains_key(&room) {
                                     send_json(&tx, &err("room_exists", &format!("Room '{room}' already exists")));
                                     continue;
@@ -288,10 +299,8 @@ async fn handle_connection(
                                 peers_map.insert(pid.clone(), p);
                                 let join_order = vec![pid.clone()];
                                 let room_obj = Arc::new(Mutex::new(Room {
-                                    name: room.clone(),
                                     password: if password.is_empty() { None } else { Some(password) },
                                     host_id: pid.clone(),
-                                    persistent,
                                     peers: peers_map,
                                     join_order,
                                 }));
@@ -311,6 +320,10 @@ async fn handle_connection(
                             }
 
                             ClientMessage::Join { room, password, username, features } => {
+                                if !valid_name(&username, 1, 32) {
+                                    send_json(&tx, &err("invalid_name", "Username must be 1-32 printable chars"));
+                                    continue;
+                                }
                                 let room_obj = match rooms.get(&room) {
                                     Some(r) => r.clone(),
                                     None => {
@@ -329,6 +342,10 @@ async fn handle_connection(
                                     }
                                     if r.peers.values().any(|p| p.username == username) {
                                         send_json(&tx, &err("name_taken", &format!("Username '{username}' is taken")));
+                                        continue;
+                                    }
+                                    if r.peers.len() >= MAX_PEERS_PER_ROOM {
+                                        send_json(&tx, &err("room_full", &format!("Room '{room}' is full (max {MAX_PEERS_PER_ROOM})")));
                                         continue;
                                     }
                                 }
@@ -449,13 +466,9 @@ async fn handle_connection(
             }
 
             if remaining == 0 {
-                if r.persistent {
-                    info!("[room] {rname}: empty but persistent — kept");
-                } else {
-                    drop(r);
-                    rooms.remove(rname);
-                    info!("[room] removed empty room: {rname}");
-                }
+                drop(r);
+                rooms.remove(rname);
+                info!("[room] removed empty room: {rname}");
             }
         }
     }
