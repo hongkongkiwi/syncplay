@@ -1,17 +1,19 @@
-*.py[co]
+# Rust
+p2p/rust/target/
+
+# IDE / OS
 .*.sw[po]
+.DS_Store
+
+# Build artifacts
 *.exe
-venv
+/build
+/dist
+
+# Dependencies
 node_modules
 
-/*.egg-info
-/build
-/cert
-/dist
-/syncplay v*
-/syncplay_v*
-syncplay_setup.nsi
-dist.7z
+# Config (keep examples)
 .*
 !.appveyor.yml
 !.github
@@ -20,4 +22,3 @@ dist.7z
 !react-native/android/.gitignore
 !react-native/ios/.gitignore
 !react-native/ios/.xcode.env
-__pycache__

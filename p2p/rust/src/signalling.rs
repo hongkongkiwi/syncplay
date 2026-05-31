@@ -1,0 +1,536 @@
+//! WebSocket Signaling Server
+//!
+//! A lightweight WebSocket relay for WebRTC signaling.
+//! Handles room create/join/leave, SDP/ICE relay, host election.
+//!
+//! Replaces: 160-line Node.js server + the original 585-line Python SyncFactory.
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use anyhow::Result;
+use dashmap::DashMap;
+use futures_util::{SinkExt, StreamExt};
+use log::{error, info};
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
+use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+// ── Signalling Messages ──────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum ClientMessage {
+    #[serde(rename = "create")]
+    Create {
+        room: String,
+        #[serde(default)]
+        password: String,
+        #[serde(default)]
+        username: String,
+        #[serde(default)]
+        _persistent: bool,
+        #[serde(default)]
+        features: Vec<String>,
+    },
+    #[serde(rename = "join")]
+    Join {
+        room: String,
+        #[serde(default)]
+        password: String,
+        username: String,
+        #[serde(default)]
+        features: Vec<String>,
+    },
+    #[serde(rename = "signal")]
+    Signal {
+        target: String,
+        payload: SignalPayload,
+    },
+    #[serde(rename = "ping")]
+    Ping,
+    #[serde(rename = "leave")]
+    Leave,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct SignalPayload {
+    kind: String,
+    #[serde(default)]
+    sdp: String,
+    #[serde(default)]
+    candidate: String,
+    #[serde(rename = "sdpMid", default)]
+    sdp_mid: String,
+    #[serde(rename = "sdpMLineIndex", default)]
+    sdp_mline_index: u16,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+enum ServerMessage {
+    #[serde(rename = "created")]
+    Created {
+        #[serde(rename = "roomId")]
+        room_id: String,
+        #[serde(rename = "hostId")]
+        host_id: String,
+        #[serde(rename = "peerId")]
+        peer_id: String,
+        peers: Vec<serde_json::Value>,
+    },
+    #[serde(rename = "room_info")]
+    RoomInfo {
+        #[serde(rename = "roomId")]
+        room_id: String,
+        #[serde(rename = "hostId")]
+        host_id: String,
+        #[serde(rename = "peerId")]
+        peer_id: String,
+        peers: Vec<serde_json::Value>,
+    },
+    #[serde(rename = "peer_joined")]
+    PeerJoined {
+        #[serde(rename = "peerId")]
+        peer_id: String,
+        username: String,
+        features: Vec<String>,
+    },
+    #[serde(rename = "peer_left")]
+    PeerLeft {
+        #[serde(rename = "peerId")]
+        peer_id: String,
+        reason: String,
+    },
+    #[serde(rename = "host_changed")]
+    HostChanged {
+        #[serde(rename = "hostId")]
+        host_id: String,
+        reason: String,
+    },
+    #[serde(rename = "signal")]
+    SignalRelay {
+        from: String,
+        payload: SignalPayload,
+    },
+    #[serde(rename = "pong")]
+    Pong,
+    #[serde(rename = "error")]
+    Error { code: String, message: String },
+}
+
+// ── Room ─────────────────────────────────────────────────────────────
+
+struct Room {
+    password: Option<String>,
+    host_id: String,
+    peers: HashMap<String, PeerInfo>,
+    join_order: Vec<String>,
+}
+
+struct PeerInfo {
+    id: String,
+    username: String,
+    features: Vec<String>,
+    tx: mpsc::UnboundedSender<String>,
+}
+
+// ── Free helpers ─────────────────────────────────────────────────────
+
+const MAX_PEERS_PER_ROOM: usize = 100;
+
+fn make_peer_id() -> String {
+    use std::time::SystemTime;
+    let ts = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("{ts:x}-{:04x}", rand::random::<u16>())
+}
+
+fn peer_info(p: &PeerInfo) -> serde_json::Value {
+    serde_json::json!({
+        "peerId": p.id,
+        "username": p.username,
+        "features": p.features,
+    })
+}
+
+fn send_json(tx: &mpsc::UnboundedSender<String>, msg: &ServerMessage) {
+    match serde_json::to_string(msg) {
+        Ok(s) => {
+            if tx.send(s).is_err() {
+                // Receiver dropped — client disconnected, harmless
+            }
+        }
+        Err(e) => log::error!("JSON serialize failed: {e}"),
+    }
+}
+
+fn valid_name(s: &str, min: usize, max: usize) -> bool {
+    !s.is_empty()
+        && s.len() >= min
+        && s.len() <= max
+        && s.chars().all(|c| c.is_ascii_graphic() || c == ' ')
+}
+
+fn err(code: &str, message: &str) -> ServerMessage {
+    ServerMessage::Error {
+        code: code.into(),
+        message: message.into(),
+    }
+}
+
+// ── Server ───────────────────────────────────────────────────────────
+
+pub struct SignalingServer {
+    rooms: Arc<DashMap<String, Arc<Mutex<Room>>>>,
+}
+
+impl Default for SignalingServer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SignalingServer {
+    pub fn new() -> Self {
+        Self {
+            rooms: Arc::new(DashMap::new()),
+        }
+    }
+
+    pub async fn run(&self, addr: SocketAddr) -> Result<()> {
+        let listener = TcpListener::bind(addr).await?;
+        info!("[signaling] listening on {addr}");
+        let rooms = self.rooms.clone();
+
+        loop {
+            match listener.accept().await {
+                Ok((stream, peer_addr)) => {
+                    let rooms = rooms.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_connection(rooms, stream, peer_addr).await {
+                            error!("Connection error from {peer_addr}: {e}");
+                        }
+                    });
+                }
+                Err(e) => {
+                    error!("Accept error: {e}");
+                }
+            }
+        }
+    }
+}
+
+// ── Connection handler (free function) ───────────────────────────────
+
+async fn handle_connection(
+    rooms: Arc<DashMap<String, Arc<Mutex<Room>>>>,
+    stream: TcpStream,
+    _addr: SocketAddr,
+) -> Result<()> {
+    let ws = accept_async(stream).await?;
+    let (mut write, mut read) = ws.split();
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<()>();
+
+    let mut peer_id: Option<String> = None;
+    let mut room_name: Option<String> = None;
+
+    // Write loop
+    let write_handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                msg = rx.recv() => {
+                    match msg {
+                        Some(text) => {
+                            if write.send(Message::Text(text.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = done_rx.recv() => {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Read loop
+    loop {
+        tokio::select! {
+            msg = read.next() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        let msg: ClientMessage = match serde_json::from_str(&text) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                send_json(&tx, &err("parse_error", &e.to_string()));
+                                continue;
+                            }
+                        };
+
+                        match msg {
+                            ClientMessage::Create { room, password, username, features, .. } => {
+                                if !valid_name(&room, 1, 64) {
+                                    send_json(&tx, &err("invalid_name", "Room name must be 1-64 printable chars"));
+                                    continue;
+                                }
+                                if !valid_name(&username, 1, 32) {
+                                    send_json(&tx, &err("invalid_name", "Username must be 1-32 printable chars"));
+                                    continue;
+                                }
+                                if rooms.contains_key(&room) {
+                                    send_json(&tx, &err("room_exists", &format!("Room '{room}' already exists")));
+                                    continue;
+                                }
+
+                                let pid = make_peer_id();
+                                let p = PeerInfo { id: pid.clone(), username: username.clone(), features, tx: tx.clone() };
+
+                                let mut peers_map = HashMap::new();
+                                peers_map.insert(pid.clone(), p);
+                                let join_order = vec![pid.clone()];
+                                let room_obj = Arc::new(Mutex::new(Room {
+                                    password: if password.is_empty() { None } else { Some(password) },
+                                    host_id: pid.clone(),
+                                    peers: peers_map,
+                                    join_order,
+                                }));
+
+                                rooms.insert(room.clone(), room_obj);
+                                peer_id = Some(pid.clone());
+                                room_name = Some(room.clone());
+
+                                send_json(&tx, &ServerMessage::Created {
+                                    room_id: room.clone(),
+                                    host_id: pid.clone(),
+                                    peer_id: pid.clone(),
+                                    peers: vec![],
+                                });
+
+                                info!("[room] created: {room}  host: {pid}  user: {username}");
+                            }
+
+                            ClientMessage::Join { room, password, username, features } => {
+                                if !valid_name(&username, 1, 32) {
+                                    send_json(&tx, &err("invalid_name", "Username must be 1-32 printable chars"));
+                                    continue;
+                                }
+                                let room_obj = match rooms.get(&room) {
+                                    Some(r) => r.clone(),
+                                    None => {
+                                        send_json(&tx, &err("room_not_found", &format!("Room '{room}' not found")));
+                                        continue;
+                                    }
+                                };
+
+                                {
+                                    let r = room_obj.lock();
+                                    if let Some(pwd) = &r.password {
+                                        if pwd != &password {
+                                            send_json(&tx, &err("wrong_password", "Incorrect room password"));
+                                            continue;
+                                        }
+                                    }
+                                    if r.peers.values().any(|p| p.username == username) {
+                                        send_json(&tx, &err("name_taken", &format!("Username '{username}' is taken")));
+                                        continue;
+                                    }
+                                    if r.peers.len() >= MAX_PEERS_PER_ROOM {
+                                        send_json(&tx, &err("room_full", &format!("Room '{room}' is full (max {MAX_PEERS_PER_ROOM})")));
+                                        continue;
+                                    }
+                                }
+
+                                let pid = make_peer_id();
+                                let host_id;
+                                let existing_peers: Vec<serde_json::Value>;
+
+                                {
+                                    let mut r = room_obj.lock();
+                                    host_id = r.host_id.clone();
+                                    existing_peers = r.peers.values().map(peer_info).collect();
+
+                                    let p = PeerInfo { id: pid.clone(), username: username.clone(), features: features.clone(), tx: tx.clone() };
+                                    r.peers.insert(pid.clone(), p);
+                                    r.join_order.push(pid.clone());
+                                }
+
+                                peer_id = Some(pid.clone());
+                                room_name = Some(room.clone());
+
+                                send_json(&tx, &ServerMessage::RoomInfo {
+                                    room_id: room.clone(),
+                                    host_id: host_id.clone(),
+                                    peer_id: pid.clone(),
+                                    peers: existing_peers,
+                                });
+
+                                let joined_msg = ServerMessage::PeerJoined {
+                                    peer_id: pid.clone(),
+                                    username: username.clone(),
+                                    features,
+                                };
+
+                                let r = room_obj.lock();
+                                for p in r.peers.values() {
+                                    if p.id != pid {
+                                        send_json(&p.tx, &joined_msg);
+                                    }
+                                }
+
+                                info!("[room] {room}: {username} joined  ({} peers)", room_obj.lock().peers.len());
+                            }
+
+                            ClientMessage::Signal { target, payload } => {
+                                if let (Some(ref _pid), Some(ref rname)) = (&peer_id, &room_name) {
+                                    if let Some(room) = rooms.get(rname) {
+                                        let r = room.lock();
+                                        if let Some(target_peer) = r.peers.get(&target) {
+                                            send_json(
+                                                &target_peer.tx,
+                                                &ServerMessage::SignalRelay {
+                                                    from: peer_id.clone().unwrap_or_default(),
+                                                    payload,
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            ClientMessage::Ping => {
+                                send_json(&tx, &ServerMessage::Pong);
+                            }
+
+                            ClientMessage::Leave => {
+                                break;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Cleanup
+    if let (Some(pid), Some(rname)) = (&peer_id, &room_name) {
+        if let Some(room) = rooms.get(rname) {
+            let mut r = room.lock();
+
+            let was_host = r.host_id == *pid;
+            let new_host = if was_host {
+                r.join_order.iter().find(|id| *id != pid).cloned()
+            } else {
+                None
+            };
+
+            if was_host {
+                if let Some(ref new_id) = new_host {
+                    r.host_id = new_id.clone();
+                    let host_msg = ServerMessage::HostChanged {
+                        host_id: new_id.clone(),
+                        reason: "previous_host_left".into(),
+                    };
+                    for p in r.peers.values() {
+                        send_json(&p.tx, &host_msg);
+                    }
+                    info!("[room] {rname}: host migrated to {new_id}");
+                }
+            }
+
+            let _username = r.peers.remove(pid).map(|p| p.username).unwrap_or_default();
+            let remaining = r.peers.len();
+            drop(r);
+
+            let leave_msg = ServerMessage::PeerLeft {
+                peer_id: pid.clone(),
+                reason: "left".into(),
+            };
+
+            let r = room.lock();
+            for p in r.peers.values() {
+                send_json(&p.tx, &leave_msg);
+            }
+
+            if remaining == 0 {
+                drop(r);
+                rooms.remove(rname);
+                info!("[room] removed empty room: {rname}");
+            }
+        }
+    }
+
+    let _ = done_tx.send(());
+    let _ = write_handle.await;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_make_peer_id_format() {
+        let id = make_peer_id();
+        // Format: {timestamp_hex}-{4_hex}
+        assert!(id.contains('-'));
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[1].len(), 4);
+        // Should be valid hex
+        u64::from_str_radix(parts[1], 16).expect("hex part");
+    }
+
+    #[test]
+    fn test_make_peer_id_unique() {
+        let id1 = make_peer_id();
+        let id2 = make_peer_id();
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_err_message() {
+        let msg = err("test_code", "test message");
+        match msg {
+            ServerMessage::Error { code, message } => {
+                assert_eq!(code, "test_code");
+                assert_eq!(message, "test message");
+            }
+            _ => panic!("expected Error variant"),
+        }
+    }
+
+    #[test]
+    fn test_signaling_server_new() {
+        let server = SignalingServer::new();
+        assert!(server.rooms.is_empty());
+    }
+
+    #[test]
+    fn test_peer_info_json() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let info = PeerInfo {
+            id: "peer-1".into(),
+            username: "alice".into(),
+            features: vec!["chat".into()],
+            tx,
+        };
+        let json = peer_info(&info);
+        assert_eq!(json["peerId"], "peer-1");
+        assert_eq!(json["username"], "alice");
+        assert!(json["features"].is_array());
+    }
+}

@@ -1,0 +1,47 @@
+# Syncplay P2P — Lefthook git hooks
+# https://github.com/evilmartians/lefthook
+#
+# Install: lefthook install
+# Run manually: lefthook run pre-commit / lefthook run pre-push
+
+# Hooks run from the repo root. Rust project lives at p2p/rust/.
+# All cargo commands use --manifest-path to avoid cd issues.
+
+pre-commit:
+  parallel: true
+  commands:
+    # ── Format check (fast, ~1s) ──
+    fmt:
+      glob: "p2p/rust/**/*.rs"
+      run: cargo fmt --manifest-path p2p/rust/Cargo.toml -- --check
+      fail_text: "cargo fmt failed — run 'cargo fmt --manifest-path p2p/rust/Cargo.toml' or 'just fmt-fix'"
+
+    # ── Type check (fast, ~2s) ──
+    check:
+      glob: "p2p/rust/**/*.rs"
+      run: cargo check --manifest-path p2p/rust/Cargo.toml --features tui
+      fail_text: "cargo check failed — fix the type errors before committing"
+
+    # ── Markdown lint (optional, non-blocking) ──
+    # markdownlint:
+    #   glob: "*.md"
+    #   run: markdownlint --disable MD013 MD033 MD041 -- '*.md'
+    #   skip: true
+
+pre-push:
+  parallel: true
+  commands:
+    # ── Full test suite (~3s) ──
+    test:
+      run: cargo test --manifest-path p2p/rust/Cargo.toml --lib
+      fail_text: "Tests failed — fix before pushing"
+
+    # ── Clippy with warnings as errors (~5s) ──
+    clippy:
+      run: cargo clippy --manifest-path p2p/rust/Cargo.toml --features tui --all-targets -- -D warnings
+      fail_text: "Clippy failed — fix warnings before pushing"
+
+    # ── Doc link check (~3s) ──
+    doc:
+      run: cargo doc --manifest-path p2p/rust/Cargo.toml --no-deps --features tui 2>&1 | grep -q '^error' && exit 1 || exit 0
+      fail_text: "Broken doc links — fix before pushing"

@@ -1,0 +1,73 @@
+[package]
+name = "syncplay-p2p"
+version = "2.0.0-alpha.1"
+edition = "2021"
+description = "Syncplay P2P — WebRTC-based peer-to-peer media sync. Pure Rust signaling server and terminal client."
+license = "Apache-2.0"
+repository = "https://github.com/hongkongkiwi/syncplay"
+
+[lib]
+name = "syncplay_p2p"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "syncplay-signaling"
+path = "src/main.rs"
+
+[[bin]]
+name = "syncplay-tui"
+path = "src/tui_main.rs"
+required-features = ["tui"]
+
+[dependencies]
+# ── WebRTC ─────────────────────────────────────────────────────
+webrtc = { version = "0.14" }
+interceptor = "0.14"
+
+# ── Async runtime ──────────────────────────────────────────────
+tokio = { version = "1", features = ["full"] }
+
+# ── Serialization ──────────────────────────────────────────────
+rmp-serde = "1"           # MessagePack
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"           # JSON for signalling server
+
+# ── Signalling server ──────────────────────────────────────────
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+
+# ── Utilities ──────────────────────────────────────────────────
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+thiserror = "2"
+bytes = "1"
+parking_lot = "0.12"
+dashmap = "6"
+rand = "0.8"
+serde_bytes = "0.11"
+shellexpand = "3"
+whoami = "1"
+
+# ── Voice ──────────────────────────────────────────────────────
+cpal = { version = "0.15", features = ["asio"] }
+bytemuck = "1"
+
+# ── TUI (terminal UI) ──────────────────────────────────────────
+ratatui = { version = "0.28", optional = true }
+crossterm = { version = "0.28", optional = true }
+
+[features]
+default = []
+tui = ["ratatui", "crossterm"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1
