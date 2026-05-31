@@ -58,6 +58,7 @@ fn ice_conf_from_config(cfg: &P2pConfig) -> RTCConfiguration {
 
 // ── Peer ─────────────────────────────────────────────────────────────
 
+/// WebRTC ICE connection state for a peer connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IceState {
     New,
@@ -81,6 +82,7 @@ impl std::fmt::Display for IceState {
     }
 }
 
+/// A connected peer with its WebRTC data channel, peer connection, and ICE state.
 pub struct Peer {
     pub peer_id: String,
     pub username: String,

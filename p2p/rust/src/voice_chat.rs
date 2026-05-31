@@ -27,6 +27,7 @@ use crate::connection::ConnectionManager;
 
 pub type LocalAudioTrack = Arc<TrackLocalStaticSample>;
 
+/// Voice status for a single peer, including mute state and speaking detection.
 #[derive(Debug, Clone, Default)]
 pub struct PeerVoice {
     pub muted: bool,
@@ -34,6 +35,7 @@ pub struct PeerVoice {
     pub track_id: Option<String>,
 }
 
+/// Events emitted by the voice chat system (mute changes, peer speaking, track lifecycle, errors).
 #[derive(Debug, Clone)]
 pub enum VoiceEvent {
     MuteChanged(bool),
@@ -43,6 +45,7 @@ pub enum VoiceEvent {
     Error(String),
 }
 
+/// Manages peer-to-peer voice chat over WebRTC audio tracks, including mic capture and remote playback.
 pub struct VoiceChat {
     conn: ConnectionManager,
     muted: Arc<AtomicBool>,
