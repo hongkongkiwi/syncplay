@@ -7,7 +7,8 @@
 //!   --room, -r ROOM        Room name (default: syncplay-tui)
 //!   --signaling, -s URL    Signaling server URL (default: ws://127.0.0.1:8998)
 //!   --username, -u NAME    Display name (default: OS username)
-//!   --password, -p PASS    Room password
+//!   --password, -P PASS    Room password
+//!   --config, -c PATH      Load config from JSON file
 //!   --file, -f FILE        Media file to open on start
 //!   --voice                Enable voice chat on start
 //!   --help, -h             Show this help
@@ -41,7 +42,8 @@ fn usage() -> ! {
     println!("  --room, -r ROOM        Room name (default: syncplay-tui)");
     println!("  --signaling, -s URL    Signaling server URL (default: ws://127.0.0.1:8998)");
     println!("  --username, -u NAME    Display name (default: OS username)");
-    println!("  --password, -p PASS    Room password");
+    println!("  --password, -P PASS    Room password");
+    println!("  --config, -c PATH      Load config from JSON file");
     println!("  --file, -f FILE        Media file to open on start");
     println!("  --voice                Enable voice chat on start");
     println!("  --help, -h             Show this help");
@@ -61,11 +63,10 @@ async fn main() -> anyhow::Result<()> {
     )
     .init();
 
-    let mut cfg = P2pConfig::default();
-
     let args: Vec<String> = std::env::args().collect();
     let mut overrides = ConfigOverrides::default();
     let mut enable_voice = false;
+    let mut config_path: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -83,9 +84,13 @@ async fn main() -> anyhow::Result<()> {
                 i += 1;
                 overrides.username = Some(args[i].clone());
             }
-            "--password" | "-p" => {
+            "--password" | "-P" => {
                 i += 1;
                 overrides.password = Some(args[i].clone());
+            }
+            "--config" | "-c" => {
+                i += 1;
+                config_path = Some(args[i].clone());
             }
             "--file" | "-f" => {
                 i += 1;
@@ -102,6 +107,12 @@ async fn main() -> anyhow::Result<()> {
         }
         i += 1;
     }
+
+    let mut cfg = if let Some(ref path) = config_path {
+        P2pConfig::load(path)?
+    } else {
+        P2pConfig::default()
+    };
     cfg.apply_overrides(&overrides);
 
     if cfg.room.is_empty() {

@@ -120,6 +120,7 @@ struct IncomingTransfer {
     expected_chunks: u64,
 }
 
+/// Handles peer-to-peer file transfers with SHA-256 integrity checking and chunked streaming delivery.
 pub struct FileTransfer {
     conn: ConnectionManager,
     transfers: Arc<Mutex<HashMap<String, IncomingTransfer>>>,

@@ -51,6 +51,7 @@ mod theme {
 
 // ── State ──────────────────────────────────────────────────────────────
 
+/// A single row in the TUI peer list, holding display data for one connected peer.
 pub struct PeerRow {
     pub name: String,
     pub ice: String,
@@ -61,6 +62,7 @@ pub struct PeerRow {
     pub is_host: bool,
 }
 
+/// Tracks the progress and metadata of an active file transfer in the TUI.
 #[derive(Default)]
 pub struct TransferState {
     pub transfer_id: String,
@@ -78,6 +80,7 @@ pub enum TransferDirection {
     Receiving,
 }
 
+/// Complete aggregate state for the terminal UI, including playback, peers, chat, playlist, and transfers.
 pub struct UiState {
     pub playstate: String,
     pub position_secs: f64,
@@ -150,6 +153,7 @@ const PLAYLIST_VISIBLE: usize = 10;
 
 // ── Main loop ──────────────────────────────────────────────────────────
 
+/// Run the terminal UI event loop, rendering a 6-panel adaptive layout and handling keyboard input.
 pub async fn run_tui(
     state: Arc<Mutex<UiState>>,
     sync: SyncManager,

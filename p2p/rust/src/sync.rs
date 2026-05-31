@@ -27,7 +27,7 @@ fn now_ms() -> u64 {
     crate::now_ms()
 }
 
-/// Immutable snapshot of room state for UI rendering.
+/// Immutable snapshot of room state for UI rendering in the TUI or CLI.
 #[derive(Debug, Clone)]
 pub struct RoomStateSnapshot {
     pub position: f64,
@@ -65,6 +65,7 @@ impl Default for RoomState {
     }
 }
 
+/// Host-authoritative synchronization manager for room state, playback control, chat relay, and latency tracking.
 pub struct SyncManager {
     conn: ConnectionManager,
     room: Arc<Mutex<RoomState>>,
