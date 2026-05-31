@@ -21,9 +21,7 @@ pub struct Player {
 }
 
 /// All supported players.
-pub const PLAYERS: &[Player] = &[
-    MPV, VLC, MPC_HC, MPC_BE, MPVNET, IINA, MPLAYER, MEMENTO,
-];
+pub const PLAYERS: &[Player] = &[MPV, VLC, MPC_HC, MPC_BE, MPVNET, IINA, MPLAYER, MEMENTO];
 
 pub const MPV: Player = Player {
     name: "mpv",
@@ -144,10 +142,7 @@ pub struct DiscoveredPlayer {
 /// Run a quick version check. Returns (stdout, stderr) or None if the binary
 /// didn't run.
 fn try_version(path: &Path) -> Option<String> {
-    let output = Command::new(path)
-        .arg("--version")
-        .output()
-        .ok()?;
+    let output = Command::new(path).arg("--version").output().ok()?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -202,9 +197,10 @@ fn dirs_home() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOMEDRIVE").and_then(|hd| {
-                std::env::var("HOMEPATH").map(|hp| format!("{hd}{hp}"))
-            }))
+            .or_else(|_| {
+                std::env::var("HOMEDRIVE")
+                    .and_then(|hd| std::env::var("HOMEPATH").map(|hp| format!("{hd}{hp}")))
+            })
             .ok()
             .map(PathBuf::from)
     }
@@ -235,7 +231,11 @@ fn resolve_player(player: &'static Player) -> Option<DiscoveredPlayer> {
         let path = expand_path(raw);
         if is_executable(&path) {
             log::debug!("Found {} at {} (known path)", player.name, path.display());
-            return Some(DiscoveredPlayer { player, path, via_known_path: true });
+            return Some(DiscoveredPlayer {
+                player,
+                path,
+                via_known_path: true,
+            });
         }
     }
 
@@ -243,7 +243,11 @@ fn resolve_player(player: &'static Player) -> Option<DiscoveredPlayer> {
     for exe_name in player.exe_names {
         if let Some(path) = find_in_path(exe_name) {
             log::debug!("Found {} at {} (PATH)", player.name, path.display());
-            return Some(DiscoveredPlayer { player, path, via_known_path: false });
+            return Some(DiscoveredPlayer {
+                player,
+                path,
+                via_known_path: false,
+            });
         }
     }
 
@@ -253,13 +257,23 @@ fn resolve_player(player: &'static Player) -> Option<DiscoveredPlayer> {
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
             for exe_name in player.exe_names {
                 let candidates = &[
-                    Path::new(&local).join("Microsoft").join("WindowsApps").join(exe_name),
-                    Path::new(&local).join("Programs").join(player.key).join(exe_name),
+                    Path::new(&local)
+                        .join("Microsoft")
+                        .join("WindowsApps")
+                        .join(exe_name),
+                    Path::new(&local)
+                        .join("Programs")
+                        .join(player.key)
+                        .join(exe_name),
                 ];
                 for p in candidates {
                     if is_executable(p) {
                         log::debug!("Found {} at {} (LOCALAPPDATA)", player.name, p.display());
-                        return Some(DiscoveredPlayer { player, path: p.clone(), via_known_path: false });
+                        return Some(DiscoveredPlayer {
+                            player,
+                            path: p.clone(),
+                            via_known_path: false,
+                        });
                     }
                 }
             }
@@ -278,10 +292,19 @@ pub fn detect_players() -> Vec<DiscoveredPlayer> {
         if let Some(dp) = resolve_player(player) {
             // Verify it actually runs
             if let Some(ver) = try_version(&dp.path) {
-                log::info!("Detected {}: {} ({})", player.name, dp.path.display(), ver.lines().next().unwrap_or(""));
+                log::info!(
+                    "Detected {}: {} ({})",
+                    player.name,
+                    dp.path.display(),
+                    ver.lines().next().unwrap_or("")
+                );
                 found.push(dp);
             } else {
-                log::debug!("{} found at {} but --version failed, skipping", player.name, dp.path.display());
+                log::debug!(
+                    "{} found at {} but --version failed, skipping",
+                    player.name,
+                    dp.path.display()
+                );
             }
         }
     }
@@ -323,19 +346,30 @@ mod tests {
     fn test_player_definitions_complete() {
         for player in PLAYERS {
             assert!(!player.key.is_empty(), "{} has empty key", player.name);
-            assert!(!player.exe_names.is_empty(), "{} has no exe names", player.name);
+            assert!(
+                !player.exe_names.is_empty(),
+                "{} has no exe names",
+                player.name
+            );
         }
     }
 
     #[test]
     fn test_expand_path_home() {
         let expanded = expand_path("~/test");
-        assert!(!expanded.to_string_lossy().contains('~'), "~ was not expanded: {expanded:?}");
+        assert!(
+            !expanded.to_string_lossy().contains('~'),
+            "~ was not expanded: {expanded:?}"
+        );
     }
 
     #[test]
     fn test_expand_path_absolute() {
-        let path = if cfg!(windows) { r"C:\test\vlc.exe" } else { "/usr/bin/vlc" };
+        let path = if cfg!(windows) {
+            r"C:\test\vlc.exe"
+        } else {
+            "/usr/bin/vlc"
+        };
         let expanded = expand_path(path);
         assert_eq!(expanded, PathBuf::from(path));
     }

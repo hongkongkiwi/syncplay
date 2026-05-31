@@ -5,16 +5,16 @@
 //!   - `syncplay-tui` binary: ratatui terminal UI for watching together
 
 pub mod config;
+pub mod connection;
 pub mod error;
 pub mod file_transfer;
 pub mod messages;
 pub mod player;
 pub mod player_controller;
-pub mod voice_chat;
-pub mod wire;
-pub mod connection;
 pub mod signalling;
 pub mod sync;
+pub mod voice_chat;
+pub mod wire;
 
 /// Current UNIX timestamp in milliseconds.
 pub fn now_ms() -> u64 {

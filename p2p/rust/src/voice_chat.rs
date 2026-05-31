@@ -18,6 +18,7 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 use webrtc::api::media_engine::MIME_TYPE_OPUS;
+use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_remote::TrackRemote;
@@ -47,9 +48,9 @@ pub struct VoiceChat {
     muted: Arc<AtomicBool>,
     local_track: Option<LocalAudioTrack>,
     peer_voices: Arc<Mutex<HashMap<String, PeerVoice>>>,
-    events_tx: Mutex<Option<mpsc::UnboundedSender<VoiceEvent>>>,
+    events_tx: Arc<Mutex<Option<mpsc::UnboundedSender<VoiceEvent>>>>,
     _capture_handle: Mutex<Option<cpal::Stream>>,
-    _playback_streams: Arc<Mutex<HashMap<String, cpal::Stream>>>,
+    _playback_streams: Mutex<HashMap<String, cpal::Stream>>,
 }
 
 impl VoiceChat {
@@ -59,9 +60,9 @@ impl VoiceChat {
             muted: Arc::new(AtomicBool::new(false)),
             local_track: None,
             peer_voices: Arc::new(Mutex::new(HashMap::new())),
-            events_tx: Mutex::new(None),
+            events_tx: Arc::new(Mutex::new(None)),
             _capture_handle: Mutex::new(None),
-            _playback_streams: Arc::new(Mutex::new(HashMap::new())),
+            _playback_streams: Mutex::new(HashMap::new()),
         }
     }
 
@@ -83,11 +84,21 @@ impl VoiceChat {
         new
     }
 
+    /// Returns the shared mute flag for direct TUI toggling.
+    pub fn mute_flag(&self) -> Arc<AtomicBool> {
+        self.muted.clone()
+    }
+
     pub fn peer_voice_status(&self) -> Vec<(String, bool)> {
-        self.peer_voices.lock().iter().map(|(id, v)| (id.clone(), v.muted)).collect()
+        self.peer_voices
+            .lock()
+            .iter()
+            .map(|(id, v)| (id.clone(), v.muted))
+            .collect()
     }
 
     /// Create a local audio track for sending voice to peers.
+    /// Also registers to add the track to any new peer connections.
     pub fn create_local_track(&mut self) -> Result<LocalAudioTrack> {
         let track = Arc::new(TrackLocalStaticSample::new(
             RTCRtpCodecCapability {
@@ -101,6 +112,36 @@ impl VoiceChat {
             "syncplay-voice".to_string(),
         ));
         self.local_track = Some(track.clone());
+
+        // Register callback to add this track to any future peer connections
+        let t = track.clone();
+        let voices = self.peer_voices.clone();
+        let ev_tx = self.events_tx.clone();
+        self.conn
+            .on_peer_connection(move |pc: Arc<RTCPeerConnection>, peer_id: String| {
+                let t2 = t.clone();
+                let v2 = voices.clone();
+                let e2 = ev_tx.clone();
+                tokio::spawn(async move {
+                    match pc.add_track(t2).await {
+                        Ok(_) => {
+                            info!("Voice track added to peer connection for {peer_id}");
+                            v2.lock().entry(peer_id.clone()).or_insert(PeerVoice {
+                                muted: false,
+                                speaking: true,
+                                track_id: Some("local".into()),
+                            });
+                            if let Some(tx) = e2.lock().as_ref() {
+                                let _ = tx.send(VoiceEvent::TrackAdded { peer_id });
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to add voice track for {peer_id}: {e}");
+                        }
+                    }
+                });
+            });
+
         Ok(track)
     }
 
@@ -109,7 +150,11 @@ impl VoiceChat {
     }
 
     /// Start mic capture, returns event stream. Uses cpal for cross-platform audio.
+    /// Only call once; subsequent calls return an error.
     pub fn start_capture(&mut self) -> Result<mpsc::UnboundedReceiver<VoiceEvent>> {
+        if self._capture_handle.lock().is_some() {
+            return Err(anyhow::anyhow!("Voice capture already started"));
+        }
         let (tx, rx) = mpsc::unbounded_channel();
         *self.events_tx.lock() = Some(tx.clone());
 
@@ -117,7 +162,10 @@ impl VoiceChat {
         let device = host.default_input_device().context("No microphone found")?;
         info!("Voice input: {}", device.name().unwrap_or_default());
 
-        let track = self.local_track.clone().context("Call create_local_track() first")?;
+        let track = self
+            .local_track
+            .clone()
+            .context("Call create_local_track() first")?;
         let muted = self.muted.clone();
 
         let config = cpal::StreamConfig {
@@ -130,8 +178,11 @@ impl VoiceChat {
         let stream = device.build_input_stream(
             &config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                if muted.load(Ordering::SeqCst) { return; }
-                let pcm: Vec<i16> = data.iter()
+                if muted.load(Ordering::SeqCst) {
+                    return;
+                }
+                let pcm: Vec<i16> = data
+                    .iter()
                     .map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
                     .collect();
                 let sample = webrtc::media::Sample {
@@ -139,7 +190,11 @@ impl VoiceChat {
                     duration: std::time::Duration::from_millis(20),
                     ..Default::default()
                 };
-                let _ = track.write_sample(&sample);
+                // Non-async cpal callback — spawn onto tokio context
+                #[allow(clippy::let_underscore_future)]
+                {
+                    let _ = track.write_sample(&sample);
+                }
             },
             move |err| {
                 error!("Voice capture error: {err}");
@@ -155,12 +210,19 @@ impl VoiceChat {
     }
 
     /// Handle a remote audio track from a peer.
+    /// Handle a remote audio track from a peer.
+    /// TODO: Implement actual audio playback from remote tracks.
     pub fn handle_remote_track(&self, peer_id: &str, _track: Arc<TrackRemote>) {
         let pid = peer_id.to_string();
         info!("Voice track received from {pid}");
-        self.peer_voices.lock().entry(pid.clone()).or_insert(PeerVoice {
-            muted: false, speaking: true, track_id: Some("remote".into()),
-        });
+        self.peer_voices
+            .lock()
+            .entry(pid.clone())
+            .or_insert(PeerVoice {
+                muted: false,
+                speaking: true,
+                track_id: Some("remote".into()),
+            });
         if let Some(tx) = self.events_tx.lock().as_ref() {
             let _ = tx.send(VoiceEvent::TrackAdded { peer_id: pid });
         }
