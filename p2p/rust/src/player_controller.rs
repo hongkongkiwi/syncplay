@@ -5,7 +5,6 @@
 //!
 //! Replaces: mpv.py (771 lines) + vlc.py (546 lines) + playerFactory.py
 
-use std::io::Write;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -54,7 +53,11 @@ pub struct PlayerController {
 
 impl PlayerController {
     pub fn new(player_type: PlayerType) -> Self {
-        Self { player_type, child: None, event_tx: None }
+        Self {
+            player_type,
+            child: None,
+            event_tx: None,
+        }
     }
 
     /// Launch the player with an optional file.
@@ -72,23 +75,27 @@ impl PlayerController {
         match self.player_type {
             PlayerType::Mpv => {
                 cmd.arg(format!("--input-ipc-server={ipc_socket}"))
-                   .arg("--idle=yes")
-                   .arg("--keep-open=yes")
-                   .arg("--no-terminal")
-                   .arg("--really-quiet")
-                   .stdout(Stdio::null())
-                   .stderr(Stdio::null());
+                    .arg("--idle=yes")
+                    .arg("--keep-open=yes")
+                    .arg("--no-terminal")
+                    .arg("--really-quiet")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
                 if let Some(f) = file {
                     cmd.arg(f);
                 }
             }
             PlayerType::Vlc => {
-                cmd.arg("--extraintf=rc")
-                   .arg("--rc-host=127.0.0.1:4212")
-                   .arg("--no-video-title-show")
-                   .arg("--quiet")
-                   .stdout(Stdio::null())
-                   .stderr(Stdio::null());
+                let vlc_port = std::net::TcpListener::bind("127.0.0.1:0")
+                    .ok()
+                    .and_then(|l| l.local_addr().ok())
+                    .map(|a| a.port())
+                    .unwrap_or(4212);
+                cmd.arg(format!("--rc-host=127.0.0.1:{vlc_port}"))
+                    .arg("--no-video-title-show")
+                    .arg("--quiet")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
                 if let Some(f) = file {
                     cmd.arg(f);
                 }
@@ -97,10 +104,14 @@ impl PlayerController {
 
         let child = cmd.spawn().context("Failed to launch player")?;
         self.child = Some(child);
-        info!("Launched {} player (pid: {:?})", match self.player_type {
-            PlayerType::Mpv => "mpv",
-            PlayerType::Vlc => "VLC",
-        }, self.child.as_ref().map(|c| c.id()));
+        info!(
+            "Launched {} player (pid: {:?})",
+            match self.player_type {
+                PlayerType::Mpv => "mpv",
+                PlayerType::Vlc => "VLC",
+            },
+            self.child.as_ref().map(|c| c.id())
+        );
 
         // Wait briefly for socket to be created
         for _ in 0..20 {
@@ -125,20 +136,25 @@ impl PlayerController {
         }
 
         // Spawn child process watcher
-        let mut child = self.child.take().unwrap();
-        let tx3 = tx.clone();
-        tokio::spawn(async move {
-            let status = child.wait();
-            let code = status.ok().and_then(|s| s.code());
-            let _ = tx3.send(PlayerEvent::PlayerExited { code });
-        });
+        if let Some(mut child) = self.child.take() {
+            let tx3 = tx.clone();
+            tokio::spawn(async move {
+                let status = child.wait();
+                let code = status.ok().and_then(|s| s.code());
+                let _ = tx3.send(PlayerEvent::PlayerExited { code });
+            });
+        } else {
+            error!("No child process to watch — launch may have failed");
+            let _ = tx.send(PlayerEvent::Error("player process not started".into()));
+        }
 
         Ok(rx)
     }
 
     /// Write a raw command to the mpv IPC socket.
     pub async fn mpv_command(socket_path: &str, cmd: &Value) -> Result<Value> {
-        let mut stream = UnixStream::connect(socket_path).await
+        let mut stream = UnixStream::connect(socket_path)
+            .await
             .context("connect to mpv socket")?;
 
         let mut msg = serde_json::to_vec(cmd)?;
@@ -235,7 +251,8 @@ async fn mpv_ipc_loop(socket_path: &str, tx: mpsc::UnboundedSender<PlayerEvent>)
         time::sleep(Duration::from_millis(100)).await;
     }
 
-    let stream = UnixStream::connect(socket_path).await
+    let stream = UnixStream::connect(socket_path)
+        .await
         .context("connect to mpv socket")?;
 
     let (reader, _writer) = stream.into_split();
@@ -267,7 +284,9 @@ async fn mpv_ipc_loop(socket_path: &str, tx: mpsc::UnboundedSender<PlayerEvent>)
             Ok(0) => break, // EOF
             Ok(_) => {
                 let trimmed = line.trim();
-                if trimmed.is_empty() { continue; }
+                if trimmed.is_empty() {
+                    continue;
+                }
 
                 match serde_json::from_str::<Value>(trimmed) {
                     Ok(msg) => {
@@ -275,26 +294,32 @@ async fn mpv_ipc_loop(socket_path: &str, tx: mpsc::UnboundedSender<PlayerEvent>)
                         if msg["event"].as_str() == Some("property-change") {
                             let id = msg["id"].as_u64().unwrap_or(0);
                             match id {
-                                1 => { // time-pos
+                                1 => {
+                                    // time-pos
                                     if let Some(pos) = msg["data"].as_f64() {
                                         state.position = pos;
                                     }
                                 }
-                                2 => { // pause
+                                2 => {
+                                    // pause
                                     if let Some(paused) = msg["data"].as_bool() {
                                         state.paused = paused;
                                     }
                                 }
-                                3 => { // duration
+                                3 => {
+                                    // duration
                                     state.duration = msg["data"].as_f64().unwrap_or(0.0);
                                 }
-                                4 => { // filename
+                                4 => {
+                                    // filename
                                     state.filename = msg["data"].as_str().map(|s| s.to_string());
                                 }
-                                5 => { // path
+                                5 => {
+                                    // path
                                     state.filepath = msg["data"].as_str().map(|s| s.to_string());
                                 }
-                                6 => { // speed
+                                6 => {
+                                    // speed
                                     state.speed = msg["data"].as_f64().unwrap_or(1.0);
                                 }
                                 _ => {}

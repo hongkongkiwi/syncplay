@@ -68,28 +68,41 @@ mod tests {
         let e = WireError::UnknownType { type_byte: 0xFF };
         assert!(e.to_string().contains("0xff"));
 
-        let e = WireError::Incomplete { need: 100, have: 50 };
+        let e = WireError::Incomplete {
+            need: 100,
+            have: 50,
+        };
         assert!(e.to_string().contains("100"));
         assert!(e.to_string().contains("50"));
     }
 
     #[test]
     fn test_connection_error_display() {
-        let e = ConnectionError::PeerNotFound { peer_id: "abc".into() };
+        let e = ConnectionError::PeerNotFound {
+            peer_id: "abc".into(),
+        };
         assert!(e.to_string().contains("abc"));
 
-        let e = ConnectionError::Signaling { code: "ERR".into(), message: "bad".into() };
+        let e = ConnectionError::Signaling {
+            code: "ERR".into(),
+            message: "bad".into(),
+        };
         assert!(e.to_string().contains("ERR"));
         assert!(e.to_string().contains("bad"));
     }
 
     #[test]
     fn test_sync_error_display() {
-        let e = SyncError::SendFailed { peer_id: "xyz".into(), reason: "timeout".into() };
+        let e = SyncError::SendFailed {
+            peer_id: "xyz".into(),
+            reason: "timeout".into(),
+        };
         assert!(e.to_string().contains("xyz"));
         assert!(e.to_string().contains("timeout"));
 
-        let e = SyncError::BroadcastFailed { reason: "no peers".into() };
+        let e = SyncError::BroadcastFailed {
+            reason: "no peers".into(),
+        };
         assert!(e.to_string().contains("no peers"));
     }
 

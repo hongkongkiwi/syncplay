@@ -1,7 +1,7 @@
 //! WebRTC Connection Manager — webrtc-rs 0.14
 //!
 //! Manages WebRTC peer connections, signaling, lifecycle callbacks,
-//! and per-peer ICE state tracking. Uses Arc<Inner> pattern for cloneability.
+//! and per-peer ICE state tracking. Uses `Arc<Inner>` pattern for cloneability.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +30,10 @@ use crate::wire;
 
 pub const PROTOCOL_VERSION: &str = "2.0.0";
 const DATA_CHANNEL_LABEL: &str = "syncplay-v2";
-const STUN_FALLBACK: &[&str] = &["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"];
+const STUN_FALLBACK: &[&str] = &[
+    "stun:stun.l.google.com:19302",
+    "stun:stun1.l.google.com:19302",
+];
 
 fn default_ice_conf() -> RTCConfiguration {
     RTCConfiguration {
@@ -99,6 +102,7 @@ impl Peer {
 
 type MsgFn = Box<dyn Fn(MessageType, &[u8], String) + Send + Sync>;
 type PeerFn = Box<dyn Fn(String, String) + Send + Sync>;
+type PcFn = Box<dyn Fn(Arc<RTCPeerConnection>, String) + Send + Sync>;
 
 struct Inner {
     username: String,
@@ -110,6 +114,7 @@ struct Inner {
     on_join: Mutex<Vec<PeerFn>>,
     on_leave: Mutex<Vec<PeerFn>>,
     on_host: Mutex<Vec<PeerFn>>,
+    on_pc: Mutex<Vec<PcFn>>,
     signal_tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
 }
 
@@ -118,9 +123,11 @@ pub struct ConnectionManager(Arc<Inner>);
 
 impl ConnectionManager {
     pub fn new(username: &str, features: Vec<String>) -> Self {
-        let mut cfg = P2pConfig::default();
-        cfg.username = username.into();
-        cfg.features = features;
+        let cfg = P2pConfig {
+            username: username.into(),
+            features,
+            ..Default::default()
+        };
         Self(Arc::new(Inner {
             username: username.into(),
             config: Mutex::new(Some(cfg)),
@@ -131,11 +138,12 @@ impl ConnectionManager {
             on_join: Mutex::new(Vec::new()),
             on_leave: Mutex::new(Vec::new()),
             on_host: Mutex::new(Vec::new()),
+            on_pc: Mutex::new(Vec::new()),
             signal_tx: Mutex::new(None),
         }))
     }
 
-    pub fn with_config(username: &str, features: Vec<String>, cfg: P2pConfig) -> Self {
+    pub fn with_config(username: &str, _features: Vec<String>, cfg: P2pConfig) -> Self {
         Self(Arc::new(Inner {
             username: username.into(),
             config: Mutex::new(Some(cfg)),
@@ -146,6 +154,7 @@ impl ConnectionManager {
             on_join: Mutex::new(Vec::new()),
             on_leave: Mutex::new(Vec::new()),
             on_host: Mutex::new(Vec::new()),
+            on_pc: Mutex::new(Vec::new()),
             signal_tx: Mutex::new(None),
         }))
     }
@@ -159,15 +168,23 @@ impl ConnectionManager {
     }
 
     // ── Identity ──────────────────────────────────────────────────
-    pub fn pid(&self) -> String { self.0.peer_id.lock().clone() }
-    pub fn hid(&self) -> String { self.0.host_id.lock().clone() }
+    pub fn pid(&self) -> String {
+        self.0.peer_id.lock().clone()
+    }
+    pub fn hid(&self) -> String {
+        self.0.host_id.lock().clone()
+    }
     pub fn is_host(&self) -> bool {
         let pid = self.pid();
         !pid.is_empty() && pid == self.hid()
     }
-    pub fn uname(&self) -> String { self.0.username.clone() }
+    pub fn uname(&self) -> String {
+        self.0.username.clone()
+    }
 
-    pub fn pcount(&self) -> usize { self.0.peers.len() }
+    pub fn pcount(&self) -> usize {
+        self.0.peers.len()
+    }
 
     pub fn set_id(&self, pid: &str, hid: &str) {
         *self.0.peer_id.lock() = pid.into();
@@ -189,13 +206,18 @@ impl ConnectionManager {
     }
 
     pub fn set_host(&self, new_id: &str, reason: &str) {
-        let old = self.0.host_id.lock().clone();
-        if old != new_id {
-            info!("Host: {old} → {new_id} ({reason})");
-            *self.0.host_id.lock() = new_id.to_string();
-            for f in self.0.on_host.lock().iter() {
-                f(new_id.to_string(), reason.to_string());
+        // Hold host_id lock for read+write atomically
+        {
+            let mut host = self.0.host_id.lock();
+            if *host == new_id {
+                return;
             }
+            *host = new_id.to_string();
+        }
+        info!("Host changed to {new_id} ({reason})");
+        // Fire callbacks outside the host_id lock
+        for f in self.0.on_host.lock().iter() {
+            f(new_id.to_string(), reason.to_string());
         }
     }
 
@@ -209,8 +231,16 @@ impl ConnectionManager {
     pub fn on_host<F: Fn(String, String) + Send + Sync + 'static>(&self, f: F) {
         self.0.on_host.lock().push(Box::new(f));
     }
+    pub fn on_peer_connection<F: Fn(Arc<RTCPeerConnection>, String) + Send + Sync + 'static>(
+        &self,
+        f: F,
+    ) {
+        self.0.on_pc.lock().push(Box::new(f));
+    }
     pub fn on_msg<F: Fn(MessageType, &[u8], String) + Send + Sync + 'static>(
-        &self, mt: MessageType, f: F,
+        &self,
+        mt: MessageType,
+        f: F,
     ) {
         self.0.handlers.lock().push((mt, Box::new(f)));
     }
@@ -225,11 +255,17 @@ impl ConnectionManager {
             f(pid.to_string(), reason.to_string());
         }
     }
+    fn fire_pc(&self, pc: Arc<RTCPeerConnection>, pid: &str) {
+        for f in self.0.on_pc.lock().iter() {
+            f(pc.clone(), pid.to_string());
+        }
+    }
 
     // ── Signaling ─────────────────────────────────────────────────
 
     pub async fn connect(&self, url: &str, room: &str, password: &str) -> Result<()> {
-        self._signaling_handshake(url, room, password, "create").await
+        self._signaling_handshake(url, room, password, "create")
+            .await
     }
 
     pub async fn join(&self, url: &str, room: &str, password: &str) -> Result<()> {
@@ -237,19 +273,28 @@ impl ConnectionManager {
     }
 
     /// Connect with reconnect support.
-    pub async fn connect_with_retry(
-        &self, url: &str, room: &str, password: &str,
-    ) -> Result<()> {
-        let max_retries = self.0.config.lock().as_ref()
+    pub async fn connect_with_retry(&self, url: &str, room: &str, password: &str) -> Result<()> {
+        let max_retries = self
+            .0
+            .config
+            .lock()
+            .as_ref()
             .map(|c| c.network.max_reconnect_attempts)
             .unwrap_or(5);
-        let delay = self.0.config.lock().as_ref()
+        let delay = self
+            .0
+            .config
+            .lock()
+            .as_ref()
             .map(|c| Duration::from_secs(c.network.reconnect_delay_secs))
             .unwrap_or(Duration::from_secs(5));
 
         let mut attempts = 0;
         loop {
-            match self._signaling_handshake(url, room, password, "create").await {
+            match self
+                ._signaling_handshake(url, room, password, "create")
+                .await
+            {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     attempts += 1;
@@ -264,7 +309,11 @@ impl ConnectionManager {
     }
 
     async fn _signaling_handshake(
-        &self, url: &str, room: &str, password: &str, kind: &str,
+        &self,
+        url: &str,
+        room: &str,
+        password: &str,
+        kind: &str,
     ) -> Result<()> {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -277,12 +326,13 @@ impl ConnectionManager {
             "username": self.uname(), "features": self.0.config.lock().as_ref()
                 .map(|c| c.features.clone()).unwrap_or_default(),
         });
-        write.send(Message::Text(msg.to_string().into())).await
+        write
+            .send(Message::Text(msg.to_string().into()))
+            .await
             .context("send handshake")?;
 
         if let Some(Ok(Message::Text(text))) = read.next().await {
-            let resp: serde_json::Value = serde_json::from_str(&text)
-                .context("parse response")?;
+            let resp: serde_json::Value = serde_json::from_str(&text).context("parse response")?;
             if resp["type"] == "error" {
                 let code = resp["code"].as_str().unwrap_or("unknown");
                 let message = resp["message"].as_str().unwrap_or("unknown error");
@@ -375,12 +425,19 @@ impl ConnectionManager {
                     "offer" => self.on_offer(from, sdp).await,
                     "answer" => self.on_answer(from, sdp).await,
                     "ice-candidate" => self.on_ice(from, cand, mid, mline).await,
-                    other => { warn!("Unknown signal kind: {other}"); Ok(()) }
+                    other => {
+                        warn!("Unknown signal kind: {other}");
+                        Ok(())
+                    }
                 };
-                if let Err(e) = result { warn!("Signal {kind} from {from} failed: {e}"); }
+                if let Err(e) = result {
+                    warn!("Signal {kind} from {from} failed: {e}");
+                }
             }
             unknown => {
-                if !unknown.is_empty() { debug!("Unknown server msg: {unknown}"); }
+                if !unknown.is_empty() {
+                    debug!("Unknown server msg: {unknown}");
+                }
             }
         }
         Ok(())
@@ -388,7 +445,9 @@ impl ConnectionManager {
 
     pub async fn disconnect(&self) {
         // Send PeerDisconnect to all peers
-        let p = crate::messages::PeerDisconnectPayload { reason: "leaving".into() };
+        let p = crate::messages::PeerDisconnectPayload {
+            reason: "leaving".into(),
+        };
         if let Ok(data) = wire::encode(&p) {
             self.send_all(&data, None).await;
         }
@@ -413,7 +472,13 @@ impl ConnectionManager {
     }
 
     pub async fn send_one(&self, id: &str, data: &Bytes) -> Result<()> {
-        self.0.peers.get(id).with_context(|| format!("no peer {id}"))?.send(data).await.map(|_| ())
+        self.0
+            .peers
+            .get(id)
+            .with_context(|| format!("no peer {id}"))?
+            .send(data)
+            .await
+            .map(|_| ())
     }
 
     pub async fn bcast<T: wire::MessagePayload>(&self, p: &T, skip: Option<&str>) {
@@ -424,23 +489,36 @@ impl ConnectionManager {
     }
 
     async fn _send_userinfo(&self) {
-        let features = self.0.config.lock().as_ref()
-            .map(|c| c.features.clone()).unwrap_or_default();
+        let features = self
+            .0
+            .config
+            .lock()
+            .as_ref()
+            .map(|c| c.features.clone())
+            .unwrap_or_default();
         let p = crate::messages::UserInfoPayload {
             username: self.uname(),
             features,
         };
-        self.send_all(&wire::encode(&p).unwrap_or_default(), None).await;
+        match wire::encode(&p) {
+            Ok(data) => self.send_all(&data, None).await,
+            Err(e) => error!("Failed to encode UserInfo: {e}"),
+        }
     }
 
     async fn _send_hello(&self, target: &str) {
-        let features = self.0.config.lock().as_ref()
-            .map(|c| c.features.clone()).unwrap_or_default();
-        let p = crate::messages::HelloPayload::new(
-            &self.uname(), PROTOCOL_VERSION, features,
-        );
+        let features = self
+            .0
+            .config
+            .lock()
+            .as_ref()
+            .map(|c| c.features.clone())
+            .unwrap_or_default();
+        let p = crate::messages::HelloPayload::new(&self.uname(), PROTOCOL_VERSION, features);
         if let Ok(data) = wire::encode(&p) {
-            let _ = self.send_one(target, &data).await;
+            if let Err(e) = self.send_one(target, &data).await {
+                warn!("Hello to {target} failed: {e}");
+            }
         }
     }
 
@@ -494,11 +572,14 @@ impl ConnectionManager {
         pc.on_ice_candidate(Box::new(move |c| {
             if let Some(c) = c {
                 if let Ok(init) = c.to_json() {
-                    cm.sig(&serde_json::json!({
-                        "type":"signal","target":&p,
-                        "payload":{"kind":"ice-candidate","candidate":init.candidate,
-                                   "sdpMid":init.sdp_mid,"sdpMLineIndex":init.sdp_mline_index}
-                    }).to_string());
+                    cm.sig(
+                        &serde_json::json!({
+                            "type":"signal","target":&p,
+                            "payload":{"kind":"ice-candidate","candidate":init.candidate,
+                                       "sdpMid":init.sdp_mid,"sdpMLineIndex":init.sdp_mline_index}
+                        })
+                        .to_string(),
+                    );
                 }
             }
             Box::pin(async {})
@@ -516,10 +597,12 @@ impl ConnectionManager {
         let cm3 = self.clone();
         let p3 = pid_str.to_string();
         pc.on_peer_connection_state_change(Box::new(move |st| {
-            if matches!(st, RTCPeerConnectionState::Failed
-                | RTCPeerConnectionState::Disconnected
-                | RTCPeerConnectionState::Closed)
-            {
+            if matches!(
+                st,
+                RTCPeerConnectionState::Failed
+                    | RTCPeerConnectionState::Disconnected
+                    | RTCPeerConnectionState::Closed
+            ) {
                 cm3._remove(&p3, &format!("{st:?}"));
             }
             Box::pin(async {})
@@ -527,13 +610,19 @@ impl ConnectionManager {
 
         let offer = pc.create_offer(None).await?;
         pc.set_local_description(offer.clone()).await?;
-        self.sig(&serde_json::json!({
-            "type":"signal","target":pid_str,
-            "payload":{"kind":"offer","sdp":offer.sdp}
-        }).to_string());
+        self.sig(
+            &serde_json::json!({
+                "type":"signal","target":pid_str,
+                "payload":{"kind":"offer","sdp":offer.sdp}
+            })
+            .to_string(),
+        );
 
         // Send Hello to the new peer
         self._send_hello(pid_str).await;
+
+        // Notify voice chat about the new peer connection
+        self.fire_pc(pc, pid_str);
         Ok(())
     }
 
@@ -573,11 +662,14 @@ impl ConnectionManager {
         pc.on_ice_candidate(Box::new(move |c| {
             if let Some(c) = c {
                 if let Ok(init) = c.to_json() {
-                    cm.sig(&serde_json::json!({
-                        "type":"signal","target":&f,
-                        "payload":{"kind":"ice-candidate","candidate":init.candidate,
-                                   "sdpMid":init.sdp_mid,"sdpMLineIndex":init.sdp_mline_index}
-                    }).to_string());
+                    cm.sig(
+                        &serde_json::json!({
+                            "type":"signal","target":&f,
+                            "payload":{"kind":"ice-candidate","candidate":init.candidate,
+                                       "sdpMid":init.sdp_mid,"sdpMLineIndex":init.sdp_mline_index}
+                        })
+                        .to_string(),
+                    );
                 }
             }
             Box::pin(async {})
@@ -595,13 +687,16 @@ impl ConnectionManager {
             }
             let cm3 = cm2.clone();
             let f3 = f2.clone();
-            cm3.0.peers.insert(f3.clone(), Peer {
-                peer_id: f3.clone(),
-                username: "unknown".to_string(),
-                dc: dc.clone(),
-                pc: pc2.clone(),
-                ice_state: is2.clone(),
-            });
+            cm3.0.peers.insert(
+                f3.clone(),
+                Peer {
+                    peer_id: f3.clone(),
+                    username: "unknown".to_string(),
+                    dc: dc.clone(),
+                    pc: pc2.clone(),
+                    ice_state: is2.clone(),
+                },
+            );
             dc.on_message(Box::new(move |msg| {
                 cm3._dispatch(&msg.data, &f3);
                 Box::pin(async {})
@@ -613,10 +708,12 @@ impl ConnectionManager {
         let cm4 = self.clone();
         let f4 = from.to_string();
         pc.on_peer_connection_state_change(Box::new(move |st| {
-            if matches!(st, RTCPeerConnectionState::Failed
-                | RTCPeerConnectionState::Disconnected
-                | RTCPeerConnectionState::Closed)
-            {
+            if matches!(
+                st,
+                RTCPeerConnectionState::Failed
+                    | RTCPeerConnectionState::Disconnected
+                    | RTCPeerConnectionState::Closed
+            ) {
                 cm4._remove(&f4, &format!("{st:?}"));
             }
             Box::pin(async {})
@@ -626,20 +723,28 @@ impl ConnectionManager {
         pc.set_remote_description(offer).await?;
         let answer = pc.create_answer(None).await?;
         pc.set_local_description(answer.clone()).await?;
-        self.sig(&serde_json::json!({
-            "type":"signal","target":from,
-            "payload":{"kind":"answer","sdp":answer.sdp}
-        }).to_string());
+        self.sig(
+            &serde_json::json!({
+                "type":"signal","target":from,
+                "payload":{"kind":"answer","sdp":answer.sdp}
+            })
+            .to_string(),
+        );
 
         // Send Hello back
         self._send_hello(from).await;
+
+        // Notify voice chat about the new peer connection
+        self.fire_pc(pc, from);
+
         Ok(())
     }
 
     pub async fn on_answer(&self, from: &str, sdp: &str) -> Result<()> {
         if let Some(p) = self.0.peers.get(from) {
             p.pc.set_remote_description(RTCSessionDescription::answer(sdp.to_string())?)
-                .await.context("set remote answer")?;
+                .await
+                .context("set remote answer")?;
         } else {
             warn!("Answer from unknown peer {from}");
         }
@@ -650,10 +755,16 @@ impl ConnectionManager {
         if let Some(p) = self.0.peers.get(from) {
             p.pc.add_ice_candidate(RTCIceCandidateInit {
                 candidate: cand.into(),
-                sdp_mid: if mid.is_empty() { None } else { Some(mid.into()) },
+                sdp_mid: if mid.is_empty() {
+                    None
+                } else {
+                    Some(mid.into())
+                },
                 sdp_mline_index: Some(mline),
                 username_fragment: None,
-            }).await.context("add ice candidate")?;
+            })
+            .await
+            .context("add ice candidate")?;
         } else {
             warn!("ICE candidate from unknown peer {from}");
         }
@@ -668,7 +779,9 @@ impl ConnectionManager {
                 debug!("← {mt:?} from {from}");
                 let payload = &data[8..frame_len];
                 for (hmt, h) in self.0.handlers.lock().iter() {
-                    if *hmt == mt { h(mt, payload, from.to_string()); }
+                    if *hmt == mt {
+                        h(mt, payload, from.to_string());
+                    }
                 }
             }
             Err(e) => warn!("Invalid message from {from}: {e} ({} bytes)", data.len()),
@@ -693,17 +806,32 @@ impl ConnectionManager {
         self.0.peers.iter().map(|e| e.key().clone()).collect()
     }
 
-    pub fn has(&self, id: &str) -> bool { self.0.peers.contains_key(id) }
+    pub fn has(&self, id: &str) -> bool {
+        self.0.peers.contains_key(id)
+    }
 
     pub fn get_ice_state(&self, id: &str) -> IceState {
-        self.0.peers.get(id).map(|p| *p.ice_state.lock()).unwrap_or(IceState::Closed)
+        self.0
+            .peers
+            .get(id)
+            .map(|p| *p.ice_state.lock())
+            .unwrap_or(IceState::Closed)
     }
 
     pub fn peer_stats(&self) -> Vec<(String, String, IceState, String)> {
-        self.0.peers.iter().map(|e| {
-            let state = *e.ice_state.lock();
-            (e.key().clone(), e.username.clone(), state, state.to_string())
-        }).collect()
+        self.0
+            .peers
+            .iter()
+            .map(|e| {
+                let state = *e.ice_state.lock();
+                (
+                    e.key().clone(),
+                    e.username.clone(),
+                    state,
+                    state.to_string(),
+                )
+            })
+            .collect()
     }
 }
 
@@ -756,10 +884,17 @@ mod tests {
         let cm = ConnectionManager::new("alice", vec![]);
         let c1 = Arc::new(AtomicBool::new(false));
         let c2 = Arc::new(AtomicBool::new(false));
-        let a = c1.clone(); let b = c2.clone();
-        cm.on_join(move |_, _| { a.store(true, Ordering::SeqCst); });
-        cm.on_join(move |_, _| { b.store(true, Ordering::SeqCst); });
-        for f in cm.0.on_join.lock().iter() { f("x".into(), "y".into()); }
+        let a = c1.clone();
+        let b = c2.clone();
+        cm.on_join(move |_, _| {
+            a.store(true, Ordering::SeqCst);
+        });
+        cm.on_join(move |_, _| {
+            b.store(true, Ordering::SeqCst);
+        });
+        for f in cm.0.on_join.lock().iter() {
+            f("x".into(), "y".into());
+        }
         assert!(c1.load(Ordering::SeqCst));
         assert!(c2.load(Ordering::SeqCst));
     }
@@ -773,7 +908,10 @@ mod tests {
 
     #[test]
     fn test_get_ice_state_unknown() {
-        assert_eq!(ConnectionManager::new("a", vec![]).get_ice_state("x"), IceState::Closed);
+        assert_eq!(
+            ConnectionManager::new("a", vec![]).get_ice_state("x"),
+            IceState::Closed
+        );
     }
 
     #[test]

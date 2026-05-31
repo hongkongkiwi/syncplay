@@ -5,30 +5,99 @@
 
 use syncplay_p2p::config::P2pConfig;
 use syncplay_p2p::messages::*;
-use syncplay_p2p::player::detect_players;
 use syncplay_p2p::player::default_player;
+use syncplay_p2p::player::detect_players;
 use syncplay_p2p::wire;
 
 #[test]
 fn e2e_wire_all_message_types_roundtrip() {
     // Encode every message type, decode, verify
     let messages: Vec<(MessageType, Vec<u8>)> = vec![
-        (MessageType::Hello, wire::encode(&HelloPayload::new("alice", "2.0", vec!["chat".into()])).unwrap().to_vec()),
-        (MessageType::Playstate, wire::encode(&PlaystatePayload::new(42.0, false, true, "host", 1)).unwrap().to_vec()),
-        (MessageType::PlaystateRequest, wire::encode(&PlaystateRequestPayload::seek(100.0)).unwrap().to_vec()),
-        (MessageType::Chat, wire::encode(&ChatPayload::new("bob", "hi")).unwrap().to_vec()),
-        (MessageType::Readiness, wire::encode(&ReadinessPayload::new("alice", true, true, "alice")).unwrap().to_vec()),
-        (MessageType::PlaylistChange, wire::encode(&PlaylistChangePayload { files: vec![], index: 0, set_by: "host".into() }).unwrap().to_vec()),
-        (MessageType::LatencyPing, wire::encode(&LatencyPingPayload { send_time: 1000 }).unwrap().to_vec()),
-        (MessageType::LatencyPong, wire::encode(&LatencyPongPayload { send_time: 1000, receive_time: 1050 }).unwrap().to_vec()),
-        (MessageType::HostElected, wire::encode(&HostElectedPayload { host_id: "peer-2".into(), reason: "left".into() }).unwrap().to_vec()),
-        (MessageType::PeerDisconnect, wire::encode(&PeerDisconnectPayload { reason: "goodbye".into() }).unwrap().to_vec()),
+        (
+            MessageType::Hello,
+            wire::encode(&HelloPayload::new("alice", "2.0", vec!["chat".into()]))
+                .unwrap()
+                .to_vec(),
+        ),
+        (
+            MessageType::Playstate,
+            wire::encode(&PlaystatePayload::new(42.0, false, true, "host", 1))
+                .unwrap()
+                .to_vec(),
+        ),
+        (
+            MessageType::PlaystateRequest,
+            wire::encode(&PlaystateRequestPayload::seek(100.0))
+                .unwrap()
+                .to_vec(),
+        ),
+        (
+            MessageType::Chat,
+            wire::encode(&ChatPayload::new("bob", "hi"))
+                .unwrap()
+                .to_vec(),
+        ),
+        (
+            MessageType::Readiness,
+            wire::encode(&ReadinessPayload::new("alice", true, true, "alice"))
+                .unwrap()
+                .to_vec(),
+        ),
+        (
+            MessageType::PlaylistChange,
+            wire::encode(&PlaylistChangePayload {
+                files: vec![],
+                index: 0,
+                set_by: "host".into(),
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+        (
+            MessageType::LatencyPing,
+            wire::encode(&LatencyPingPayload { send_time: 1000 })
+                .unwrap()
+                .to_vec(),
+        ),
+        (
+            MessageType::LatencyPong,
+            wire::encode(&LatencyPongPayload {
+                send_time: 1000,
+                receive_time: 1050,
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+        (
+            MessageType::HostElected,
+            wire::encode(&HostElectedPayload {
+                host_id: "peer-2".into(),
+                reason: "left".into(),
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+        (
+            MessageType::PeerDisconnect,
+            wire::encode(&PeerDisconnectPayload {
+                reason: "goodbye".into(),
+            })
+            .unwrap()
+            .to_vec(),
+        ),
     ];
 
     for (expected_type, bytes) in &messages {
         let (decoded_type, frame_len) = wire::decode_header(bytes).unwrap();
-        assert_eq!(decoded_type, *expected_type, "wrong type for {expected_type:?}");
-        assert_eq!(frame_len, bytes.len(), "wrong frame len for {expected_type:?}");
+        assert_eq!(
+            decoded_type, *expected_type,
+            "wrong type for {expected_type:?}"
+        );
+        assert_eq!(
+            frame_len,
+            bytes.len(),
+            "wrong frame len for {expected_type:?}"
+        );
     }
 }
 
@@ -53,16 +122,28 @@ fn e2e_multiple_frames_in_stream() {
         offset += frame_len;
     }
 
-    assert_eq!(types_seen, vec![MessageType::Hello, MessageType::Playstate, MessageType::Chat]);
+    assert_eq!(
+        types_seen,
+        vec![
+            MessageType::Hello,
+            MessageType::Playstate,
+            MessageType::Chat
+        ]
+    );
     assert_eq!(offset, stream.len());
 }
 
 #[test]
 fn e2e_config_pipeline() {
     // Test full config pipeline: defaults → serialize → deserialize → verify
-    let mut cfg = P2pConfig::default();
-    cfg.room = "test-room".into();
-    cfg.network.turn_servers = vec!["turn:user:pass@turn.example.com:3478".into()];
+    let cfg = P2pConfig {
+        room: "test-room".into(),
+        network: syncplay_p2p::config::NetworkConfig {
+            turn_servers: vec!["turn:user:pass@turn.example.com:3478".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
 
     let json = serde_json::to_string_pretty(&cfg).unwrap();
     let parsed: P2pConfig = serde_json::from_str(&json).unwrap();
@@ -90,11 +171,20 @@ fn e2e_player_detection_runs() {
 #[test]
 fn e2e_message_size_limits() {
     // Verify message packing stays within reasonable size
-    let hello = wire::encode(&HelloPayload::new("alice", "2.0", vec!["chat".into(), "readiness".into()])).unwrap();
+    let hello = wire::encode(&HelloPayload::new(
+        "alice",
+        "2.0",
+        vec!["chat".into(), "readiness".into()],
+    ))
+    .unwrap();
     assert!(hello.len() < 512, "hello frame too large: {}", hello.len());
 
     let big_chat = wire::encode(&ChatPayload::new("bob", &"x".repeat(2000))).unwrap();
-    assert!(big_chat.len() < 4096, "chat frame too large: {}", big_chat.len());
+    assert!(
+        big_chat.len() < 4096,
+        "chat frame too large: {}",
+        big_chat.len()
+    );
 
     let ps = wire::encode(&PlaystatePayload::new(0.0, true, false, "host", 1)).unwrap();
     assert!(ps.len() < 256, "playstate frame too large: {}", ps.len());
@@ -170,15 +260,15 @@ fn e2e_signaling_message_formats() {
 #[test]
 fn e2e_feature_negotiation() {
     // Verify feature sets can be compared for compatibility
-    let host_features = vec!["chat", "readiness", "playlist"];
-    let peer_features = vec!["chat", "readiness"];
+    let host_features: &[&str] = &["chat", "readiness", "playlist"];
+    let peer_features: &[&str] = &["chat", "readiness"];
 
-    let host_has_chat = host_features.contains(&"chat".to_string());
-    let peer_has_chat = peer_features.contains(&"chat".to_string());
+    let host_has_chat = host_features.contains(&"chat");
+    let peer_has_chat = peer_features.contains(&"chat");
     assert!(host_has_chat && peer_has_chat); // compatible
 
-    let host_has_playlist = host_features.contains(&"playlist".to_string());
-    let peer_has_playlist = peer_features.contains(&"playlist".to_string());
+    let host_has_playlist = host_features.contains(&"playlist");
+    let peer_has_playlist = peer_features.contains(&"playlist");
     assert!(host_has_playlist && !peer_has_playlist); // playlist not in peer
 }
 
