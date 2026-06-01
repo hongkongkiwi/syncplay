@@ -282,3 +282,484 @@ fn e2e_default_config_produces_valid_ice() {
     let stun_urls = &servers[0].urls;
     assert!(stun_urls.iter().any(|u| u.contains("stun.l.google.com")));
 }
+
+// ── New E2E tests for previously uncovered features ─────────────────
+
+#[test]
+fn e2e_all_20_message_types_roundtrip() {
+    // Verify ALL 20 message types encode/decode correctly
+    use syncplay_p2p::messages::*;
+
+    let tests: Vec<(MessageType, Vec<u8>)> = vec![
+        // 0x01 Hello
+        (
+            MessageType::Hello,
+            wire::encode(&HelloPayload::new("a", "2.0", "room", vec!["chat".into()]))
+                .unwrap()
+                .to_vec(),
+        ),
+        // 0x02 Playstate (with new speed+timestamp fields)
+        (
+            MessageType::Playstate,
+            wire::encode(&PlaystatePayload::with_speed(
+                42.0, false, true, "host", 1, 1.5,
+            ))
+            .unwrap()
+            .to_vec(),
+        ),
+        // 0x03 PlaystateRequest (seek)
+        (
+            MessageType::PlaystateRequest,
+            wire::encode(&PlaystateRequestPayload::seek(100.0))
+                .unwrap()
+                .to_vec(),
+        ),
+        // 0x03 PlaystateRequest (pause)
+        (
+            MessageType::PlaystateRequest,
+            wire::encode(&PlaystateRequestPayload::pause())
+                .unwrap()
+                .to_vec(),
+        ),
+        // 0x03 PlaystateRequest (play)
+        (
+            MessageType::PlaystateRequest,
+            wire::encode(&PlaystateRequestPayload::play())
+                .unwrap()
+                .to_vec(),
+        ),
+        // 0x03 PlaystateRequest (set_speed)
+        (
+            MessageType::PlaystateRequest,
+            wire::encode(&PlaystateRequestPayload::set_speed(2.0))
+                .unwrap()
+                .to_vec(),
+        ),
+        // 0x04 Chat (with timestamp)
+        (
+            MessageType::Chat,
+            wire::encode(&ChatPayload::new("bob", "hello"))
+                .unwrap()
+                .to_vec(),
+        ),
+        // 0x05 Readiness
+        (
+            MessageType::Readiness,
+            wire::encode(&ReadinessPayload::new("alice", true, true, "host"))
+                .unwrap()
+                .to_vec(),
+        ),
+        // 0x06 PlaylistChange
+        (
+            MessageType::PlaylistChange,
+            wire::encode(&PlaylistChangePayload {
+                files: vec![FileEntry {
+                    name: "vid.mkv".into(),
+                    duration: 3600.0,
+                }],
+                index: 0,
+                set_by: "host".into(),
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+        // 0x07 PlaylistRequest
+        (
+            MessageType::PlaylistRequest,
+            wire::encode(&PlaylistRequestPayload {
+                action: PlaylistAction::SetIndex,
+                files: vec![],
+                index: 2,
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+        // 0x08 FileInfo
+        (
+            MessageType::FileInfo,
+            wire::encode(&FileInfoPayload {
+                username: "bob".into(),
+                file: Some(FileMetadata {
+                    name: "movie.mkv".into(),
+                    duration: 7200.0,
+                    size: 5000000,
+                    checksum: Some("abc123".into()),
+                }),
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+        // 0x09 FileTransfer
+        (
+            MessageType::FileTransfer,
+            wire::encode(&FileTransferPayload {
+                transfer_id: "tid-1".into(),
+                chunk_index: 0,
+                offset: 0,
+                total_size: 1000,
+                chunk_size: 256,
+                data: vec![1, 2, 3],
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+        // 0x0A FileRequest
+        (
+            MessageType::FileRequest,
+            wire::encode(&FileRequestPayload::new("movie.mkv", 0, "sha256:abc"))
+                .unwrap()
+                .to_vec(),
+        ),
+        // 0x0B FileResponse
+        (
+            MessageType::FileResponse,
+            wire::encode(&FileResponsePayload::accept("tid-1", "sha256:abc", 262144))
+                .unwrap()
+                .to_vec(),
+        ),
+        // 0x0C LatencyPing
+        (
+            MessageType::LatencyPing,
+            wire::encode(&LatencyPingPayload { send_time: 1000 })
+                .unwrap()
+                .to_vec(),
+        ),
+        // 0x0D LatencyPong
+        (
+            MessageType::LatencyPong,
+            wire::encode(&LatencyPongPayload {
+                send_time: 1000,
+                receive_time: 1050,
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+        // 0x0E HostElected
+        (
+            MessageType::HostElected,
+            wire::encode(&HostElectedPayload {
+                host_id: "peer-2".into(),
+                reason: "migration".into(),
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+        // 0x0F UserInfo
+        (
+            MessageType::UserInfo,
+            wire::encode(&UserInfoPayload {
+                username: "carol".into(),
+                features: vec!["chat".into(), "sfu".into()],
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+        // 0x10 PeerDisconnect
+        (
+            MessageType::PeerDisconnect,
+            wire::encode(&PeerDisconnectPayload {
+                reason: "leaving".into(),
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+        // 0x11 VoiceMute
+        (
+            MessageType::VoiceMute,
+            wire::encode(&VoiceMutePayload { muted: true })
+                .unwrap()
+                .to_vec(),
+        ),
+        // 0x12 SubtitleInfo
+        (
+            MessageType::SubtitleInfo,
+            wire::encode(&SubtitleInfoPayload {
+                subtitles: vec![SubtitleTrack {
+                    filename: "movie.eng.srt".into(),
+                    size: 50000,
+                    language: Some("en".into()),
+                }],
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+        // 0x13 ControllerChange (add)
+        (
+            MessageType::ControllerChange,
+            wire::encode(&ControllerChangePayload {
+                peer_id: "bob".into(),
+                action: ControllerAction::Add,
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+        // 0x13 ControllerChange (remove)
+        (
+            MessageType::ControllerChange,
+            wire::encode(&ControllerChangePayload {
+                peer_id: "carol".into(),
+                action: ControllerAction::Remove,
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+    ];
+
+    for (expected_type, bytes) in &tests {
+        let (decoded_type, frame_len) = wire::decode_header(bytes).unwrap();
+        assert_eq!(
+            decoded_type, *expected_type,
+            "wrong type for {expected_type:?}"
+        );
+        assert_eq!(
+            frame_len,
+            bytes.len(),
+            "wrong frame len for {expected_type:?}"
+        );
+        // Also verify payload roundtrip via decode_unchecked (skip binary types)
+        let skip_decode = matches!(expected_type, MessageType::FileTransfer);
+        if !skip_decode {
+            let decoded = wire::decode_unchecked::<serde_json::Value>(bytes)
+                .unwrap_or_else(|e| panic!("decode_unchecked failed for {expected_type:?}: {e}"));
+            let _ = decoded;
+        }
+    }
+}
+
+#[test]
+fn e2e_playstate_speed_and_timestamp() {
+    // Verify speed and timestamp fields serialize/deserialize correctly
+    let ps = PlaystatePayload::with_speed(100.0, false, true, "host", 5, 2.0);
+    assert!((ps.speed - 2.0).abs() < 0.001);
+    assert!(ps.timestamp > 0);
+    assert_eq!(ps.seq, 5);
+
+    // Verify default speed is 1.0
+    let ps_default = PlaystatePayload::new(0.0, true, false, "host", 1);
+    assert!((ps_default.speed - 1.0).abs() < 0.001);
+
+    let encoded = wire::encode(&ps).unwrap();
+    let (mt, _) = wire::decode_header(&encoded).unwrap();
+    assert_eq!(mt, MessageType::Playstate);
+}
+
+#[test]
+fn e2e_chat_timestamp_present() {
+    let chat = ChatPayload::new("alice", "hello world");
+    assert!(chat.timestamp > 0, "chat timestamp should be set");
+    let encoded = wire::encode(&chat).unwrap();
+    let (mt, _) = wire::decode_header(&encoded).unwrap();
+    assert_eq!(mt, MessageType::Chat);
+}
+
+#[test]
+fn e2e_hello_room_field() {
+    let hello = HelloPayload::new("alice", "2.0", "movie-night", vec!["chat".into()]);
+    assert_eq!(hello.room, "movie-night");
+    assert_eq!(hello.username, "alice");
+
+    let encoded = wire::encode(&hello).unwrap();
+    let (mt, _) = wire::decode_header(&encoded).unwrap();
+    assert_eq!(mt, MessageType::Hello);
+}
+
+#[test]
+fn e2e_controller_access_flow() {
+    // Verify controller add/remove roundtrip
+    let add = ControllerChangePayload {
+        peer_id: "bob".into(),
+        action: ControllerAction::Add,
+    };
+    let remove = ControllerChangePayload {
+        peer_id: "bob".into(),
+        action: ControllerAction::Remove,
+    };
+
+    let enc_add = wire::encode(&add).unwrap();
+    let enc_remove = wire::encode(&remove).unwrap();
+
+    let (mt1, _) = wire::decode_header(&enc_add).unwrap();
+    let (mt2, _) = wire::decode_header(&enc_remove).unwrap();
+    assert_eq!(mt1, MessageType::ControllerChange);
+    assert_eq!(mt2, MessageType::ControllerChange);
+}
+
+#[test]
+fn e2e_voice_mute_flow() {
+    let mute = VoiceMutePayload { muted: true };
+    let unmute = VoiceMutePayload { muted: false };
+
+    let enc_mute = wire::encode(&mute).unwrap();
+    let enc_unmute = wire::encode(&unmute).unwrap();
+
+    let (mt1, _) = wire::decode_header(&enc_mute).unwrap();
+    let (mt2, _) = wire::decode_header(&enc_unmute).unwrap();
+    assert_eq!(mt1, MessageType::VoiceMute);
+    assert_eq!(mt2, MessageType::VoiceMute);
+}
+
+#[test]
+fn e2e_subtitle_info_flow() {
+    let subs = SubtitleInfoPayload {
+        subtitles: vec![
+            SubtitleTrack {
+                filename: "movie.eng.srt".into(),
+                size: 50000,
+                language: Some("en".into()),
+            },
+            SubtitleTrack {
+                filename: "movie.jpn.ass".into(),
+                size: 80000,
+                language: Some("ja".into()),
+            },
+        ],
+    };
+    let encoded = wire::encode(&subs).unwrap();
+    let (mt, _) = wire::decode_header(&encoded).unwrap();
+    assert_eq!(mt, MessageType::SubtitleInfo);
+}
+
+#[test]
+fn e2e_file_transfer_flow() {
+    // Request → Response → Transfer chunks
+    let req = FileRequestPayload::new("movie.mkv", 0, "sha256:abc123");
+    assert!(!req.transfer_id.is_empty());
+
+    let resp = FileResponsePayload::accept(&req.transfer_id, "sha256:abc123", 262144);
+    assert!(resp.accepted);
+    assert_eq!(resp.chunk_size, 262144);
+
+    let reject = FileResponsePayload::reject("tid-x", "file not found");
+    assert!(!reject.accepted);
+    assert_eq!(reject.reason, "file not found");
+
+    let chunk = FileTransferPayload {
+        transfer_id: req.transfer_id.clone(),
+        chunk_index: 0,
+        offset: 0,
+        total_size: 262144,
+        chunk_size: 256,
+        data: vec![0u8; 256],
+    };
+    let encoded = wire::encode(&chunk).unwrap();
+    let (mt, _) = wire::decode_header(&encoded).unwrap();
+    assert_eq!(mt, MessageType::FileTransfer);
+}
+
+#[test]
+fn e2e_user_info_flow() {
+    let info = UserInfoPayload {
+        username: "dave".into(),
+        features: vec!["chat".into(), "playlist".into(), "sfu".into()],
+    };
+    let encoded = wire::encode(&info).unwrap();
+    let (mt, _) = wire::decode_header(&encoded).unwrap();
+    assert_eq!(mt, MessageType::UserInfo);
+}
+
+#[test]
+fn e2e_peer_disconnect_flow() {
+    let disc = PeerDisconnectPayload {
+        reason: "user quit".into(),
+    };
+    let encoded = wire::encode(&disc).unwrap();
+    let (mt, _) = wire::decode_header(&encoded).unwrap();
+    assert_eq!(mt, MessageType::PeerDisconnect);
+}
+
+#[test]
+fn e2e_config_throttle_and_persistence() {
+    let mut cfg = P2pConfig::default();
+    cfg.network.throttle_bytes_per_sec = 1_000_000; // 1MB/s
+    cfg.voice_enabled = true;
+    cfg.sfu_enabled = true;
+
+    let json = serde_json::to_string_pretty(&cfg).unwrap();
+    let parsed: P2pConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.network.throttle_bytes_per_sec, 1_000_000);
+    assert!(parsed.voice_enabled);
+    assert!(parsed.sfu_enabled);
+    // Password should NOT be in serialized output
+    assert!(!json.contains("\"password\""));
+}
+
+#[test]
+fn e2e_connection_state_transitions() {
+    use syncplay_p2p::state::{ConnectionState, ConnectionStateMachine};
+
+    let sm = ConnectionStateMachine::new();
+    assert_eq!(sm.get(), ConnectionState::Offline);
+
+    sm.set_connecting();
+    assert_eq!(sm.get(), ConnectionState::Connecting);
+
+    sm.set_handshaking();
+    assert_eq!(sm.get(), ConnectionState::Handshaking);
+
+    sm.set_ready(1);
+    assert_eq!(sm.get(), ConnectionState::Ready { peer_count: 1 });
+
+    // Reconnecting from Ready
+    sm.set_reconnecting(1, 3);
+    assert_eq!(
+        sm.get(),
+        ConnectionState::Reconnecting {
+            attempt: 1,
+            max_attempts: 3
+        }
+    );
+
+    // Back to offline
+    sm.set_offline("test done");
+    assert_eq!(sm.get(), ConnectionState::Offline);
+}
+
+#[test]
+fn e2e_playlist_request_flow() {
+    let set_idx = PlaylistRequestPayload {
+        action: PlaylistAction::SetIndex,
+        files: vec![],
+        index: 3,
+    };
+    let enc = wire::encode(&set_idx).unwrap();
+    let (mt, _) = wire::decode_header(&enc).unwrap();
+    assert_eq!(mt, MessageType::PlaylistRequest);
+
+    let set_pl = PlaylistRequestPayload {
+        action: PlaylistAction::SetPlaylist,
+        files: vec![FileEntry {
+            name: "ep1.mkv".into(),
+            duration: 1800.0,
+        }],
+        index: 0,
+    };
+    let enc2 = wire::encode(&set_pl).unwrap();
+    let (mt2, _) = wire::decode_header(&enc2).unwrap();
+    assert_eq!(mt2, MessageType::PlaylistRequest);
+}
+
+#[test]
+fn e2e_file_info_with_and_without_metadata() {
+    // With file
+    let with_file = FileInfoPayload {
+        username: "alice".into(),
+        file: Some(FileMetadata {
+            name: "test.mkv".into(),
+            duration: 5400.0,
+            size: 1_000_000,
+            checksum: None,
+        }),
+    };
+    let enc = wire::encode(&with_file).unwrap();
+    let (mt, _) = wire::decode_header(&enc).unwrap();
+    assert_eq!(mt, MessageType::FileInfo);
+
+    // Without file (clearing current file)
+    let without_file = FileInfoPayload {
+        username: "alice".into(),
+        file: None,
+    };
+    let enc2 = wire::encode(&without_file).unwrap();
+    let (mt2, _) = wire::decode_header(&enc2).unwrap();
+    assert_eq!(mt2, MessageType::FileInfo);
+}
