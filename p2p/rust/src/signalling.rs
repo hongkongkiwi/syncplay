@@ -443,9 +443,18 @@ async fn handle_connection(
                                     // ── SFU routing: target="_server" → handle SDP/ICE server-side ──
                                     if target == "_server" {
                                         if let Some(ref sfu) = sfu_server {
+                                            // Look up peer username for SFU tracking
+                                            let username = rooms
+                                                .get(rname)
+                                                .and_then(|r| {
+                                                    let room = r.lock();
+                                                    room.peers.get(pid).map(|p| p.username.clone())
+                                                })
+                                                .unwrap_or_default();
+
                                             match payload.kind.as_str() {
                                                 "offer" => {
-                                                    match sfu.handle_offer(rname, pid, "", &payload.sdp).await {
+                                                    match sfu.handle_offer(rname, pid, &username, &payload.sdp).await {
                                                         Ok(answer_sdp) => {
                                                             send_json(&tx, &ServerMessage::SignalRelay {
                                                                 from: "_server".into(),

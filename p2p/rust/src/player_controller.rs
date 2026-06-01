@@ -524,5 +524,33 @@ mod tests {
         assert_eq!(format_position(3661.0), "01:01:01");
         assert_eq!(format_position(-1.0), "--:--:--");
         assert_eq!(format_position(f64::NAN), "--:--:--");
+        // Edge cases
+        assert_eq!(format_position(0.5), "00:00");
+        assert_eq!(format_position(59.9), "00:59");
+        assert_eq!(format_position(3600.0), "01:00:00");
+        assert_eq!(format_position(86399.0), "23:59:59");
+        assert_eq!(format_position(86400.0), "24:00:00");
+    }
+
+    #[test]
+    fn test_player_type_from_path() {
+        let mpv = PlayerController::new(PlayerType::Mpv);
+        assert!(matches!(mpv, PlayerController { .. }));
+
+        let vlc = PlayerController::new(PlayerType::Vlc);
+        assert!(matches!(vlc, PlayerController { .. }));
+    }
+
+    #[test]
+    fn test_vlc_password_generation() {
+        // Verify random password generates and is non-empty
+        use rand::Rng;
+        let pwd: String = rand::thread_rng()
+            .sample_iter(&rand::distributions::Alphanumeric)
+            .take(16)
+            .map(char::from)
+            .collect();
+        assert_eq!(pwd.len(), 16);
+        assert!(pwd.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 }

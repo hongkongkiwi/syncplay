@@ -95,10 +95,8 @@ pub struct SfuRouter {
     /// Room name → Room
     rooms: Arc<DashMap<String, Arc<SfuRoom>>>,
     /// Channel to send server-level events (peer join/leave) to signaling layer.
+    /// Events are informational — the signaling layer handles its own join/leave tracking.
     events_tx: mpsc::UnboundedSender<SfuEvent>,
-    /// Receiver side of events channel — stored to prevent the channel from closing.
-    #[allow(dead_code)]
-    events_rx: Option<Arc<Mutex<mpsc::UnboundedReceiver<SfuEvent>>>>,
 }
 
 /// Events emitted by the SFU router to the signaling layer.
@@ -161,13 +159,12 @@ impl SfuServer {
             ..Default::default()
         };
 
-        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (events_tx, _events_rx) = mpsc::unbounded_channel();
 
         Ok(Self {
             router: SfuRouter {
                 rooms: Arc::new(DashMap::new()),
                 events_tx,
-                events_rx: Some(Arc::new(Mutex::new(events_rx))),
             },
             api,
             ice_config,

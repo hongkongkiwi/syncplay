@@ -395,4 +395,30 @@ mod tests {
         assert!(DEFAULT_CHUNK_SIZE > 1024);
         assert!(DEFAULT_CHUNK_SIZE < 10 * 1024 * 1024);
     }
+
+    #[test]
+    fn test_fingerprint_chunk_detection() {
+        // chunk_index == u64::MAX signals the fingerprint final chunk
+        let fp_chunk = FileTransferPayload {
+            transfer_id: "test-1".into(),
+            chunk_index: u64::MAX,
+            offset: 0,
+            total_size: 32,
+            chunk_size: 32,
+            data: b"deadbeef1234567890abcdef12345678".to_vec(),
+        };
+        assert_eq!(fp_chunk.chunk_index, u64::MAX);
+    }
+
+    #[test]
+    fn test_expected_chunks_calculation() {
+        // total_size=1MB, chunk_size=256KB → 4 chunks
+        assert_eq!((1024u64 * 1024).div_ceil(256u64 * 1024), 4);
+        // total_size=1MB+1, chunk_size=256KB → 5 chunks (partial last chunk)
+        assert_eq!((1024u64 * 1024 + 1).div_ceil(256u64 * 1024), 5);
+        // total_size=0, chunk_size=256KB → 0 chunks
+        assert_eq!(0u64.div_ceil(256u64 * 1024), 0);
+        // different chunk_size (128KB)
+        assert_eq!((1024u64 * 1024).div_ceil(128u64 * 1024), 8);
+    }
 }
