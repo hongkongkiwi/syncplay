@@ -21,7 +21,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph};
 use ratatui::Frame;
 
+use crate::connection::IceState;
 use crate::messages::FileEntry;
+use crate::state::ConnectionState;
 use crate::sync::SyncManager;
 
 // ── Theme ──────────────────────────────────────────────────────────────
@@ -96,6 +98,7 @@ pub struct UiState {
     pub ready_states: HashMap<String, bool>,
     pub room: String,
     pub connected: bool,
+    pub connection_state: ConnectionState,
     pub host: bool,
     pub input: String,
     pub input_cursor: usize,
@@ -128,6 +131,7 @@ impl Default for UiState {
             ready_states: HashMap::new(),
             room: "---".into(),
             connected: false,
+            connection_state: ConnectionState::Offline,
             host: false,
             input: String::new(),
             input_cursor: 0,
@@ -182,6 +186,11 @@ pub async fn run_tui(
             let hid = sync.get_connection().hid();
             let mut s = state.lock();
             s.host = sync.is_host();
+            s.connected = conn_stats
+                .iter()
+                .any(|(_, _, ice, _)| ice == &IceState::Connected)
+                || conn_stats.is_empty(); // "connected" if no peers but signaling is up
+            s.connection_state = sync.get_connection().connection_state();
             if let Some(ref m) = mm {
                 s.voice_muted = m.load(Ordering::SeqCst);
             }
@@ -492,57 +501,51 @@ fn draw(f: &mut Frame, state: &UiState) {
 
 fn draw_status(f: &mut Frame, area: Rect, state: &UiState) {
     let mut spans = vec![];
-    if state.connected {
-        spans.push(Span::styled(" ● ", Style::default().fg(theme::SUCCESS)));
-        spans.push(Span::styled(
-            &state.room,
-            Style::default().fg(theme::ACCENT),
-        ));
-        spans.push(Span::styled("  ", Style::default().fg(theme::DIM)));
-        let role = if state.host { "HOST" } else { "peer" };
-        spans.push(Span::styled(
-            role,
-            Style::default().fg(if state.host {
-                theme::HOST
-            } else {
-                theme::ACCENT
-            }),
-        ));
-        let pc = state.peers.len();
-        spans.push(Span::styled(
-            format!("  {pc} peer{}", if pc == 1 { "" } else { "s" }),
-            Style::default().fg(theme::TEXT),
-        ));
-        if state.voice_enabled {
+    match state.connection_state {
+        ConnectionState::Offline => {
+            spans.push(Span::styled(
+                " ○ OFFLINE",
+                Style::default().fg(theme::ERROR),
+            ));
+        }
+        ConnectionState::Connecting | ConnectionState::Handshaking => {
+            spans.push(Span::styled(
+                " ◐ CONNECTING...",
+                Style::default().fg(theme::WARN),
+            ));
+        }
+        ConnectionState::ConnectingPeers { peer_count } => {
+            spans.push(Span::styled(
+                format!(" ◐ JOINING ({peer_count})..."),
+                Style::default().fg(theme::WARN),
+            ));
+        }
+        ConnectionState::Ready { peer_count } => {
+            spans.push(Span::styled(
+                format!(" ● ONLINE ({peer_count})"),
+                Style::default().fg(theme::SUCCESS),
+            ));
             spans.push(Span::styled("  ", Style::default().fg(theme::DIM)));
-            let (icon, c) = if state.voice_muted {
-                ("MUTED", theme::ERROR)
-            } else {
-                ("VOICE", theme::SUCCESS)
-            };
-            spans.push(Span::styled(icon, Style::default().fg(c)));
+            spans.push(Span::styled(
+                &state.room,
+                Style::default().fg(theme::ACCENT),
+            ));
         }
-        if state.has_turn {
-            spans.push(Span::styled("  TURN", Style::default().fg(theme::SEEK)));
+        ConnectionState::Reconnecting {
+            attempt,
+            max_attempts,
+        } => {
+            spans.push(Span::styled(
+                format!(" ◐ RECONNECTING ({attempt}/{max_attempts})"),
+                Style::default().fg(theme::WARN),
+            ));
         }
-        if !state.current_file.is_empty() {
-            let label = if state.current_file.len() > 40 {
-                format!("  {:.40}...", state.current_file)
-            } else {
-                format!("  {}", state.current_file)
-            };
-            spans.push(Span::styled(label, Style::default().fg(theme::DIM)));
+        ConnectionState::Error { ref message } => {
+            spans.push(Span::styled(
+                format!(" ⚠ ERROR: {message}"),
+                Style::default().fg(theme::ERROR),
+            ));
         }
-    } else if state.reconnecting {
-        spans.push(Span::styled(
-            " ◐ Reconnecting...",
-            Style::default().fg(theme::WARN),
-        ));
-    } else {
-        spans.push(Span::styled(
-            " ○ Disconnected",
-            Style::default().fg(theme::ERROR),
-        ));
     }
     f.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::SURFACE)),

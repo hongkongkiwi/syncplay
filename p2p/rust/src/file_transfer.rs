@@ -303,15 +303,8 @@ impl FileTransfer {
                 }
             },
         );
-
-        self.conn.on_msg(
-            MessageType::FileTransfer,
-            move |_: MessageType, data: &[u8], from: String| {
-                if let Ok(chunk) = rmp_serde::from_slice::<FileTransferPayload>(data) {
-                    debug!("Got chunk {} from {from}", chunk.chunk_index);
-                }
-            },
-        );
+        // Note: FileTransfer chunk handling is registered by the TUI caller
+        // (tui_main.rs) which handles progress tracking and disk saving.
     }
 }
 

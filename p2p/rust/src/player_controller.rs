@@ -49,6 +49,8 @@ pub struct PlayerController {
     player_type: PlayerType,
     child: Option<Child>,
     event_tx: Option<mpsc::Sender<PlayerEvent>>,
+    /// VLC RC port (only set for VLC)
+    vlc_port: Option<u16>,
 }
 
 impl PlayerController {
@@ -57,6 +59,7 @@ impl PlayerController {
             player_type,
             child: None,
             event_tx: None,
+            vlc_port: None,
         }
     }
 
@@ -91,6 +94,7 @@ impl PlayerController {
                     .and_then(|l| l.local_addr().ok())
                     .map(|a| a.port())
                     .unwrap_or(4212);
+                self.vlc_port = Some(vlc_port);
                 cmd.arg(format!("--rc-host=127.0.0.1:{vlc_port}"))
                     .arg("--no-video-title-show")
                     .arg("--quiet")
@@ -133,6 +137,15 @@ impl PlayerController {
                     error!("mpv IPC loop error: {e}");
                 }
             });
+        } else if let PlayerType::Vlc = self.player_type {
+            if let Some(port) = self.vlc_port {
+                let tx2 = tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = vlc_ipc_loop(port, tx2).await {
+                        error!("VLC IPC loop error: {e}");
+                    }
+                });
+            }
         }
 
         // Spawn child process watcher
@@ -355,6 +368,97 @@ async fn mpv_ipc_loop(socket_path: &str, tx: mpsc::Sender<PlayerEvent>) -> Resul
     }
 
     Ok(())
+}
+
+// ── VLC RC IPC ───────────────────────────────────────────────────────
+
+/// Send a raw command to VLC's RC telnet interface and read the response line.
+async fn vlc_rc_command(port: u16, cmd: &str) -> Result<String> {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpStream;
+
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .context("connect to VLC RC")?;
+    stream
+        .write_all(format!("{cmd}\n").as_bytes())
+        .await
+        .context("write VLC command")?;
+
+    let mut reader = tokio::io::BufReader::new(&mut stream);
+    let mut line = String::new();
+    tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line)
+        .await
+        .context("read VLC response")?;
+    Ok(line.trim().to_string())
+}
+
+/// VLC RC playback control — uses telnet text commands.
+pub async fn vlc_play(port: u16) -> Result<()> {
+    vlc_rc_command(port, "play").await?;
+    Ok(())
+}
+
+pub async fn vlc_pause(port: u16) -> Result<()> {
+    vlc_rc_command(port, "pause").await?;
+    Ok(())
+}
+
+pub async fn vlc_seek(port: u16, position: f64) -> Result<()> {
+    vlc_rc_command(port, &format!("seek {position}")).await?;
+    Ok(())
+}
+
+pub async fn vlc_get_position(port: u16) -> Result<f64> {
+    let resp = vlc_rc_command(port, "get_time").await?;
+    resp.parse::<f64>()
+        .with_context(|| format!("VLC get_time returned: {resp}"))
+}
+
+pub async fn vlc_is_playing(port: u16) -> Result<bool> {
+    let resp = vlc_rc_command(port, "is_playing").await?;
+    Ok(resp == "1")
+}
+
+pub async fn vlc_get_length(port: u16) -> Result<f64> {
+    let resp = vlc_rc_command(port, "get_length").await?;
+    resp.parse::<f64>()
+        .with_context(|| format!("VLC get_length returned: {resp}"))
+}
+
+/// VLC RC polling IPC loop — polls player state every 500ms and emits events.
+async fn vlc_ipc_loop(port: u16, tx: mpsc::Sender<PlayerEvent>) -> Result<()> {
+    use tokio::time;
+    let mut state = PlayerState::default();
+    let mut first_file_emitted = false;
+
+    loop {
+        // Poll current state
+        if let Ok(pos) = vlc_get_position(port).await {
+            state.position = pos;
+        }
+        if let Ok(playing) = vlc_is_playing(port).await {
+            state.paused = !playing;
+        }
+        if let Ok(len) = vlc_get_length(port).await {
+            state.duration = len;
+        }
+
+        let _ = tx.send(PlayerEvent::StateUpdated(state.clone())).await;
+
+        // Emit FileLoaded once when duration becomes available
+        if !first_file_emitted && state.duration > 0.0 {
+            first_file_emitted = true;
+            let _ = tx
+                .send(PlayerEvent::FileLoaded {
+                    filename: String::new(),
+                    duration: state.duration,
+                })
+                .await;
+        }
+
+        time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 }
 
 // ── Helper: format time for display ──────────────────────────────────

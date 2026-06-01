@@ -30,6 +30,7 @@ use parking_lot::Mutex;
 use syncplay_p2p::config::{ConfigOverrides, P2pConfig};
 use syncplay_p2p::connection::ConnectionManager;
 use syncplay_p2p::file_transfer::FileTransfer;
+use syncplay_p2p::state::ConnectionState;
 use syncplay_p2p::sync::SyncManager;
 use syncplay_p2p::tui::{run_tui, UiState};
 
@@ -126,8 +127,13 @@ async fn main() -> anyhow::Result<()> {
     let conn = ConnectionManager::new(&cfg.username, cfg.features.clone());
     conn.connect_with_retry(&cfg.signaling_url, &cfg.room, &cfg.password)
         .await?;
-    let sync = SyncManager::new(conn.clone());
+    let sync = SyncManager::new(conn.clone(), cfg.clone());
     sync.start().await;
+
+    // Auto-set ready if configured
+    if cfg.sync.ready_at_start {
+        sync.set_ready(true, None).await;
+    }
 
     // Auto-detect and launch player
     if cfg.player.path.is_empty() {
@@ -196,6 +202,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(Mutex::new(UiState {
         room: cfg.room.clone(),
         connected: true,
+        connection_state: ConnectionState::Connecting,
         voice_enabled: enable_voice,
         has_turn: !cfg.network.turn_servers.is_empty(),
         ..Default::default()
@@ -376,8 +383,10 @@ async fn main() -> anyhow::Result<()> {
     // Peer leave
     let leave_state = state.clone();
     conn.on_leave(move |_pid: String, _reason: String| {
+        let username = _pid;
+        let reason = _reason;
         let mut s = leave_state.lock();
-        s.chat.push("=== peer left ===".to_string());
+        s.chat.push(format!("=== {username} left ({reason}) ==="));
         if s.chat.len() > 500 {
             s.chat.remove(0);
         }

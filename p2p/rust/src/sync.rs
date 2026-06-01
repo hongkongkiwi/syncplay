@@ -12,14 +12,11 @@ use parking_lot::Mutex;
 use tokio::sync::Notify;
 use tokio::time;
 
+use crate::config::P2pConfig;
 use crate::connection::{ConnectionManager, PROTOCOL_VERSION};
 use crate::messages::*;
 use crate::wire;
 
-const SYNC_MS: u64 = 500;
-const LATENCY_MS: u64 = 2000;
-const MAX_PL_ITEMS: usize = 250;
-const MAX_CHAT: usize = 2000;
 /// Warn if a peer has > 500ms latency
 const LATENCY_WARN_MS: f64 = 0.5;
 
@@ -37,6 +34,7 @@ pub struct RoomStateSnapshot {
     pub playlist: Vec<FileEntry>,
     pub playlist_index: usize,
     pub ready_states: HashMap<String, bool>,
+    pub controllers: Vec<String>,
 }
 
 struct RoomState {
@@ -73,6 +71,16 @@ pub struct SyncManager {
     voice_mutes: Arc<Mutex<HashMap<String, bool>>>,
     shutdown: Arc<Notify>,
     player_socket: Arc<Mutex<Option<String>>>,
+    /// Sync interval in ms from config (default 500)
+    sync_interval_ms: u64,
+    /// Ping interval in ms from config (default 2000)
+    ping_interval_ms: u64,
+    /// Max chat message length from config (default 2000)
+    max_chat: usize,
+    /// Max playlist items from config (default 250)
+    max_pl_items: usize,
+    /// Features advertised to peers (from config)
+    features: Vec<String>,
 }
 
 impl Clone for SyncManager {
@@ -84,12 +92,23 @@ impl Clone for SyncManager {
             voice_mutes: self.voice_mutes.clone(),
             shutdown: self.shutdown.clone(),
             player_socket: self.player_socket.clone(),
+            sync_interval_ms: self.sync_interval_ms,
+            ping_interval_ms: self.ping_interval_ms,
+            max_chat: self.max_chat,
+            max_pl_items: self.max_pl_items,
+            features: self.features.clone(),
         }
     }
 }
 
 impl SyncManager {
-    pub fn new(conn: ConnectionManager) -> Self {
+    pub fn new(conn: ConnectionManager, config: P2pConfig) -> Self {
+        let sync_interval_ms = config.sync.sync_interval_ms;
+        let ping_interval_ms = config.sync.ping_interval_ms;
+        let max_chat = config.sync.max_chat_length;
+        let max_pl_items = config.sync.max_playlist_items;
+        let features = config.features.clone();
+
         let mgr = Self {
             conn: conn.clone(),
             room: Arc::new(Mutex::new(RoomState::default())),
@@ -97,8 +116,22 @@ impl SyncManager {
             voice_mutes: Arc::new(Mutex::new(HashMap::new())),
             shutdown: Arc::new(Notify::new()),
             player_socket: Arc::new(Mutex::new(None)),
+            sync_interval_ms,
+            ping_interval_ms,
+            max_chat,
+            max_pl_items,
+            features,
         };
         mgr.register_handlers();
+        // Wire up P2P reconnection on peer disconnect
+        let c_recon = conn.clone();
+        conn.on_disconnect(move |pid: String, _uname: String| {
+            let c2 = c_recon.clone();
+            c2.set_state_reconnecting(1, 3);
+            tokio::spawn(async move {
+                c2.reconnect_peer(&pid).await;
+            });
+        });
         let c = conn.clone();
         let r = mgr.room.clone();
         let s = mgr.shutdown.clone();
@@ -110,8 +143,9 @@ impl SyncManager {
                 let c2 = c.clone();
                 let r2 = r.clone();
                 let s2 = s.clone();
+                let iv2 = sync_interval_ms;
                 tokio::spawn(async move {
-                    host_loop(c2, r2, s2).await;
+                    host_loop(c2, r2, s2, iv2).await;
                 });
             }
         });
@@ -127,14 +161,16 @@ impl SyncManager {
             let c = self.conn.clone();
             let r = self.room.clone();
             let s = self.shutdown.clone();
+            let iv = self.sync_interval_ms;
             tokio::spawn(async move {
-                host_loop(c, r, s).await;
+                host_loop(c, r, s, iv).await;
             });
         }
         let c = self.conn.clone();
         let s = self.shutdown.clone();
+        let iv = self.ping_interval_ms;
         tokio::spawn(async move {
-            ping_loop(c, s).await;
+            ping_loop(c, s, iv).await;
         });
     }
 
@@ -148,7 +184,7 @@ impl SyncManager {
     /// Broadcast current room state to a specific peer (for new joiners).
     pub async fn send_state_to(&self, target: &str) {
         // Read all state in one lock acquisition for consistency
-        let (pos, paused, sb, seq, files, idx, ready_states) = {
+        let (pos, paused, sb, seq, files, idx, ready_states, controllers) = {
             let r = self.room.lock();
             (
                 r.position,
@@ -158,6 +194,7 @@ impl SyncManager {
                 r.playlist.clone(),
                 r.playlist_index,
                 r.ready_states.clone(),
+                r.controllers.iter().cloned().collect::<Vec<_>>(),
             )
         };
         // Send playstate
@@ -186,6 +223,18 @@ impl SyncManager {
             if let Ok(data) = wire::encode(&rp) {
                 if let Err(e) = self.conn.send_one(target, &data).await {
                     warn!("send_state_to: readiness to {target}: {e}");
+                }
+            }
+        }
+        // Send controller list so rejoining peers regain controller status
+        for cid in &controllers {
+            let cp = ControllerChangePayload {
+                peer_id: cid.clone(),
+                action: "add".into(),
+            };
+            if let Ok(data) = wire::encode(&cp) {
+                if let Err(e) = self.conn.send_one(target, &data).await {
+                    warn!("send_state_to: controller {cid} to {target}: {e}");
                 }
             }
         }
@@ -255,9 +304,9 @@ impl SyncManager {
     // ── Chat ──────────────────────────────────────────────────────
 
     pub async fn send_chat(&self, msg: &str) {
-        let truncated = if msg.len() > MAX_CHAT {
+        let truncated = if msg.len() > self.max_chat {
             // Truncate at char boundary to avoid breaking multi-byte/emoji
-            let mut end = MAX_CHAT;
+            let mut end = self.max_chat;
             while end > 0 && !msg.is_char_boundary(end) {
                 end -= 1;
             }
@@ -309,7 +358,10 @@ impl SyncManager {
     // ── Playlist ──────────────────────────────────────────────────
 
     pub async fn set_playlist(&self, files: Vec<FileEntry>) {
-        let files = files.into_iter().take(MAX_PL_ITEMS).collect::<Vec<_>>();
+        let files = files
+            .into_iter()
+            .take(self.max_pl_items)
+            .collect::<Vec<_>>();
         if self.conn.is_host() {
             let idx = {
                 let mut r = self.room.lock();
@@ -432,6 +484,7 @@ impl SyncManager {
             playlist: r.playlist.clone(),
             playlist_index: r.playlist_index,
             ready_states: r.ready_states.clone(),
+            controllers: r.controllers.iter().cloned().collect(),
         }
     }
 
@@ -459,8 +512,9 @@ impl SyncManager {
         let room = self.room.clone();
         let lm = self.latency_map.clone();
 
-        // Hello — version check
+        // Hello — version check (uses features from config)
         let c0 = conn.clone();
+        let feats = self.features.clone();
         self.conn.on_msg(
             MessageType::Hello,
             move |_: MessageType, data: &[u8], from: String| {
@@ -479,10 +533,9 @@ impl SyncManager {
                         // Respond with our own Hello
                         let c = c0.clone();
                         let f = from.clone();
+                        let f2 = feats.clone();
                         tokio::spawn(async move {
-                            let features =
-                                vec!["chat".into(), "readiness".into(), "playlist".into()];
-                            let p = HelloPayload::new(&c.uname(), PROTOCOL_VERSION, features);
+                            let p = HelloPayload::new(&c.uname(), PROTOCOL_VERSION, f2);
                             if let Ok(data) = wire::encode(&p) {
                                 let _ = c.send_one(&f, &data).await;
                             }
@@ -706,6 +759,7 @@ impl SyncManager {
         // PlaylistRequest — host handles and broadcasts
         let c5 = conn.clone();
         let r5 = room.clone();
+        let mpl = self.max_pl_items;
         self.conn.on_msg(
             MessageType::PlaylistRequest,
             move |_: MessageType, data: &[u8], from: String| {
@@ -718,7 +772,7 @@ impl SyncManager {
                         let (files, idx, set_by) = match req.action {
                             PlaylistAction::SetPlaylist => {
                                 let files: Vec<FileEntry> =
-                                    req.files.into_iter().take(MAX_PL_ITEMS).collect();
+                                    req.files.into_iter().take(mpl).collect();
                                 let idx = {
                                     let mut r = r5.lock();
                                     r.playlist = files.clone();
@@ -858,15 +912,25 @@ impl SyncManager {
     }
 }
 
-async fn host_loop(conn: ConnectionManager, room: Arc<Mutex<RoomState>>, shutdown: Arc<Notify>) {
-    info!("Host sync loop started");
+async fn host_loop(
+    conn: ConnectionManager,
+    room: Arc<Mutex<RoomState>>,
+    shutdown: Arc<Notify>,
+    interval_ms: u64,
+) {
+    info!("Host sync loop started (interval={interval_ms}ms)");
     loop {
         tokio::select! {
             _ = shutdown.notified() => {
                 info!("Host sync loop stopped");
                 break;
             }
-            _ = time::sleep(Duration::from_millis(SYNC_MS)) => {
+            _ = time::sleep(Duration::from_millis(interval_ms)) => {
+                // Guard: only broadcast if still host (covers host migration edge case)
+                if !conn.is_host() {
+                    debug!("Host loop: no longer host, sleeping");
+                    continue;
+                }
                 let (pos, paused, sb, seq) = {
                     let r = room.lock();
                     (r.position, r.paused, r.set_by.clone(), r.seq)
@@ -877,14 +941,14 @@ async fn host_loop(conn: ConnectionManager, room: Arc<Mutex<RoomState>>, shutdow
     }
 }
 
-async fn ping_loop(conn: ConnectionManager, shutdown: Arc<Notify>) {
+async fn ping_loop(conn: ConnectionManager, shutdown: Arc<Notify>, interval_ms: u64) {
     loop {
         tokio::select! {
             _ = shutdown.notified() => {
                 info!("Ping loop stopped");
                 break;
             }
-            _ = time::sleep(Duration::from_millis(LATENCY_MS)) => {
+            _ = time::sleep(Duration::from_millis(interval_ms)) => {
                 match wire::encode(&LatencyPingPayload { send_time: now_ms() }) {
                     Ok(frame) => conn.send_all(&frame, None).await,
                     Err(e) => error!("encode ping: {e}"),
@@ -901,14 +965,14 @@ mod tests {
     #[test]
     fn test_sync_manager_not_host_initially() {
         let conn = ConnectionManager::new("alice", vec![]);
-        let sync = SyncManager::new(conn);
+        let sync = SyncManager::new(conn, P2pConfig::default());
         assert!(!sync.is_host());
     }
 
     #[test]
     fn test_add_remove_controller() {
         let conn = ConnectionManager::new("alice", vec![]);
-        let sync = SyncManager::new(conn);
+        let sync = SyncManager::new(conn, P2pConfig::default());
         assert!(sync.room.lock().controllers.is_empty());
         sync.add_controller("peer-1");
         assert!(sync.room.lock().controllers.contains("peer-1"));
@@ -918,9 +982,11 @@ mod tests {
 
     #[test]
     fn test_latency_empty() {
-        assert!(SyncManager::new(ConnectionManager::new("a", vec![]))
-            .get_latencies()
-            .is_empty());
+        assert!(
+            SyncManager::new(ConnectionManager::new("a", vec![]), P2pConfig::default())
+                .get_latencies()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -935,7 +1001,7 @@ mod tests {
     fn test_host_updates_position() {
         let conn = ConnectionManager::new("alice", vec![]);
         conn.set_id("peer-1", "peer-1");
-        let sync = SyncManager::new(conn);
+        let sync = SyncManager::new(conn, P2pConfig::default());
         sync.update_playstate(42.0, false);
         assert_eq!(sync.room.lock().position, 42.0);
     }

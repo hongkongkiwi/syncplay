@@ -26,6 +26,7 @@ use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::config::P2pConfig;
 use crate::messages::MessageType;
+use crate::state::{ConnectionStateMachine, SharedStateMachine};
 use crate::wire;
 
 pub const PROTOCOL_VERSION: &str = "2.0.0";
@@ -105,6 +106,7 @@ impl Peer {
 type MsgFn = Box<dyn Fn(MessageType, &[u8], String) + Send + Sync>;
 type PeerFn = Box<dyn Fn(String, String) + Send + Sync>;
 type PcFn = Box<dyn Fn(Arc<RTCPeerConnection>, String) + Send + Sync>;
+type DisconnectFn = Box<dyn Fn(String, String) + Send + Sync>; // pid, username
 
 struct Inner {
     username: String,
@@ -112,12 +114,17 @@ struct Inner {
     peer_id: Mutex<String>,
     host_id: Mutex<String>,
     peers: DashMap<String, Peer>,
+    /// Peers currently attempting reconnection (peer_id → username)
+    reconnecting: DashMap<String, String>,
     handlers: Mutex<Vec<(MessageType, MsgFn)>>,
     on_join: Mutex<Vec<PeerFn>>,
     on_leave: Mutex<Vec<PeerFn>>,
     on_host: Mutex<Vec<PeerFn>>,
     on_pc: Mutex<Vec<PcFn>>,
+    on_disconnect: Mutex<Vec<DisconnectFn>>,
     signal_tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
+    /// Connection lifecycle state machine
+    state: SharedStateMachine,
 }
 
 #[derive(Clone)]
@@ -136,12 +143,15 @@ impl ConnectionManager {
             peer_id: Default::default(),
             host_id: Default::default(),
             peers: DashMap::new(),
+            reconnecting: DashMap::new(),
             handlers: Mutex::new(Vec::new()),
             on_join: Mutex::new(Vec::new()),
             on_leave: Mutex::new(Vec::new()),
             on_host: Mutex::new(Vec::new()),
             on_pc: Mutex::new(Vec::new()),
+            on_disconnect: Mutex::new(Vec::new()),
             signal_tx: Mutex::new(None),
+            state: Arc::new(ConnectionStateMachine::new()),
         }))
     }
 
@@ -152,12 +162,15 @@ impl ConnectionManager {
             peer_id: Default::default(),
             host_id: Default::default(),
             peers: DashMap::new(),
+            reconnecting: DashMap::new(),
             handlers: Mutex::new(Vec::new()),
             on_join: Mutex::new(Vec::new()),
             on_leave: Mutex::new(Vec::new()),
             on_host: Mutex::new(Vec::new()),
             on_pc: Mutex::new(Vec::new()),
+            on_disconnect: Mutex::new(Vec::new()),
             signal_tx: Mutex::new(None),
+            state: Arc::new(ConnectionStateMachine::new()),
         }))
     }
 
@@ -186,6 +199,16 @@ impl ConnectionManager {
 
     pub fn pcount(&self) -> usize {
         self.0.peers.len()
+    }
+
+    /// Current connection lifecycle state.
+    pub fn connection_state(&self) -> crate::state::ConnectionState {
+        self.0.state.get()
+    }
+
+    /// Set connection state to reconnecting (for reconnect flows).
+    pub fn set_state_reconnecting(&self, attempt: u32, max_attempts: u32) {
+        self.0.state.set_reconnecting(attempt, max_attempts);
     }
 
     pub fn set_id(&self, pid: &str, hid: &str) {
@@ -239,6 +262,9 @@ impl ConnectionManager {
     ) {
         self.0.on_pc.lock().push(Box::new(f));
     }
+    pub fn on_disconnect<F: Fn(String, String) + Send + Sync + 'static>(&self, f: F) {
+        self.0.on_disconnect.lock().push(Box::new(f));
+    }
     pub fn on_msg<F: Fn(MessageType, &[u8], String) + Send + Sync + 'static>(
         &self,
         mt: MessageType,
@@ -276,6 +302,7 @@ impl ConnectionManager {
 
     /// Connect with reconnect support.
     pub async fn connect_with_retry(&self, url: &str, room: &str, password: &str) -> Result<()> {
+        self.0.state.set_connecting();
         let max_retries = self
             .0
             .config
@@ -322,6 +349,7 @@ impl ConnectionManager {
 
         let (ws, _) = connect_async(url).await.context("WebSocket connect")?;
         let (mut write, mut read) = ws.split();
+        self.0.state.set_handshaking();
 
         let msg = serde_json::json!({
             "type": kind, "room": room, "password": password,
@@ -453,6 +481,8 @@ impl ConnectionManager {
         if let Ok(data) = wire::encode(&p) {
             self.send_all(&data, None).await;
         }
+        // Clear reconnecting state
+        self.0.reconnecting.clear();
         for entry in self.0.peers.iter() {
             if let Err(err) = entry.pc.close().await {
                 warn!("Error closing {}: {err}", entry.key());
@@ -793,6 +823,11 @@ impl ConnectionManager {
     fn _remove(&self, pid: &str, reason: &str) {
         if let Some((_, p)) = self.0.peers.remove(pid) {
             info!("✗ {pid} ({reason})");
+            // Fire on_disconnect callbacks before on_leave so reconnect handlers can act
+            let uname = p.username.clone();
+            for f in self.0.on_disconnect.lock().iter() {
+                f(pid.to_string(), uname.clone());
+            }
             self.fire_leave(pid, reason);
             let pc = p.pc.clone();
             let pid_owned = pid.to_string();
@@ -802,6 +837,67 @@ impl ConnectionManager {
                 }
             });
         }
+        // Clean up reconnecting state too
+        self.0.reconnecting.remove(pid);
+    }
+
+    /// Attempt reconnection to a peer that disconnected with backoff.
+    /// Max 3 retries: 2s → 4s → 8s. On success, peer is re-added to peers map.
+    /// On failure after max retries, fires leave callback.
+    /// Call from the main async context (not inside tokio::spawn — dial() is not Send).
+    pub async fn reconnect_peer(&self, pid: &str) {
+        // Get the peer's username before removing
+        let uname = self
+            .0
+            .peers
+            .get(pid)
+            .map(|p| p.username.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Remove the stale peer (but don't fire leave yet)
+        if let Some((_, p)) = self.0.peers.remove(pid) {
+            let pc = p.pc.clone();
+            tokio::spawn(async move {
+                let _ = pc.close().await;
+            });
+        }
+
+        // Mark as reconnecting
+        self.0.reconnecting.insert(pid.to_string(), uname.clone());
+        info!("Reconnecting to {uname} ({pid}) — backoff: 2s/4s/8s");
+
+        let delays = [2u64, 4, 8];
+        for (attempt, delay) in delays.iter().enumerate() {
+            time::sleep(Duration::from_secs(*delay)).await;
+
+            // Check if we're still supposed to reconnect (not disconnected globally)
+            if !self.0.reconnecting.contains_key(pid) {
+                info!("Reconnect to {pid} cancelled");
+                return;
+            }
+
+            info!(
+                "Reconnect attempt {}/{} → {uname} ({pid})",
+                attempt + 1,
+                delays.len()
+            );
+            match self.dial(pid, &uname).await {
+                Ok(()) => {
+                    info!("✓ Reconnected to {uname} ({pid})");
+                    self.0.reconnecting.remove(pid);
+                    self.fire_join(pid, &uname);
+                    return;
+                }
+                Err(e) => {
+                    warn!("Reconnect attempt {} to {pid} failed: {e}", attempt + 1);
+                }
+            }
+        }
+
+        // All retries exhausted — permanent removal
+        warn!("Reconnect to {pid} exhausted — removing peer");
+        self.0.reconnecting.remove(pid);
+        self.fire_leave(pid, "reconnect_failed");
     }
 
     pub fn peers(&self) -> Vec<String> {
@@ -810,6 +906,22 @@ impl ConnectionManager {
 
     pub fn has(&self, id: &str) -> bool {
         self.0.peers.contains_key(id)
+    }
+
+    /// Update the connection state based on current peer count.
+    /// Call after any peer joins or leaves.
+    pub fn update_peer_state(&self) {
+        let count = self.0.peers.len();
+        if count == 0 {
+            if matches!(
+                self.0.state.get(),
+                crate::state::ConnectionState::Ready { .. }
+            ) {
+                self.0.state.set_connecting_peers(0);
+            }
+        } else {
+            self.0.state.set_ready(count);
+        }
     }
 
     pub fn get_ice_state(&self, id: &str) -> IceState {

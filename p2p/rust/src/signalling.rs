@@ -8,16 +8,22 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
-use log::{error, info};
+use log::{error, info, warn};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+// ── Rate limiting for signal messages ─────────────────────────────────
+const MAX_SIGNAL_RATE: u32 = 20; // max signals per window
+const SIGNAL_WINDOW_MS: u64 = 1000; // 1 second window
+const MAX_SIGNAL_PAYLOAD_BYTES: usize = 64 * 1024; // 64 KB cap per signal message
 
 // ── Signalling Messages ──────────────────────────────────────────────
 
@@ -242,6 +248,10 @@ async fn handle_connection(
     let mut peer_id: Option<String> = None;
     let mut room_name: Option<String> = None;
 
+    // Rate limiting state for signal messages
+    let mut signal_count: u32 = 0;
+    let mut signal_window_start = Instant::now();
+
     // Write loop
     let write_handle = tokio::spawn(async move {
         loop {
@@ -391,17 +401,37 @@ async fn handle_connection(
                             }
 
                             ClientMessage::Signal { target, payload } => {
-                                if let (Some(ref _pid), Some(ref rname)) = (&peer_id, &room_name) {
+                                if let (Some(ref pid), Some(ref rname)) = (&peer_id, &room_name) {
+                                    // Rate limit
+                                    let now = Instant::now();
+                                    if now.duration_since(signal_window_start).as_millis() as u64 > SIGNAL_WINDOW_MS {
+                                        signal_window_start = now;
+                                        signal_count = 0;
+                                    }
+                                    signal_count += 1;
+                                    if signal_count > MAX_SIGNAL_RATE {
+                                        warn!("[signal] rate limit exceeded for {pid} — dropping signal to {target}");
+                                        continue;
+                                    }
+                                    // Payload size cap
+                                    let payload_json = serde_json::to_string(&payload).unwrap_or_default();
+                                    if payload_json.len() > MAX_SIGNAL_PAYLOAD_BYTES {
+                                        warn!("[signal] oversized payload from {pid}: {} bytes", payload_json.len());
+                                        continue;
+                                    }
+                                    // Validate target exists in room
                                     if let Some(room) = rooms.get(rname) {
                                         let r = room.lock();
                                         if let Some(target_peer) = r.peers.get(&target) {
                                             send_json(
                                                 &target_peer.tx,
                                                 &ServerMessage::SignalRelay {
-                                                    from: peer_id.clone().unwrap_or_default(),
+                                                    from: pid.clone(),
                                                     payload,
                                                 },
                                             );
+                                        } else {
+                                            warn!("[signal] {pid} tried to signal unknown target {target}");
                                         }
                                     }
                                 }

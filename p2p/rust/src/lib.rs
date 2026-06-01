@@ -12,6 +12,7 @@ pub mod messages;
 pub mod player;
 pub mod player_controller;
 pub mod signalling;
+pub mod state;
 pub mod sync;
 pub mod voice_chat;
 pub mod wire;
