@@ -46,6 +46,7 @@ struct RoomState {
     playlist_index: usize,
     controllers: HashSet<String>,
     ready_states: HashMap<String, bool>,
+    speed: f64,
 }
 
 impl Default for RoomState {
@@ -59,6 +60,7 @@ impl Default for RoomState {
             playlist_index: 0,
             controllers: HashSet::new(),
             ready_states: HashMap::new(),
+            speed: 1.0,
         }
     }
 }
@@ -81,6 +83,8 @@ pub struct SyncManager {
     max_pl_items: usize,
     /// Features advertised to peers (from config)
     features: Vec<String>,
+    /// Prevents double-spawn of the host sync loop
+    host_loop_running: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Clone for SyncManager {
@@ -97,6 +101,7 @@ impl Clone for SyncManager {
             max_chat: self.max_chat,
             max_pl_items: self.max_pl_items,
             features: self.features.clone(),
+            host_loop_running: self.host_loop_running.clone(),
         }
     }
 }
@@ -121,6 +126,7 @@ impl SyncManager {
             max_chat,
             max_pl_items,
             features,
+            host_loop_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         mgr.register_handlers();
         // Wire up P2P reconnection on peer disconnect
@@ -136,16 +142,24 @@ impl SyncManager {
         let r = mgr.room.clone();
         let s = mgr.shutdown.clone();
         let m2 = mgr.clone();
+        let hlr1 = mgr.host_loop_running.clone();
+        let iv_cap = sync_interval_ms;
         conn.on_host(move |_new_id: String, reason: String| {
             if c.is_host() {
+                // Prevent double-spawn: only start if not already running
+                if hlr1.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    warn!("Host loop already running — skipping duplicate spawn");
+                    return;
+                }
                 info!("I am now the host ({reason}) — starting sync loop");
                 m2.add_controller(&c.pid());
                 let c2 = c.clone();
                 let r2 = r.clone();
                 let s2 = s.clone();
-                let iv2 = sync_interval_ms;
+                let hlr2 = hlr1.clone();
                 tokio::spawn(async move {
-                    host_loop(c2, r2, s2, iv2).await;
+                    host_loop(c2, r2, s2, iv_cap).await;
+                    hlr2.store(false, std::sync::atomic::Ordering::SeqCst);
                 });
             }
         });
@@ -158,12 +172,22 @@ impl SyncManager {
 
     pub async fn start(&self) {
         if self.conn.is_host() {
+            // Prevent double-spawn if on_host already started a loop
+            if self
+                .host_loop_running
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                warn!("Host loop already running — skipping start() spawn");
+                return;
+            }
             let c = self.conn.clone();
             let r = self.room.clone();
             let s = self.shutdown.clone();
             let iv = self.sync_interval_ms;
+            let hlr = self.host_loop_running.clone();
             tokio::spawn(async move {
                 host_loop(c, r, s, iv).await;
+                hlr.store(false, std::sync::atomic::Ordering::SeqCst);
             });
         }
         let c = self.conn.clone();
@@ -299,6 +323,31 @@ impl SyncManager {
                 Err(e) => error!("encode play: {e}"),
             }
         }
+    }
+
+    pub async fn request_set_speed(&self, speed: f64) {
+        if self.conn.is_host() {
+            {
+                let mut r = self.room.lock();
+                r.speed = speed;
+                r.seq += 1;
+            }
+            self.bcast_ps(false).await;
+        } else {
+            match wire::encode(&PlaystateRequestPayload::set_speed(speed)) {
+                Ok(frame) => self.send_to_host(&frame).await,
+                Err(e) => error!("encode set_speed: {e}"),
+            }
+        }
+    }
+
+    pub async fn update_speed(&self, speed: f64) {
+        if !self.conn.is_host() {
+            return;
+        }
+        let mut r = self.room.lock();
+        r.speed = speed;
+        r.seq += 1;
     }
 
     // ── Chat ──────────────────────────────────────────────────────
@@ -510,12 +559,15 @@ impl SyncManager {
     }
 
     async fn bcast_ps(&self, do_seek: bool) {
-        let (pos, paused, sb, seq) = {
+        let (pos, paused, sb, seq, speed) = {
             let r = self.room.lock();
-            (r.position, r.paused, r.set_by.clone(), r.seq)
+            (r.position, r.paused, r.set_by.clone(), r.seq, r.speed)
         };
         self.conn
-            .bcast(&PlaystatePayload::new(pos, paused, do_seek, &sb, seq), None)
+            .bcast(
+                &PlaystatePayload::with_speed(pos, paused, do_seek, &sb, seq, speed),
+                None,
+            )
             .await;
     }
 
@@ -547,7 +599,7 @@ impl SyncManager {
                         let f = from.clone();
                         let f2 = feats.clone();
                         tokio::spawn(async move {
-                            let p = HelloPayload::new(&c.uname(), PROTOCOL_VERSION, f2);
+                            let p = HelloPayload::new(&c.uname(), PROTOCOL_VERSION, "", f2);
                             if let Ok(data) = wire::encode(&p) {
                                 let _ = c.send_one(&f, &data).await;
                             }
@@ -604,20 +656,36 @@ impl SyncManager {
                             debug!("Stale playstate seq={}", p.seq);
                             return;
                         }
-                        r.position = p.position;
+                        // Latency compensation: adjust position by network delay
+                        let now = crate::now_ms();
+                        let latency_secs = if p.timestamp > 0 && now > p.timestamp {
+                            (now - p.timestamp) as f64 / 1000.0
+                        } else {
+                            0.0
+                        };
+                        let adjusted_pos = if !p.paused {
+                            p.position + latency_secs * p.speed
+                        } else {
+                            p.position
+                        };
+                        r.position = adjusted_pos;
                         r.paused = p.paused;
                         r.set_by = p.set_by;
                         r.seq = p.seq;
+                        if (p.speed - 1.0).abs() > 0.001 {
+                            r.speed = p.speed;
+                        }
                         drop(r);
                         // Drive local player to match
                         if let Some(ref sock) = *psock.lock() {
                             let sock_path = sock.clone();
                             if p.do_seek {
                                 let s = sock_path.clone();
+                                let seek_pos = adjusted_pos;
                                 tokio::spawn(async move {
                                     if let Err(e) =
                                         crate::player_controller::PlayerController::seek(
-                                            &s, p.position,
+                                            &s, seek_pos,
                                         )
                                         .await
                                     {
@@ -690,13 +758,20 @@ impl SyncManager {
                                     r.set_by = from.clone();
                                     r.seq += 1;
                                 }
+                                PlaystateAction::SetSpeed(new_speed) => {
+                                    r.speed = new_speed;
+                                    r.set_by = from.clone();
+                                    r.seq += 1;
+                                }
                             }
                         }
-                        let (pos, paused, sb, seq) = {
+                        let (pos, paused, sb, seq, speed) = {
                             let r = r2.lock();
-                            (r.position, r.paused, r.set_by.clone(), r.seq)
+                            (r.position, r.paused, r.set_by.clone(), r.seq, r.speed)
                         };
-                        match wire::encode(&PlaystatePayload::new(pos, paused, do_seek, &sb, seq)) {
+                        match wire::encode(&PlaystatePayload::with_speed(
+                            pos, paused, do_seek, &sb, seq, speed,
+                        )) {
                             Ok(frame) => {
                                 let c = c2.clone();
                                 tokio::spawn(async move {
@@ -785,6 +860,17 @@ impl SyncManager {
                 if !c5.is_host() {
                     warn!("PlaylistRequest from non-host {from}");
                     return;
+                }
+                // Only controllers (or the host itself) can modify playlist
+                {
+                    let allowed = {
+                        let r = r5.lock();
+                        r.controllers.contains(&from) || from == c5.pid()
+                    };
+                    if !allowed {
+                        warn!("PlaylistRequest denied — {from} is not a controller");
+                        return;
+                    }
                 }
                 match rmp_serde::from_slice::<PlaylistRequestPayload>(data) {
                     Ok(req) => {
@@ -965,11 +1051,11 @@ async fn host_loop(
                     debug!("Host loop: no longer host, sleeping");
                     continue;
                 }
-                let (pos, paused, sb, seq) = {
+                let (pos, paused, sb, seq, speed) = {
                     let r = room.lock();
-                    (r.position, r.paused, r.set_by.clone(), r.seq)
+                    (r.position, r.paused, r.set_by.clone(), r.seq, r.speed)
                 };
-                conn.bcast(&PlaystatePayload::new(pos, paused, false, &sb, seq), None).await;
+                conn.bcast(&PlaystatePayload::with_speed(pos, paused, false, &sb, seq, speed), None).await;
             }
         }
     }
@@ -1044,5 +1130,434 @@ mod tests {
     fn test_version_constant() {
         assert!(!PROTOCOL_VERSION.is_empty());
         assert!(PROTOCOL_VERSION.starts_with('2'));
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────
+
+    /// Create a SyncManager configured as host (pid == hid).
+    fn make_test_sync(host: bool) -> SyncManager {
+        let conn = ConnectionManager::new("testuser", vec![]);
+        if host {
+            conn.set_id("testuser-id", "testuser-id");
+        } else {
+            conn.set_id("testuser-id", "host-id");
+        }
+        SyncManager::new(conn, P2pConfig::default())
+    }
+
+    fn config_with_max_chat(max_len: usize) -> P2pConfig {
+        let mut cfg = P2pConfig::default();
+        cfg.sync.max_chat_length = max_len;
+        cfg
+    }
+
+    fn config_with_max_playlist(max_items: usize) -> P2pConfig {
+        let mut cfg = P2pConfig::default();
+        cfg.sync.max_playlist_items = max_items;
+        cfg
+    }
+
+    // ── Async: send_state_to ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_send_state_to_no_panic() {
+        let sync = make_test_sync(false);
+        // Should not panic even though target peer doesn't exist.
+        sync.send_state_to("nonexistent-peer").await;
+    }
+
+    #[tokio::test]
+    async fn test_send_state_to_as_host_no_panic() {
+        let sync = make_test_sync(true);
+        sync.send_state_to("nonexistent-peer").await;
+    }
+
+    // ── Async: request_seek / pause / play (non-host) ─────────────
+
+    #[tokio::test]
+    async fn test_request_seek_non_host_no_panic() {
+        let sync = make_test_sync(false);
+        sync.request_seek(99.5).await;
+    }
+
+    #[tokio::test]
+    async fn test_request_pause_non_host_no_panic() {
+        let sync = make_test_sync(false);
+        sync.request_pause().await;
+    }
+
+    #[tokio::test]
+    async fn test_request_play_non_host_no_panic() {
+        let sync = make_test_sync(false);
+        sync.request_play().await;
+    }
+
+    #[tokio::test]
+    async fn test_request_seek_as_host_no_panic() {
+        let sync = make_test_sync(true);
+        // update_playstate so there is state to broadcast
+        sync.update_playstate(10.0, false);
+        sync.request_seek(42.0).await;
+    }
+
+    // ── Async: set_playlist truncation ────────────────────────────
+
+    #[tokio::test]
+    async fn test_set_playlist_respects_max_as_host() {
+        let conn = ConnectionManager::new("testhost", vec![]);
+        conn.set_id("testhost-id", "testhost-id");
+        let sync = SyncManager::new(conn, config_with_max_playlist(3));
+        // Send more files than max_pl_items; only 3 should be kept
+        let files: Vec<FileEntry> = (0..10)
+            .map(|i| FileEntry {
+                name: format!("file_{i}.mp4"),
+                duration: 120.0,
+            })
+            .collect();
+        sync.set_playlist(files).await;
+        let snapshot = sync.get_room_state();
+        assert_eq!(snapshot.playlist.len(), 3);
+        assert_eq!(snapshot.playlist[0].name, "file_0.mp4");
+    }
+
+    #[tokio::test]
+    async fn test_set_playlist_respects_max_non_host() {
+        let sync = make_test_sync(false);
+        // Even non-host codepath does truncation before encoding.
+        let files: Vec<FileEntry> = (0..5)
+            .map(|i| FileEntry {
+                name: format!("video_{i}.mkv"),
+                duration: 60.0,
+            })
+            .collect();
+        // Default max_pl_items is 250, but this call exercises the codepath.
+        sync.set_playlist(files).await;
+    }
+
+    // ── Async: send_chat truncation + emoji boundary ─────────────
+
+    #[tokio::test]
+    async fn test_send_chat_truncation_no_panic() {
+        // max_chat = 10, send a 50-char ASCII string
+        let conn = ConnectionManager::new("chatter", vec![]);
+        conn.set_id("chatter-id", "host-id");
+        let sync = SyncManager::new(conn, config_with_max_chat(10));
+        let long_msg = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx";
+        assert!(long_msg.len() > 10);
+        sync.send_chat(long_msg).await;
+    }
+
+    #[tokio::test]
+    async fn test_send_chat_emoji_boundary_no_panic() {
+        // Place a multi-byte emoji right at the truncation boundary.
+        // '😀' is 4 bytes. Message "aaaaa😀bbbbb" with max_chat=6
+        // means the char boundary check kicks in.
+        let conn = ConnectionManager::new("chatter", vec![]);
+        conn.set_id("chatter-id", "host-id");
+        let sync = SyncManager::new(conn, config_with_max_chat(6));
+        // "aaaaa" = 5 bytes, then "😀" = 4 bytes (positions 5-8),
+        // then "bbbbb" = 5 bytes. max_chat=6 lands inside the emoji.
+        sync.send_chat("aaaaa😀bbbbb").await;
+    }
+
+    #[tokio::test]
+    async fn test_send_chat_short_message_no_truncation() {
+        let conn = ConnectionManager::new("chatter", vec![]);
+        conn.set_id("chatter-id", "host-id");
+        let sync = SyncManager::new(conn, config_with_max_chat(100));
+        let short = "hello";
+        sync.send_chat(short).await;
+    }
+
+    // ── Sync: controller management ───────────────────────────────
+
+    #[test]
+    fn test_is_controller() {
+        let sync = make_test_sync(false);
+        assert!(!sync.is_controller("peer-42"));
+        sync.add_controller("peer-42");
+        assert!(sync.is_controller("peer-42"));
+        sync.remove_controller("peer-42");
+        assert!(!sync.is_controller("peer-42"));
+    }
+
+    #[test]
+    fn test_self_is_always_controller() {
+        let sync = make_test_sync(false);
+        // pid is "testuser-id" — is_controller always returns true for own pid
+        assert!(sync.is_controller("testuser-id"));
+    }
+
+    #[test]
+    fn test_remove_nonexistent_controller_no_panic() {
+        let sync = make_test_sync(false);
+        sync.remove_controller("no-such-peer");
+    }
+
+    // ── Sync: room state snapshot ─────────────────────────────────
+
+    #[test]
+    fn test_get_room_state_snapshot_consistent() {
+        let sync = make_test_sync(true);
+        sync.update_playstate(12.5, false);
+        sync.add_controller("ctrl-1");
+        let snap = sync.get_room_state();
+        assert_eq!(snap.position, 12.5);
+        assert!(!snap.paused);
+        assert!(snap.seq > 0);
+        assert!(snap.controllers.contains(&"ctrl-1".to_string()));
+    }
+
+    #[test]
+    fn test_room_state_snapshot_playlist() {
+        let sync = make_test_sync(true);
+        {
+            let mut r = sync.room.lock();
+            r.playlist = vec![
+                FileEntry {
+                    name: "ep1.mp4".into(),
+                    duration: 600.0,
+                },
+                FileEntry {
+                    name: "ep2.mp4".into(),
+                    duration: 720.0,
+                },
+            ];
+            r.playlist_index = 1;
+        }
+        let snap = sync.get_room_state();
+        assert_eq!(snap.playlist.len(), 2);
+        assert_eq!(snap.playlist[0].name, "ep1.mp4");
+        assert_eq!(snap.playlist[1].name, "ep2.mp4");
+        assert_eq!(snap.playlist_index, 1);
+    }
+
+    // ── Sync: latency map ─────────────────────────────────────────
+
+    #[test]
+    fn test_latency_map_returns_clone() {
+        let sync = make_test_sync(false);
+        sync.latency_map.lock().insert("peer-a".into(), 0.123);
+        let latencies = sync.get_latencies();
+        assert_eq!(latencies.get("peer-a"), Some(&0.123));
+        // Mutating the returned clone must not affect the original
+        drop(latencies);
+        assert!(sync.get_latencies().contains_key("peer-a"));
+    }
+
+    // ── Sync: player socket roundtrip ─────────────────────────────
+
+    #[test]
+    fn test_set_get_player_socket() {
+        let sync = make_test_sync(false);
+        assert!(sync.get_player_socket().is_none());
+        sync.set_player_socket(Some("/tmp/mpv.sock".into()));
+        assert_eq!(sync.get_player_socket(), Some("/tmp/mpv.sock".into()));
+        sync.set_player_socket(None);
+        assert!(sync.get_player_socket().is_none());
+    }
+
+    // ── Sync: update_playstate non-host ───────────────────────────
+
+    #[test]
+    fn test_update_playstate_ignored_when_not_host() {
+        let sync = make_test_sync(false);
+        sync.update_playstate(100.0, false);
+        // Room state should remain at default since not host
+        assert_eq!(sync.room.lock().position, 0.0);
+        assert!(sync.room.lock().paused);
+        assert_eq!(sync.room.lock().seq, 0);
+    }
+
+    // ── Sync: misc public accessors ───────────────────────────────
+
+    #[test]
+    fn test_get_peer_stats_empty() {
+        let sync = make_test_sync(false);
+        let stats = sync.get_peer_stats();
+        assert!(stats.is_empty());
+    }
+
+    #[test]
+    fn test_get_connection_returns_clone() {
+        let sync = make_test_sync(false);
+        let conn = sync.get_connection();
+        assert_eq!(conn.uname(), "testuser");
+        assert!(!conn.is_host());
+    }
+
+    // ── Sync: update_speed ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_update_speed_as_host() {
+        let sync = make_test_sync(true);
+        sync.update_speed(2.0).await;
+        assert_eq!(sync.room.lock().speed, 2.0);
+        assert_eq!(sync.room.lock().seq, 1);
+    }
+
+    #[tokio::test]
+    async fn test_update_speed_ignored_when_not_host() {
+        let sync = make_test_sync(false);
+        sync.update_speed(3.0).await;
+        assert_eq!(sync.room.lock().speed, 1.0); // default
+        assert_eq!(sync.room.lock().seq, 0);
+    }
+
+    // ── Async: send_controller_change ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_send_controller_change_as_host_no_panic() {
+        let sync = make_test_sync(true);
+        sync.send_controller_change("peer-x", ControllerAction::Add)
+            .await;
+        sync.send_controller_change("peer-x", ControllerAction::Remove)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_send_controller_change_ignored_non_host() {
+        let sync = make_test_sync(false);
+        sync.send_controller_change("peer-x", ControllerAction::Add)
+            .await;
+    }
+
+    // ── Async: send_file_info ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_send_file_info_as_host_no_panic() {
+        let sync = make_test_sync(true);
+        sync.send_file_info(Some(FileMetadata {
+            name: "movie.mkv".into(),
+            size: 1_000_000,
+            duration: 3600.0,
+            checksum: None,
+        }))
+        .await;
+        sync.send_file_info(None).await;
+    }
+
+    #[tokio::test]
+    async fn test_send_file_info_ignored_non_host() {
+        let sync = make_test_sync(false);
+        sync.send_file_info(Some(FileMetadata {
+            name: "movie.mkv".into(),
+            size: 1_000_000,
+            duration: 3600.0,
+            checksum: None,
+        }))
+        .await;
+    }
+
+    // ── Async: set_ready ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_set_ready_non_host_no_panic() {
+        let sync = make_test_sync(false);
+        sync.set_ready(true, None).await;
+        sync.set_ready(false, Some("bob")).await;
+    }
+
+    #[tokio::test]
+    async fn test_set_ready_as_host_updates_state() {
+        let sync = make_test_sync(true);
+        sync.set_ready(true, None).await;
+        assert!(sync.room.lock().ready_states.get("testuser") == Some(&true));
+        sync.set_ready(false, None).await;
+        assert!(sync.room.lock().ready_states.get("testuser") == Some(&false));
+    }
+
+    // ── Async: send_voice_mute ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_send_voice_mute_non_host_no_panic() {
+        let sync = make_test_sync(false);
+        sync.send_voice_mute(true).await;
+        sync.send_voice_mute(false).await;
+    }
+
+    #[tokio::test]
+    async fn test_send_voice_mute_as_host_no_panic() {
+        let sync = make_test_sync(true);
+        sync.send_voice_mute(true).await;
+    }
+
+    // ── Async: request_set_speed ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_request_set_speed_non_host_no_panic() {
+        let sync = make_test_sync(false);
+        sync.request_set_speed(1.5).await;
+    }
+
+    #[tokio::test]
+    async fn test_request_set_speed_as_host() {
+        let sync = make_test_sync(true);
+        sync.request_set_speed(2.5).await;
+        assert_eq!(sync.room.lock().speed, 2.5);
+        assert_eq!(sync.room.lock().seq, 1);
+    }
+
+    // ── Async: set_playlist_index ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_set_playlist_index_as_host() {
+        let sync = make_test_sync(true);
+        // Need playlist first
+        {
+            let mut r = sync.room.lock();
+            r.playlist = vec![
+                FileEntry {
+                    name: "a.mp4".into(),
+                    duration: 100.0,
+                },
+                FileEntry {
+                    name: "b.mp4".into(),
+                    duration: 200.0,
+                },
+            ];
+        }
+        sync.set_playlist_index(1).await;
+        let snap = sync.get_room_state();
+        assert_eq!(snap.playlist_index, 1);
+        assert_eq!(snap.position, 0.0); // reset on index change
+    }
+
+    #[tokio::test]
+    async fn test_set_playlist_index_non_host_no_panic() {
+        let sync = make_test_sync(false);
+        sync.set_playlist_index(0).await;
+    }
+
+    // ── Misc: now_ms helper ───────────────────────────────────────
+
+    #[test]
+    fn test_now_ms_returns_reasonable_value() {
+        let t = now_ms();
+        assert!(t > 1_700_000_000_000); // after ~2023
+        assert!(t < 3_000_000_000_000); // before ~2065
+        let t2 = now_ms();
+        assert!(t2 >= t);
+    }
+
+    // ── Misc: RoomStateSnapshot derives ───────────────────────────
+
+    #[test]
+    fn test_room_state_snapshot_debug_and_clone() {
+        let snap = RoomStateSnapshot {
+            position: 5.0,
+            paused: true,
+            set_by: "alice".into(),
+            seq: 42,
+            playlist: vec![],
+            playlist_index: 0,
+            ready_states: HashMap::new(),
+            controllers: vec![],
+        };
+        let cloned = snap.clone();
+        assert_eq!(cloned.position, 5.0);
+        assert_eq!(cloned.seq, 42);
+        assert_eq!(cloned.set_by, "alice");
+        assert!(format!("{:?}", snap).contains("5.0"));
     }
 }

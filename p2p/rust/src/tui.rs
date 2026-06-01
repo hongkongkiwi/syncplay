@@ -292,6 +292,9 @@ async fn handle_input(
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => {
                     if s.input.is_empty() {
+                        drop(s);
+                        // Graceful quit: notify peers before disconnecting
+                        sync.get_connection().disconnect().await;
                         return true;
                     }
                     s.input.clear();
@@ -329,6 +332,24 @@ async fn handle_input(
                         let pos = (s.position_secs - 10.0).max(0.0);
                         drop(s);
                         sync.request_seek(pos).await;
+                    }
+                }
+                KeyCode::Char('<') | KeyCode::Char(',') => {
+                    if s.connected {
+                        drop(s);
+                        sync.request_set_speed(0.5).await;
+                    }
+                }
+                KeyCode::Char('>') | KeyCode::Char('.') => {
+                    if s.connected {
+                        drop(s);
+                        sync.request_set_speed(2.0).await;
+                    }
+                }
+                KeyCode::Char('/') => {
+                    if s.connected {
+                        drop(s);
+                        sync.request_set_speed(1.0).await;
                     }
                 }
                 KeyCode::Char('m') => {
@@ -441,7 +462,7 @@ fn draw(f: &mut Frame, state: &UiState) {
         f.area(),
     );
     let area = f.area();
-    let help_h = if state.help_expanded { 8 } else { 1 };
+    let help_h = if state.help_expanded { 9 } else { 1 };
 
     // Adaptive: if terminal is very narrow (< 100 cols), stack instead of side-by-side
     let use_wide = area.width >= 100;
@@ -828,8 +849,8 @@ fn draw_help(f: &mut Frame, area: Rect, state: &UiState) {
             Line::from(vec![Span::styled(" s/a    ", Style::default().fg(theme::DIM)), Span::raw("seek ±10s           "), Span::styled(" m      ", Style::default().fg(theme::DIM)), Span::raw("mute mic")]),
             Line::from(vec![Span::styled(" ↑↓PgUp ", Style::default().fg(theme::DIM)), Span::raw("scroll chat         "), Span::styled(" j/k    ", Style::default().fg(theme::DIM)), Span::raw("scroll playlist")]),
             Line::from(vec![Span::styled(" Enter  ", Style::default().fg(theme::DIM)), Span::raw("send chat           "), Span::styled(" Tab    ", Style::default().fg(theme::DIM)), Span::raw("toggle voice")]),
-            Line::from(vec![Span::styled("COMMANDS", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))]),
-            Line::from(Span::styled(" /send <file>  /playlist add <file>  /playlist index <n>  /ready  /controller add/remove <name>", Style::default().fg(theme::DIM))),
+            Line::from(Span::styled("COMMANDS", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(" /send <file>  /playlist add/index/clear  /users  /nick <name>  /ready  /controller add/remove <name>  /cancel", Style::default().fg(theme::DIM))),
             Line::from(Span::styled(" /react <n> :emoji:  /shrug  /tableflip  /lenny  /file <path>  /help  /settings", Style::default().fg(theme::DIM))),
         ];
         f.render_widget(
@@ -842,7 +863,7 @@ fn draw_help(f: &mut Frame, area: Rect, state: &UiState) {
             area,
         );
     } else {
-        let help = Span::styled(" q:quit ?:help space:ready p:pause s:+10s a:-10s m:mute enter:chat  /help for commands", Style::default().fg(theme::DIM));
+        let help = Span::styled(" q:quit ?:help space:ready p:pause s:+10s a:-10s <:0.5x >:2x /:1x m:mute enter:chat  /help for commands", Style::default().fg(theme::DIM));
         f.render_widget(
             Paragraph::new(Line::from(help)).style(Style::default().bg(theme::SURFACE)),
             area,
@@ -934,7 +955,7 @@ async fn handle_command(input: &str, state: &Arc<Mutex<UiState>>, sync: &SyncMan
     let arg1 = parts.get(1).copied().unwrap_or("");
     let arg2 = parts.get(2).copied().unwrap_or("");
     let response = match cmd {
-        "/help" | "/h" => "/send <file> /playlist add/index /controller add/remove /ready /react /shrug /tableflip /lenny /file <path> /settings".to_string(),
+        "/help" | "/h" => "/send <file> [peer] /playlist add/index/clear /controller add/remove /ready /react /users /nick <name> /cancel /shrug /tableflip /lenny /file <path> /settings".to_string(),
         "/send" | "/download" | "/dl" => {
             if arg1.is_empty() { "Usage: /send <filepath>".to_string() }
             else {
@@ -971,7 +992,23 @@ async fn handle_command(input: &str, state: &Arc<Mutex<UiState>>, sync: &SyncMan
             if let Ok(n) = arg2.parse::<usize>() { sync.set_playlist_index(n).await; format!("Jumping to item {n}") }
             else { "Usage: /playlist index <n>".to_string() }
         }
+        "/playlist" if arg1 == "clear" => {
+            sync.set_playlist(vec![]).await;
+            "Playlist cleared".to_string()
+        }
         "/ready" => { sync.set_ready(true, None).await; "You are now ready".to_string() }
+        "/users" | "/who" => {
+            let stats = sync.get_peer_stats();
+            let names: Vec<String> = stats.iter().map(|(_, name, _, _)| name.clone()).collect();
+            format!("{} peers: {}", names.len(), names.join(", "))
+        }
+        "/nick" => {
+            if arg1.is_empty() { "Usage: /nick <newname>".to_string() }
+            else { format!("Nick change requires reconnect — restart with --username {arg1}") }
+        }
+        "/cancel" => {
+            "To cancel a transfer, restart the client — transfers cannot be cancelled mid-flight".to_string()
+        }
         cmd if cmd.starts_with("/controller") => {
             if !sync.is_host() { "Only host can manage controllers".to_string() }
             else if arg1 == "add" && !arg2.is_empty() { sync.add_controller(arg2); sync.send_controller_change(arg2, crate::messages::ControllerAction::Add).await; format!("{arg2} can now control playback") }
