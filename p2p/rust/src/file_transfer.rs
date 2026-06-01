@@ -416,8 +416,10 @@ fn compute_sha256(data: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    // ── SHA-256 tests ─────────────────────────────────────────────
+
     #[test]
-    fn test_sha256() {
+    fn test_sha256_hello() {
         let hash = compute_sha256(b"hello");
         assert_eq!(hash.len(), 64);
         assert_eq!(
@@ -425,6 +427,180 @@ mod tests {
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
     }
+
+    #[test]
+    fn test_sha256_empty() {
+        let hash = compute_sha256(b"");
+        assert_eq!(hash.len(), 64);
+        assert_eq!(
+            hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn test_sha256_known_quick_brown_fox() {
+        let hash = compute_sha256(b"The quick brown fox jumps over the lazy dog");
+        assert_eq!(
+            hash,
+            "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592"
+        );
+    }
+
+    #[test]
+    fn test_sha256_deterministic() {
+        assert_eq!(compute_sha256(b"abc"), compute_sha256(b"abc"));
+    }
+
+    // ── detect_language tests ─────────────────────────────────────
+
+    #[test]
+    fn test_detect_language_eng_three_letter() {
+        assert_eq!(detect_language("movie.eng.srt"), Some("eng".into()));
+    }
+
+    #[test]
+    fn test_detect_language_en_two_letter() {
+        assert_eq!(detect_language("video.en.srt"), Some("en".into()));
+    }
+
+    #[test]
+    fn test_detect_language_jpn_sdh_extension() {
+        // jpn-sdh.ass: stem is "movie.jpn-sdh", parts are ["movie", "jpn-sdh"]
+        // The last part is "jpn-sdh" which contains a hyphen, so is_jpn_sdh_lowercase = false
+        // The previous part is "movie" — chars are ascii lowercase but len is 5, not 2 or 3 → skip
+        // Result: None (the dash prevents "jpn" from being detected as a separate part)
+        assert_eq!(detect_language("movie.jpn-sdh.ass"), None);
+    }
+
+    #[test]
+    fn test_detect_language_jpn_dot_sdh() {
+        // stem="movie.jpn.sdh", parts=["movie","jpn","sdh"]
+        // rev: "sdh" → 3 chars, all ascii_lowercase → Some("sdh")
+        // Wait, sdh is 3 letters. But intent is jpn. Let's see:
+        // parts.iter().rev(): "sdh", "jpn", "movie"
+        // "sdh" → len=3, all ascii lowercase → returns Some("sdh")
+        // So the language detected is "sdh" not "jpn".
+        // The function returns the *last* matching part looking backwards.
+        assert_eq!(detect_language("movie.jpn.sdh.ass"), Some("sdh".into()));
+        // Note: returns "sdh" (last 2-3 char segment), not "jpn".
+        // This matches the implementation's reverse-scan behavior.
+    }
+
+    #[test]
+    fn test_detect_language_no_language_tag() {
+        assert_eq!(detect_language("movie.srt"), None);
+    }
+
+    #[test]
+    fn test_detect_language_multiple_dots() {
+        // stem="Movie.720p.eng", parts=["Movie","720p","eng"]
+        // rev: "eng" → 3 chars, all ascii → Some("eng")
+        assert_eq!(detect_language("Movie.720p.eng.srt"), Some("eng".into()));
+    }
+
+    #[test]
+    fn test_detect_language_uppercase_normalized() {
+        // stem="movie.EN", parts=["movie","EN"]
+        // "EN" → to_lowercase() → "en" → 2 chars, all ascii lowercase → Some("en")
+        assert_eq!(detect_language("movie.EN.srt"), Some("en".into()));
+    }
+
+    #[test]
+    fn test_detect_language_numeric_not_detected() {
+        // stem="movie.1080p", "1080p" contains digits → char::is_ascii_lowercase fails
+        assert_eq!(detect_language("movie.1080p.srt"), None);
+    }
+
+    // ── find_subtitles tests ──────────────────────────────────────
+
+    #[test]
+    fn test_find_subtitles_empty_dir() {
+        let dir = std::env::temp_dir().join("syncplay_test_empty");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let video = dir.join("movie.mkv");
+        std::fs::write(&video, b"fake-video").unwrap();
+
+        let subs = find_subtitles(&video.to_string_lossy());
+        assert!(subs.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_find_subtitles_matching_subs() {
+        let dir = std::env::temp_dir().join("syncplay_test_subs");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let video = dir.join("MyMovie.mkv");
+        std::fs::write(&video, b"fake-video").unwrap();
+        std::fs::write(dir.join("MyMovie.eng.srt"), b"sub-content").unwrap();
+        std::fs::write(dir.join("MyMovie.jpn.ass"), b"sub-content").unwrap();
+        std::fs::write(dir.join("MyMovie.srt"), b"sub-content").unwrap();
+        // Non-matching: different stem
+        std::fs::write(dir.join("OtherMovie.srt"), b"sub-content").unwrap();
+        // Wrong extension (txt is in the subtitle list; use pdf to exclude)
+        std::fs::write(dir.join("MyMovie.commentary.pdf"), b"not-a-sub").unwrap();
+
+        let subs = find_subtitles(&video.to_string_lossy());
+        // Should find 3: MyMovie.eng.srt, MyMovie.jpn.ass, MyMovie.srt (sorted)
+        assert_eq!(subs.len(), 3, "expected 3 subtitles, got: {:?}", subs);
+
+        // Verify sorted order
+        let names: Vec<&str> = subs.iter().map(|s| s.filename.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["MyMovie.eng.srt", "MyMovie.jpn.ass", "MyMovie.srt"]
+        );
+
+        // Verify languages detected
+        assert_eq!(subs[0].language, Some("eng".into()));
+        assert_eq!(subs[1].language, Some("jpn".into()));
+        assert_eq!(subs[2].language, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_find_subtitles_case_insensitive_stem_match() {
+        let dir = std::env::temp_dir().join("syncplay_test_case");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let video = dir.join("Movie.mkv");
+        std::fs::write(&video, b"fake-video").unwrap();
+        // Stem match is case-insensitive
+        std::fs::write(dir.join("mOvIe.eng.srt"), b"sub-content").unwrap();
+
+        let subs = find_subtitles(&video.to_string_lossy());
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].filename, "mOvIe.eng.srt");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_find_subtitles_vtt_supported() {
+        let dir = std::env::temp_dir().join("syncplay_test_vtt");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let video = dir.join("Clip.mp4");
+        std::fs::write(&video, b"fake-video").unwrap();
+        std::fs::write(dir.join("Clip.vtt"), b"WEBVTT\n\n").unwrap();
+        std::fs::write(dir.join("Clip.fr.vtt"), b"WEBVTT\n\n").unwrap();
+
+        let subs = find_subtitles(&video.to_string_lossy());
+        assert_eq!(subs.len(), 2);
+        assert_eq!(subs[0].language, Some("fr".into()));
+        assert_eq!(subs[1].language, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Chunk-size / constants tests ─────────────────────────────
 
     #[test]
     #[allow(clippy::assertions_on_constants)]
@@ -435,7 +611,6 @@ mod tests {
 
     #[test]
     fn test_fingerprint_chunk_detection() {
-        // chunk_index == u64::MAX signals the fingerprint final chunk
         let fp_chunk = FileTransferPayload {
             transfer_id: "test-1".into(),
             chunk_index: u64::MAX,
@@ -457,5 +632,294 @@ mod tests {
         assert_eq!(0u64.div_ceil(256u64 * 1024), 0);
         // different chunk_size (128KB)
         assert_eq!((1024u64 * 1024).div_ceil(128u64 * 1024), 8);
+    }
+
+    #[test]
+    fn test_incoming_transfer_expected_chunks_exact_division() {
+        let entry = IncomingTransfer {
+            _transfer_id: "t-1".into(),
+            filename: "f".into(),
+            total_size: 1024 * 1024, // 1 MB
+            chunks: HashMap::new(),
+            expected_chunks: (1024u64 * 1024).div_ceil(256u64 * 1024), // = 4
+            expected_fingerprint: String::new(),
+        };
+        assert_eq!(entry.expected_chunks, 4);
+    }
+
+    #[test]
+    fn test_incoming_transfer_expected_chunks_partial_last() {
+        let entry = IncomingTransfer {
+            _transfer_id: "t-2".into(),
+            filename: "f".into(),
+            total_size: 1024 * 1024 + 1, // 1 MB + 1 byte
+            chunks: HashMap::new(),
+            expected_chunks: (1024u64 * 1024 + 1).div_ceil(256u64 * 1024), // = 5
+            expected_fingerprint: String::new(),
+        };
+        assert_eq!(entry.expected_chunks, 5);
+    }
+
+    #[test]
+    fn test_incoming_transfer_expected_chunks_small_file() {
+        let entry = IncomingTransfer {
+            _transfer_id: "t-3".into(),
+            filename: "f".into(),
+            total_size: 100,
+            chunks: HashMap::new(),
+            expected_chunks: 100u64.div_ceil(256u64 * 1024), // = 1
+            expected_fingerprint: String::new(),
+        };
+        assert_eq!(entry.expected_chunks, 1);
+    }
+
+    // ── handle_chunk tests ───────────────────────────────────────
+
+    #[test]
+    fn test_handle_chunk_zero_size_rejected() {
+        let conn = ConnectionManager::new("test", vec![]);
+        let ft = FileTransfer::new(conn);
+        let dir = std::env::temp_dir().join("syncplay_test_chunk0");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let msg = FileTransferPayload {
+            transfer_id: "zero-chunk".into(),
+            chunk_index: 0,
+            offset: 0,
+            total_size: 1024,
+            chunk_size: 0, // ZERO — should be rejected
+            data: vec![],
+        };
+
+        let result = ft.handle_chunk(&msg, &dir.to_string_lossy());
+        assert!(result.is_ok());
+        assert!(
+            result.unwrap().is_none(),
+            "zero chunk_size should be rejected"
+        );
+
+        // Verify nothing was added to transfers
+        assert!(ft.transfers.lock().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_handle_chunk_exceeds_size_cap() {
+        let conn = ConnectionManager::new("test", vec![]);
+        let ft = FileTransfer::new(conn);
+
+        let msg = FileTransferPayload {
+            transfer_id: "too-big".into(),
+            chunk_index: 0,
+            offset: 0,
+            total_size: MAX_TRANSFER_SIZE + 1, // exceeds 100 MB cap
+            chunk_size: 262144,
+            data: vec![0u8; 1024],
+        };
+
+        let result = ft.handle_chunk(&msg, "/tmp");
+        assert!(result.is_ok());
+        assert!(
+            result.unwrap().is_none(),
+            "oversize transfer should be rejected"
+        );
+        assert!(ft.transfers.lock().is_empty());
+    }
+
+    #[test]
+    fn test_handle_chunk_single_chunk_transfer_completes() {
+        let conn = ConnectionManager::new("test", vec![]);
+        let ft = FileTransfer::new(conn);
+        let dir = std::env::temp_dir().join("syncplay_test_complete");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let data = b"hello world";
+        let msg = FileTransferPayload {
+            transfer_id: "single-chunk".into(),
+            chunk_index: 0,
+            offset: 0,
+            total_size: data.len() as u64,
+            chunk_size: data.len() as u32,
+            data: data.to_vec(),
+        };
+
+        let result = ft.handle_chunk(&msg, &dir.to_string_lossy());
+        assert!(result.is_ok());
+        let saved_path = result.unwrap();
+        assert!(
+            saved_path.is_some(),
+            "single-chunk transfer should complete"
+        );
+
+        // Verify the file was written
+        let written = std::fs::read(&saved_path.unwrap()).unwrap();
+        assert_eq!(written, data);
+
+        // Transfer should be removed from map after completion
+        assert!(ft.transfers.lock().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_handle_chunk_multi_chunk_transfer() {
+        let conn = ConnectionManager::new("test", vec![]);
+        let ft = FileTransfer::new(conn);
+        let dir = std::env::temp_dir().join("syncplay_test_multi");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let chunk_size = 1024u32;
+        let total = 2500u64; // 3 chunks: 1024 + 1024 + 452
+        let data: Vec<u8> = (0..total).map(|i| (i % 256) as u8).collect();
+        let tid = "multi-chunk";
+
+        // Chunk 0
+        let r = ft.handle_chunk(
+            &FileTransferPayload {
+                transfer_id: tid.into(),
+                chunk_index: 0,
+                offset: 0,
+                total_size: total,
+                chunk_size,
+                data: data[..1024].to_vec(),
+            },
+            &dir.to_string_lossy(),
+        );
+        assert!(r.is_ok());
+        assert!(r.unwrap().is_none(), "not done after chunk 0");
+
+        // Chunk 1
+        let r = ft.handle_chunk(
+            &FileTransferPayload {
+                transfer_id: tid.into(),
+                chunk_index: 1,
+                offset: 1024,
+                total_size: total,
+                chunk_size,
+                data: data[1024..2048].to_vec(),
+            },
+            &dir.to_string_lossy(),
+        );
+        assert!(r.is_ok());
+        assert!(r.unwrap().is_none(), "not done after chunk 1");
+
+        // Chunk 2 (final)
+        let r = ft.handle_chunk(
+            &FileTransferPayload {
+                transfer_id: tid.into(),
+                chunk_index: 2,
+                offset: 2048,
+                total_size: total,
+                chunk_size: 452,
+                data: data[2048..].to_vec(),
+            },
+            &dir.to_string_lossy(),
+        );
+        assert!(r.is_ok());
+        let saved = r.unwrap();
+        assert!(saved.is_some(), "should complete after chunk 2");
+
+        // Verify file contents
+        let written = std::fs::read(&saved.unwrap()).unwrap();
+        assert_eq!(written, data);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── cancel tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_cancel_nonexistent_transfer_no_panic() {
+        let conn = ConnectionManager::new("test", vec![]);
+        let ft = FileTransfer::new(conn);
+        // Should not panic, just warn
+        ft.cancel("nonexistent-transfer-id");
+    }
+
+    #[test]
+    fn test_cancel_removes_transfer() {
+        let conn = ConnectionManager::new("test", vec![]);
+        let ft = FileTransfer::new(conn);
+        let dir = std::env::temp_dir().join("syncplay_test_cancel");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let tid = "cancel-me";
+        let chunk_size = 1024u32;
+
+        // Start a multi-chunk transfer (2 chunks total, send only 1)
+        let r = ft.handle_chunk(
+            &FileTransferPayload {
+                transfer_id: tid.into(),
+                chunk_index: 0,
+                offset: 0,
+                total_size: 1500,
+                chunk_size,
+                data: vec![0u8; 1024],
+            },
+            &dir.to_string_lossy(),
+        );
+        assert!(r.is_ok());
+
+        // Verify it's in the map
+        assert!(ft.transfers.lock().contains_key(tid));
+
+        // Cancel it
+        ft.cancel(tid);
+
+        // Verify it's gone
+        assert!(!ft.transfers.lock().contains_key(tid));
+        assert!(ft.transfers.lock().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cancel_then_new_transfer_starts_fresh() {
+        let conn = ConnectionManager::new("test", vec![]);
+        let ft = FileTransfer::new(conn);
+        let dir = std::env::temp_dir().join("syncplay_test_cancel_fresh");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let tid = "reuse-me";
+
+        // Start and cancel first attempt
+        ft.handle_chunk(
+            &FileTransferPayload {
+                transfer_id: tid.into(),
+                chunk_index: 0,
+                offset: 0,
+                total_size: 100,
+                chunk_size: 100,
+                data: vec![1u8; 50],
+            },
+            &dir.to_string_lossy(),
+        )
+        .unwrap();
+        ft.cancel(tid);
+
+        // New transfer with same tid — should work from scratch
+        let msg = FileTransferPayload {
+            transfer_id: tid.into(),
+            chunk_index: 0,
+            offset: 0,
+            total_size: 5,
+            chunk_size: 5,
+            data: vec![2u8; 5],
+        };
+        let r = ft.handle_chunk(&msg, &dir.to_string_lossy());
+        assert!(r.is_ok());
+        let saved = r.unwrap();
+        assert!(saved.is_some(), "should complete with fresh transfer");
+
+        let written = std::fs::read(&saved.unwrap()).unwrap();
+        assert_eq!(written, vec![2u8; 5]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

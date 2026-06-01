@@ -424,4 +424,233 @@ mod tests {
         assert!(!cfg.features.is_empty());
         assert!(cfg.features.contains(&"chat".to_string()));
     }
+
+    // ── Turn URL parsing edge cases ────────────────────────────────────
+
+    #[test]
+    fn test_parse_turn_url_turns_no_auth() {
+        let (url, user, pass) = parse_turn_url("turns:relay.example.com:5349");
+        assert_eq!(url, "turns:relay.example.com:5349");
+        assert!(user.is_empty());
+        assert!(pass.is_empty());
+    }
+
+    #[test]
+    fn test_parse_turn_url_colon_in_password() {
+        // rsplit_once splits at the last ':', so "user:pa" becomes user, "ss" becomes pass
+        let (url, user, pass) = parse_turn_url("turn:user:pa:ss@host:3478");
+        assert_eq!(url, "turn:host:3478");
+        assert_eq!(user, "user:pa");
+        assert_eq!(pass, "ss");
+    }
+
+    #[test]
+    fn test_parse_turn_url_unknown_scheme() {
+        let (url, user, pass) = parse_turn_url("stun:example.com:3478");
+        assert_eq!(url, "stun:example.com:3478");
+        assert!(user.is_empty());
+        assert!(pass.is_empty());
+    }
+
+    #[test]
+    fn test_parse_turn_url_turns_user_no_pass() {
+        let (url, user, pass) = parse_turn_url("turns:bob@relay.example.com:5349");
+        assert_eq!(url, "turns:relay.example.com:5349");
+        assert_eq!(user, "bob");
+        assert!(pass.is_empty());
+    }
+
+    #[test]
+    fn test_parse_turn_url_user_no_pass() {
+        let (url, user, pass) = parse_turn_url("turn:bob@relay.example.com:3478");
+        assert_eq!(url, "turn:relay.example.com:3478");
+        assert_eq!(user, "bob");
+        assert!(pass.is_empty());
+    }
+
+    // ── Default value tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_player_config_default() {
+        let pc = PlayerConfig::default();
+        assert!(pc.path.is_empty());
+        assert!(pc.args.is_empty());
+        assert!(pc.file.is_none());
+    }
+
+    #[test]
+    fn test_network_config_default() {
+        let nc = NetworkConfig::default();
+        assert!(!nc.stun_servers.is_empty());
+        assert!(nc.stun_servers[0].starts_with("stun:"));
+        assert!(nc.turn_servers.is_empty());
+        assert_eq!(nc.reconnect_delay_secs, 5);
+        assert_eq!(nc.max_reconnect_attempts, 5);
+    }
+
+    #[test]
+    fn test_sync_config_default() {
+        let sc = SyncConfig::default();
+        assert_eq!(sc.sync_interval_ms, 500);
+        assert_eq!(sc.ping_interval_ms, 2000);
+        assert_eq!(sc.max_playlist_items, 250);
+        assert_eq!(sc.max_chat_length, 2000);
+        assert!(!sc.ready_at_start);
+    }
+
+    #[test]
+    fn test_default_username() {
+        let name = default_username();
+        assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn test_default_download_dir() {
+        let dir = default_download_dir();
+        assert!(dir.contains("Downloads"));
+        assert!(dir.contains("syncplay"));
+    }
+
+    #[test]
+    fn test_default_reconnect_delay() {
+        assert_eq!(default_reconnect_delay(), 5);
+    }
+
+    #[test]
+    fn test_default_sync_interval() {
+        assert_eq!(default_sync_interval(), 500);
+    }
+
+    #[test]
+    fn test_default_ping_interval() {
+        assert_eq!(default_ping_interval(), 2000);
+    }
+
+    #[test]
+    fn test_default_max_playlist() {
+        assert_eq!(default_max_playlist(), 250);
+    }
+
+    #[test]
+    fn test_default_max_chat() {
+        assert_eq!(default_max_chat(), 2000);
+    }
+
+    #[test]
+    fn test_default_features() {
+        let f = default_features();
+        assert_eq!(f.len(), 3);
+        assert!(f.contains(&"chat".to_string()));
+        assert!(f.contains(&"readiness".to_string()));
+        assert!(f.contains(&"playlist".to_string()));
+    }
+
+    #[test]
+    fn test_default_signaling_url() {
+        assert_eq!(default_signaling_url(), "ws://127.0.0.1:8998");
+    }
+
+    // ── Override tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_apply_overrides_partial() {
+        let mut cfg = P2pConfig::default();
+        let original_room = cfg.room.clone();
+        let original_sync = cfg.sync.sync_interval_ms;
+        let overrides = ConfigOverrides {
+            username: Some("onlyme".into()),
+            ..Default::default()
+        };
+        cfg.apply_overrides(&overrides);
+        assert_eq!(cfg.username, "onlyme");
+        // other fields unchanged
+        assert_eq!(cfg.room, original_room);
+        assert_eq!(cfg.sync.sync_interval_ms, original_sync);
+    }
+
+    #[test]
+    fn test_apply_overrides_sfu() {
+        let mut cfg = P2pConfig::default();
+        assert!(!cfg.sfu_enabled);
+        let overrides = ConfigOverrides {
+            sfu: Some(true),
+            ..Default::default()
+        };
+        cfg.apply_overrides(&overrides);
+        assert!(cfg.sfu_enabled);
+    }
+
+    // ── Save / load tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_config_load_missing_file() {
+        let result = P2pConfig::load("/nonexistent/path/syncplay-config.json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_save_load_roundtrip_with_voice() {
+        let mut cfg = P2pConfig::default();
+        cfg.voice_enabled = true;
+        cfg.sfu_enabled = true;
+        cfg.download_dir = "/custom/download/dir".to_string();
+        let tmp = std::env::temp_dir().join("syncplay-test-voice.json");
+        cfg.save(&tmp.to_string_lossy()).unwrap();
+        let loaded = P2pConfig::load(&tmp.to_string_lossy()).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+        assert!(loaded.voice_enabled);
+        assert!(loaded.sfu_enabled);
+        assert_eq!(loaded.download_dir, "/custom/download/dir");
+        assert_eq!(loaded.username, cfg.username);
+    }
+
+    #[test]
+    fn test_config_password_not_serialized() {
+        let mut cfg = P2pConfig::default();
+        cfg.password = "secret123".to_string();
+        let json = serde_json::to_string_pretty(&cfg).unwrap();
+        // Password should NOT appear in serialized output
+        assert!(!json.contains("secret123"));
+        assert!(!json.contains("password"));
+    }
+
+    // ── ICE servers tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_ice_servers_turns() {
+        let mut cfg = P2pConfig::default();
+        cfg.network.stun_servers = vec![];
+        cfg.network.turn_servers = vec!["turns:alice:secret@relay.example.com:5349".into()];
+        let servers = cfg.ice_servers();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].urls, vec!["turns:relay.example.com:5349"]);
+        assert_eq!(servers[0].username, "alice");
+        assert_eq!(servers[0].credential, "secret");
+    }
+
+    #[test]
+    fn test_ice_servers_only_turn_no_stun() {
+        let mut cfg = P2pConfig::default();
+        cfg.network.stun_servers = vec![];
+        cfg.network.turn_servers = vec!["turn:u:p@t.example.com:3478".into()];
+        let servers = cfg.ice_servers();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].username, "u");
+        assert_eq!(servers[0].credential, "p");
+    }
+
+    #[test]
+    fn test_ice_servers_mixed_stun_turn() {
+        let mut cfg = P2pConfig::default();
+        cfg.network.stun_servers = vec!["stun:custom.example.com:3478".into()];
+        cfg.network.turn_servers = vec![
+            "turn:user1:pass1@turn1.example.com:3478".into(),
+            "turns:user2:pass2@turn2.example.com:5349".into(),
+        ];
+        let servers = cfg.ice_servers();
+        assert_eq!(servers.len(), 3); // STUN + 2 TURN
+        assert_eq!(servers[0].urls, vec!["stun:custom.example.com:3478"]);
+        assert_eq!(servers[1].username, "user1");
+        assert_eq!(servers[2].username, "user2");
+    }
 }

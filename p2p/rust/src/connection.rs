@@ -1094,6 +1094,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    // ── Constructor tests ────────────────────────────────────────────
+
     #[test]
     fn test_connection_manager_new() {
         let cm = ConnectionManager::new("alice", vec!["chat".into()]);
@@ -1102,6 +1104,24 @@ mod tests {
         assert!(cm.pid().is_empty());
         assert!(!cm.is_host());
     }
+
+    #[test]
+    fn test_connection_manager_with_config() {
+        let cfg = P2pConfig {
+            username: "bob".into(),
+            room: "test-room".into(),
+            sfu_enabled: true,
+            features: vec!["sfu".into(), "chat".into()],
+            ..Default::default()
+        };
+        let cm = ConnectionManager::with_config("bob", vec![], cfg);
+        assert_eq!(cm.uname(), "bob");
+        assert!(cm.is_sfu());
+        assert_eq!(cm.pcount(), 0);
+        assert!(!cm.is_host());
+    }
+
+    // ── Identity tests ───────────────────────────────────────────────
 
     #[test]
     fn test_set_id_and_host_check() {
@@ -1117,6 +1137,40 @@ mod tests {
         cm.set_id("peer-2", "peer-1");
         assert!(!cm.is_host());
     }
+
+    #[test]
+    fn test_is_host_empty_pid() {
+        let cm = ConnectionManager::new("alice", vec![]);
+        // pid defaults to "" and hid defaults to "" — both empty, is_host returns false
+        assert!(!cm.is_host());
+        // Set hid to something but leave pid empty
+        cm.set_id("", "some-host");
+        assert!(!cm.is_host());
+    }
+
+    #[test]
+    fn test_uname_returns_username() {
+        let cm = ConnectionManager::new("charlie", vec![]);
+        assert_eq!(cm.uname(), "charlie");
+    }
+
+    #[test]
+    fn test_pcount_empty() {
+        let cm = ConnectionManager::new("alice", vec![]);
+        assert_eq!(cm.pcount(), 0);
+    }
+
+    #[test]
+    fn test_pid_and_hid_after_set() {
+        let cm = ConnectionManager::new("alice", vec![]);
+        assert!(cm.pid().is_empty());
+        assert!(cm.hid().is_empty());
+        cm.set_id("peer-a", "host-b");
+        assert_eq!(cm.pid(), "peer-a");
+        assert_eq!(cm.hid(), "host-b");
+    }
+
+    // ── Host callbacks ───────────────────────────────────────────────
 
     #[test]
     fn test_set_host_triggers_callback() {
@@ -1154,10 +1208,113 @@ mod tests {
     }
 
     #[test]
+    fn test_set_host_same_value_noop() {
+        let cm = ConnectionManager::new("alice", vec![]);
+        cm.set_id("peer-1", "peer-1");
+        let called = Arc::new(AtomicBool::new(false));
+        let c = called.clone();
+        cm.on_host(move |_, _| {
+            c.store(true, Ordering::SeqCst);
+        });
+        // Set to the same value — callback should NOT fire
+        cm.set_host("peer-1", "no_change");
+        assert!(!called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_multiple_on_host_callbacks_fire() {
+        let cm = ConnectionManager::new("alice", vec![]);
+        cm.set_id("peer-1", "peer-1");
+        let c1 = Arc::new(AtomicBool::new(false));
+        let c2 = Arc::new(AtomicBool::new(false));
+        let a = c1.clone();
+        let b = c2.clone();
+        cm.on_host(move |_, _| {
+            a.store(true, Ordering::SeqCst);
+        });
+        cm.on_host(move |_, _| {
+            b.store(true, Ordering::SeqCst);
+        });
+        cm.set_host("peer-2", "election");
+        assert!(c1.load(Ordering::SeqCst));
+        assert!(c2.load(Ordering::SeqCst));
+    }
+
+    // ── Leave / disconnect callbacks ─────────────────────────────────
+
+    #[test]
+    fn test_on_leave_registration_and_fire() {
+        let cm = ConnectionManager::new("alice", vec![]);
+        let called = Arc::new(AtomicBool::new(false));
+        let c = called.clone();
+        cm.on_leave(move |pid, reason| {
+            assert_eq!(pid, "peer-x");
+            assert_eq!(reason, "left");
+            c.store(true, Ordering::SeqCst);
+        });
+        for f in cm.0.on_leave.lock().iter() {
+            f("peer-x".into(), "left".into());
+        }
+        assert!(called.load(Ordering::SeqCst));
+    }
+
+    // ── Signal tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_sig_no_channel() {
+        let cm = ConnectionManager::new("alice", vec![]);
+        // sig() with no channel set should not panic; just logs a warning
+        cm.sig("test message");
+        // No assertion needed — test passes if no panic
+    }
+
+    #[test]
+    fn test_set_sig_then_sig() {
+        let cm = ConnectionManager::new("alice", vec![]);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
+        cm.set_sig(tx);
+        cm.sig("hello");
+        // The signal should be available on the receiver
+        match rx.try_recv() {
+            Ok(msg) => assert_eq!(msg, "hello"),
+            _ => panic!("Expected signal message"),
+        }
+    }
+
+    // ── IceState tests ──────────────────────────────────────────────
+
+    #[test]
     fn test_ice_state_display() {
         assert_eq!(IceState::New.to_string(), "new");
         assert_eq!(IceState::Connected.to_string(), "connected");
         assert_eq!(IceState::Failed.to_string(), "failed");
+    }
+
+    #[test]
+    fn test_ice_state_display_all() {
+        // Every variant returns a non-empty Display string
+        assert!(!IceState::New.to_string().is_empty());
+        assert!(!IceState::Checking.to_string().is_empty());
+        assert!(!IceState::Connected.to_string().is_empty());
+        assert!(!IceState::Disconnected.to_string().is_empty());
+        assert!(!IceState::Failed.to_string().is_empty());
+        assert!(!IceState::Closed.to_string().is_empty());
+        // Spot-check a few exact values
+        assert_eq!(IceState::Checking.to_string(), "connecting...");
+        assert_eq!(IceState::Disconnected.to_string(), "disconnected");
+        assert_eq!(IceState::Closed.to_string(), "closed");
+    }
+
+    #[test]
+    fn test_ice_state_debug_clone_eq() {
+        // Clone, Debug, and PartialEq are derived — verify they work
+        let s1 = IceState::Connected;
+        let s2 = s1; // Copy (Clone + Copy)
+        assert_eq!(s1, s2);
+        assert!(format!("{s1:?}").contains("Connected"));
+        // PartialEq: different variants are not equal
+        assert_ne!(IceState::New, IceState::Connected);
+        assert_eq!(IceState::Failed, IceState::Failed);
     }
 
     #[test]
@@ -1168,8 +1325,124 @@ mod tests {
         );
     }
 
+    // ── Connection state tests ──────────────────────────────────────
+
+    #[test]
+    fn test_connection_state_initial() {
+        let cm = ConnectionManager::new("alice", vec![]);
+        assert_eq!(
+            cm.connection_state(),
+            crate::state::ConnectionState::Offline
+        );
+    }
+
+    #[test]
+    fn test_connection_state_after_reconnecting() {
+        let cm = ConnectionManager::new("alice", vec![]);
+        // set_reconnecting only accepts transitions from Connecting/
+        // Handshaking/ConnectingPeers/Ready/Reconnecting — not Offline.
+        // First move to Connecting, then to Reconnecting.
+        cm.0.state.set_connecting();
+        cm.set_state_reconnecting(2, 5);
+        assert_eq!(
+            cm.connection_state(),
+            crate::state::ConnectionState::Reconnecting {
+                attempt: 2,
+                max_attempts: 5,
+            }
+        );
+    }
+
+    // ── ICE configuration tests ─────────────────────────────────────
+
+    #[test]
+    fn test_default_ice_conf() {
+        let conf = default_ice_conf();
+        // Must have at least one ICE server (STUN fallback)
+        assert!(!conf.ice_servers.is_empty());
+        // The default STUN servers should include Google STUN
+        let urls = &conf.ice_servers[0].urls;
+        assert!(!urls.is_empty());
+        assert!(urls.contains(&"stun:stun.l.google.com:19302".to_string()));
+    }
+
+    #[test]
+    fn test_ice_conf_from_config_empty_servers() {
+        let cfg = P2pConfig::default();
+        let conf = ice_conf_from_config(&cfg);
+        // With empty STUN/TURN config, should fall back to default (Google STUN)
+        assert!(!conf.ice_servers.is_empty());
+        let urls = &conf.ice_servers[0].urls;
+        assert!(urls.contains(&"stun:stun.l.google.com:19302".to_string()));
+    }
+
+    // ── Peers tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_peers_empty() {
+        let cm = ConnectionManager::new("alice", vec![]);
+        assert!(cm.peers().is_empty());
+    }
+
+    #[test]
+    fn test_has_unknown() {
+        let cm = ConnectionManager::new("alice", vec![]);
+        assert!(!cm.has("nonexistent"));
+    }
+
     #[test]
     fn test_peer_stats_empty() {
         assert!(ConnectionManager::new("a", vec![]).peer_stats().is_empty());
+    }
+
+    // ── SFU tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_sfu_default_false() {
+        let cm = ConnectionManager::new("alice", vec![]);
+        assert!(!cm.is_sfu());
+    }
+
+    #[test]
+    fn test_is_sfu_with_config_true() {
+        let cfg = P2pConfig {
+            sfu_enabled: true,
+            ..Default::default()
+        };
+        let cm = ConnectionManager::with_config("alice", vec![], cfg);
+        assert!(cm.is_sfu());
+    }
+
+    // ── Constant tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_protocol_version() {
+        assert!(!PROTOCOL_VERSION.is_empty());
+        // Semantic versioning — should contain dots
+        assert!(PROTOCOL_VERSION.contains('.'));
+    }
+
+    #[test]
+    fn test_data_channel_label() {
+        assert!(!DATA_CHANNEL_LABEL.is_empty());
+        assert!(DATA_CHANNEL_LABEL.contains("syncplay"));
+    }
+
+    // ── Disconnect callback test ────────────────────────────────────
+
+    #[test]
+    fn test_on_disconnect_registration_and_fire() {
+        let cm = ConnectionManager::new("alice", vec![]);
+        let called = Arc::new(AtomicBool::new(false));
+        let c = called.clone();
+        cm.on_disconnect(move |pid, username| {
+            assert_eq!(pid, "peer-d");
+            assert_eq!(username, "disconnector");
+            c.store(true, Ordering::SeqCst);
+        });
+        for f in cm.0.on_disconnect.lock().iter() {
+            f("peer-d".into(), "disconnector".into());
+        }
+        assert!(called.load(Ordering::SeqCst));
     }
 }
