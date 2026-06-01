@@ -955,7 +955,7 @@ async fn handle_command(input: &str, state: &Arc<Mutex<UiState>>, sync: &SyncMan
     let arg1 = parts.get(1).copied().unwrap_or("");
     let arg2 = parts.get(2).copied().unwrap_or("");
     let response = match cmd {
-        "/help" | "/h" => "/send <file> [peer] /playlist add/index/clear /controller add/remove /ready /react /users /nick <name> /cancel /shrug /tableflip /lenny /file <path> /settings".to_string(),
+        "/help" | "/h" => "/send <file> [peer] /playlist add/index/clear /controller add/remove /ready /leave /version /users /nick <name> /cancel /shrug /tableflip /lenny /file <path> /settings".to_string(),
         "/send" | "/download" | "/dl" => {
             if arg1.is_empty() { "Usage: /send <filepath>".to_string() }
             else {
@@ -1021,6 +1021,15 @@ async fn handle_command(input: &str, state: &Arc<Mutex<UiState>>, sync: &SyncMan
                 if sync.get_player_socket().is_some() { "running" } else { "none" },
                 if state.lock().has_turn { "yes" } else { "no" },
                 "~/Downloads/syncplay")
+        }
+        "/leave" => {
+            sync.get_connection().disconnect().await;
+            "Disconnected from room — restart to join another".to_string()
+        }
+        "/version" => {
+            format!("syncplay-p2p v{} (protocol v{})",
+                env!("CARGO_PKG_VERSION"),
+                crate::connection::PROTOCOL_VERSION)
         }
         "/shrug" => format!("<you> {}", SHRUG),
         "/tableflip" => format!("<you> {}", TABLEFLIP),
