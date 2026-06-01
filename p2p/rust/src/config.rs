@@ -265,7 +265,7 @@ fn parse_turn_url(raw: &str) -> (String, String, String) {
     // Format: turn:user:pass@host:port or turns:user:pass@host:port
     if let Some(rest) = raw.strip_prefix("turn:") {
         if let Some((userpass, host)) = rest.rsplit_once('@') {
-            if let Some((user, pass)) = userpass.split_once(':') {
+            if let Some((user, pass)) = userpass.rsplit_once(':') {
                 return (format!("turn:{host}"), user.to_string(), pass.to_string());
             }
             return (format!("turn:{host}"), userpass.to_string(), String::new());
@@ -274,7 +274,7 @@ fn parse_turn_url(raw: &str) -> (String, String, String) {
     }
     if let Some(rest) = raw.strip_prefix("turns:") {
         if let Some((userpass, host)) = rest.rsplit_once('@') {
-            if let Some((user, pass)) = userpass.split_once(':') {
+            if let Some((user, pass)) = userpass.rsplit_once(':') {
                 return (format!("turns:{host}"), user.to_string(), pass.to_string());
             }
             return (format!("turns:{host}"), userpass.to_string(), String::new());

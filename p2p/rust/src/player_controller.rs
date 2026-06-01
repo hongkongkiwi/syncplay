@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use log::{debug, error, info};
+use rand::Rng;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
 use tokio::net::UnixStream;
@@ -51,6 +52,10 @@ pub struct PlayerController {
     event_tx: Option<mpsc::Sender<PlayerEvent>>,
     /// VLC RC port (only set for VLC)
     vlc_port: Option<u16>,
+    /// Handle to the child process watcher task (aborted on re-launch)
+    watcher_handle: Option<tokio::task::JoinHandle<()>>,
+    /// VLC RC password for the telnet interface (only set for VLC)
+    vlc_password: Option<String>,
 }
 
 impl PlayerController {
@@ -60,6 +65,8 @@ impl PlayerController {
             child: None,
             event_tx: None,
             vlc_port: None,
+            watcher_handle: None,
+            vlc_password: None,
         }
     }
 
@@ -95,7 +102,17 @@ impl PlayerController {
                     .map(|a| a.port())
                     .unwrap_or(4212);
                 self.vlc_port = Some(vlc_port);
+
+                // Generate random RC password to prevent unauthorized commands
+                let password: String = rand::thread_rng()
+                    .sample_iter(&rand::distributions::Alphanumeric)
+                    .take(16)
+                    .map(char::from)
+                    .collect();
+                self.vlc_password = Some(password.clone());
+
                 cmd.arg(format!("--rc-host=127.0.0.1:{vlc_port}"))
+                    .arg(format!("--rc-password={password}"))
                     .arg("--no-video-title-show")
                     .arg("--quiet")
                     .stdout(Stdio::null())
@@ -140,22 +157,29 @@ impl PlayerController {
         } else if let PlayerType::Vlc = self.player_type {
             if let Some(port) = self.vlc_port {
                 let tx2 = tx.clone();
+                let password = self.vlc_password.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = vlc_ipc_loop(port, tx2).await {
+                    if let Err(e) = vlc_ipc_loop(port, tx2, password).await {
                         error!("VLC IPC loop error: {e}");
                     }
                 });
             }
         }
 
+        // Cancel any stale watcher from a previous launch before spawning a new one
+        if let Some(handle) = self.watcher_handle.take() {
+            handle.abort();
+        }
+
         // Spawn child process watcher
         if let Some(mut child) = self.child.take() {
             let tx3 = tx.clone();
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 let status = child.wait();
                 let code = status.ok().and_then(|s| s.code());
                 let _ = tx3.send(PlayerEvent::PlayerExited { code }).await;
             });
+            self.watcher_handle = Some(handle);
         } else {
             error!("No child process to watch — launch may have failed");
             let _ = tx
@@ -427,10 +451,21 @@ pub async fn vlc_get_length(port: u16) -> Result<f64> {
 }
 
 /// VLC RC polling IPC loop — polls player state every 500ms and emits events.
-async fn vlc_ipc_loop(port: u16, tx: mpsc::Sender<PlayerEvent>) -> Result<()> {
+/// If a password is provided it is sent as the first line after connecting
+/// (VLC RC telnet auth).
+async fn vlc_ipc_loop(
+    port: u16,
+    tx: mpsc::Sender<PlayerEvent>,
+    password: Option<String>,
+) -> Result<()> {
     use tokio::time;
     let mut state = PlayerState::default();
     let mut first_file_emitted = false;
+
+    // Authenticate if a password was configured
+    if let Some(ref pwd) = password {
+        let _ = vlc_rc_command(port, pwd).await;
+    }
 
     loop {
         // Poll current state

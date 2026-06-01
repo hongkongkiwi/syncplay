@@ -974,8 +974,8 @@ async fn handle_command(input: &str, state: &Arc<Mutex<UiState>>, sync: &SyncMan
         "/ready" => { sync.set_ready(true, None).await; "You are now ready".to_string() }
         cmd if cmd.starts_with("/controller") => {
             if !sync.is_host() { "Only host can manage controllers".to_string() }
-            else if arg1 == "add" && !arg2.is_empty() { sync.add_controller(arg2); sync.send_controller_change(arg2, "add").await; format!("{arg2} can now control playback") }
-            else if arg1 == "remove" && !arg2.is_empty() { sync.remove_controller(arg2); sync.send_controller_change(arg2, "remove").await; format!("{arg2} removed from controllers") }
+            else if arg1 == "add" && !arg2.is_empty() { sync.add_controller(arg2); sync.send_controller_change(arg2, crate::messages::ControllerAction::Add).await; format!("{arg2} can now control playback") }
+            else if arg1 == "remove" && !arg2.is_empty() { sync.remove_controller(arg2); sync.send_controller_change(arg2, crate::messages::ControllerAction::Remove).await; format!("{arg2} removed from controllers") }
             else { "Usage: /controller add <name> or /controller remove <name>".to_string() }
         }
         "/settings" => {

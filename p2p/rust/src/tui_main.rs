@@ -77,26 +77,50 @@ async fn main() -> anyhow::Result<()> {
             "--version" | "-V" => version(),
             "--room" | "-r" => {
                 i += 1;
+                if i >= args.len() {
+                    eprintln!("Missing value for {}", args[i - 1]);
+                    std::process::exit(1);
+                }
                 overrides.room = Some(args[i].clone());
             }
             "--signaling" | "-s" => {
                 i += 1;
+                if i >= args.len() {
+                    eprintln!("Missing value for {}", args[i - 1]);
+                    std::process::exit(1);
+                }
                 overrides.signaling_url = Some(args[i].clone());
             }
             "--username" | "-u" => {
                 i += 1;
+                if i >= args.len() {
+                    eprintln!("Missing value for {}", args[i - 1]);
+                    std::process::exit(1);
+                }
                 overrides.username = Some(args[i].clone());
             }
             "--password" | "-P" => {
                 i += 1;
+                if i >= args.len() {
+                    eprintln!("Missing value for {}", args[i - 1]);
+                    std::process::exit(1);
+                }
                 overrides.password = Some(args[i].clone());
             }
             "--config" | "-c" => {
                 i += 1;
+                if i >= args.len() {
+                    eprintln!("Missing value for {}", args[i - 1]);
+                    std::process::exit(1);
+                }
                 config_path = Some(args[i].clone());
             }
             "--file" | "-f" => {
                 i += 1;
+                if i >= args.len() {
+                    eprintln!("Missing value for {}", args[i - 1]);
+                    std::process::exit(1);
+                }
                 overrides.file = Some(args[i].clone());
             }
             "--voice" => {
@@ -121,6 +145,11 @@ async fn main() -> anyhow::Result<()> {
     };
     cfg.apply_overrides(&overrides);
 
+    // Wire voice_enabled from config if not set via CLI
+    if !enable_voice {
+        enable_voice = cfg.voice_enabled;
+    }
+
     if cfg.room.is_empty() {
         cfg.room = "syncplay-tui".into();
     }
@@ -134,11 +163,6 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     let sync = SyncManager::new(conn.clone(), cfg.clone());
     sync.start().await;
-
-    // Auto-set ready if configured
-    if cfg.sync.ready_at_start {
-        sync.set_ready(true, None).await;
-    }
 
     // Auto-detect and launch player
     if cfg.player.path.is_empty() {
@@ -168,6 +192,8 @@ async fn main() -> anyhow::Result<()> {
             .await
         {
             Ok(mut rx) => {
+                // Set player socket BEFORE setting ready to avoid race
+                // (readiness broadcast needs the player socket to be available)
                 sync.set_player_socket(Some(socket.clone()));
                 println!("Player launched — IPC socket: {socket}");
                 let _player = pc; // keep alive to prevent Drop killing the child
@@ -202,6 +228,11 @@ async fn main() -> anyhow::Result<()> {
                 eprintln!("Failed to launch player: {e}");
             }
         }
+    }
+
+    // Auto-set ready if configured — now happens AFTER player socket is set
+    if cfg.sync.ready_at_start {
+        sync.set_ready(true, None).await;
     }
 
     let state = Arc::new(Mutex::new(UiState {

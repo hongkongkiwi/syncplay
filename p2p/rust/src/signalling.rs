@@ -416,6 +416,12 @@ async fn handle_connection(
 
                             ClientMessage::Signal { target, payload } => {
                                 if let (Some(ref pid), Some(ref rname)) = (&peer_id, &room_name) {
+                                    // Validate target before locking room
+                                    if target.is_empty() {
+                                        warn!("[signal] empty target from {pid}");
+                                        continue;
+                                    }
+
                                     // Rate limit
                                     let now = Instant::now();
                                     if now.duration_since(signal_window_start).as_millis() as u64 > SIGNAL_WINDOW_MS {
@@ -458,7 +464,7 @@ async fn handle_connection(
                                                         }
                                                     }
                                                 }
-                                                "ice" => {
+                                                "ice" | "ice-candidate" => {
                                                     if let Err(e) = sfu.handle_ice(
                                                         rname, pid,
                                                         &payload.candidate,
@@ -466,6 +472,8 @@ async fn handle_connection(
                                                         payload.sdp_mline_index,
                                                     ).await {
                                                         warn!("[sfu] ICE failed: {e}");
+                                                        // Send error feedback to client
+                                                        send_json(&tx, &err("sfu_error", &format!("ICE failed: {e}")));
                                                     }
                                                 }
                                                 _ => {
@@ -514,6 +522,11 @@ async fn handle_connection(
 
     // Cleanup
     if let (Some(pid), Some(rname)) = (&peer_id, &room_name) {
+        // SFU cleanup: remove peer from SFU server
+        if let Some(ref sfu) = sfu_server {
+            sfu.remove_peer(rname, pid).await;
+        }
+
         if let Some(room) = rooms.get(rname) {
             let mut r = room.lock();
 

@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -46,34 +46,79 @@ pub enum VoiceEvent {
     Error(String),
 }
 
-/// A lock-free-ish PCM ring buffer shared between decode tasks (producers)
-/// and the cpal output callback (consumer). Backed by a Mutex<VecDeque>.
+/// Per-peer PCM ring buffers shared between decode tasks (producers)
+/// and the cpal output callback (consumer). Each peer gets its own buffer;
+/// the output callback mixes by popping one sample from each non-empty
+/// buffer and summing with i16 saturation.
 #[derive(Clone)]
 struct VoiceBuffer {
-    inner: Arc<Mutex<VecDeque<i16>>>,
+    buffers: Arc<Mutex<Vec<VecDeque<i16>>>>,
     max_samples: usize,
+    /// Cumulative dropped samples (when a per-peer buffer is full and oldest
+    /// samples are evicted). Reset to 0 after emitting an Error event.
+    dropped_samples: Arc<AtomicU64>,
+    events_tx: Arc<Mutex<Option<mpsc::Sender<VoiceEvent>>>>,
 }
 
 impl VoiceBuffer {
-    fn new(max_samples: usize) -> Self {
+    fn new(max_samples: usize, events_tx: Arc<Mutex<Option<mpsc::Sender<VoiceEvent>>>>) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(VecDeque::with_capacity(max_samples))),
+            buffers: Arc::new(Mutex::new(Vec::new())),
             max_samples,
+            dropped_samples: Arc::new(AtomicU64::new(0)),
+            events_tx,
         }
     }
 
-    fn push_samples(&self, samples: &[i16]) {
-        let mut buf = self.inner.lock();
-        for &s in samples {
-            if buf.len() >= self.max_samples {
-                buf.pop_front();
+    /// Allocate a new per-peer buffer and return its index.
+    fn add_peer_buffer(&self) -> usize {
+        let mut bufs = self.buffers.lock();
+        let idx = bufs.len();
+        bufs.push(VecDeque::with_capacity(self.max_samples));
+        idx
+    }
+
+    /// Push decoded PCM samples into a specific peer's buffer.
+    /// If the buffer is full the oldest samples are dropped (tracked via
+    /// `dropped_samples`). When cumulative drops exceed 1000 an
+    /// `VoiceEvent::Error` is emitted and the counter resets.
+    fn push_samples(&self, peer_idx: usize, samples: &[i16]) {
+        let mut bufs = self.buffers.lock();
+        if let Some(buf) = bufs.get_mut(peer_idx) {
+            let mut dropped = 0u64;
+            for &s in samples {
+                if buf.len() >= self.max_samples {
+                    buf.pop_front();
+                    dropped += 1;
+                }
+                buf.push_back(s);
             }
-            buf.push_back(s);
+            if dropped > 0 {
+                let prev = self.dropped_samples.fetch_add(dropped, Ordering::Relaxed);
+                let total = prev + dropped;
+                if total >= 1000 {
+                    self.dropped_samples.store(0, Ordering::Relaxed);
+                    if let Some(tx) = self.events_tx.lock().as_ref() {
+                        let _ = tx.try_send(VoiceEvent::Error(format!(
+                            "Voice buffer overrun: {total} samples dropped"
+                        )));
+                    }
+                }
+            }
         }
     }
 
-    fn pop_sample(&self) -> i16 {
-        self.inner.lock().pop_front().unwrap_or(0)
+    /// Pop one sample from every non-empty per-peer buffer and return the
+    /// saturated i16 sum. Returns 0 (silence) when all buffers are empty.
+    fn pop_mixed_sample(&self) -> i16 {
+        let mut bufs = self.buffers.lock();
+        let mut sum: i32 = 0;
+        for buf in bufs.iter_mut() {
+            if let Some(s) = buf.pop_front() {
+                sum += s as i32;
+            }
+        }
+        sum.clamp(i16::MIN as i32, i16::MAX as i32) as i16
     }
 }
 
@@ -91,20 +136,24 @@ pub struct VoiceChat {
     output_buffer: VoiceBuffer,
     /// The cpal output stream — kept alive here (must not be moved to another thread)
     _output_stream: Mutex<Option<cpal::Stream>>,
+    /// Maps peer_id → per-peer buffer index inside `output_buffer`
+    peer_buffer_indices: Mutex<HashMap<String, usize>>,
 }
 
 impl VoiceChat {
     pub fn new(conn: ConnectionManager) -> Self {
+        let events_tx = Arc::new(Mutex::new(None));
         Self {
             conn,
             muted: Arc::new(AtomicBool::new(false)),
             local_track: None,
             peer_voices: Arc::new(Mutex::new(HashMap::new())),
-            events_tx: Arc::new(Mutex::new(None)),
+            events_tx: events_tx.clone(),
             _capture_handle: Mutex::new(None),
             _playback_streams: Mutex::new(HashMap::new()),
-            output_buffer: VoiceBuffer::new(96_000), // 2 seconds at 48kHz
+            output_buffer: VoiceBuffer::new(96_000, events_tx), // 2 seconds at 48kHz
             _output_stream: Mutex::new(None),
+            peer_buffer_indices: Mutex::new(HashMap::new()),
         }
     }
 
@@ -167,7 +216,7 @@ impl VoiceChat {
             &config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 for sample in data.iter_mut() {
-                    *sample = buf.pop_sample() as f32 / 32768.0;
+                    *sample = buf.pop_mixed_sample() as f32 / 32768.0;
                 }
             },
             move |err| {
@@ -329,7 +378,14 @@ impl VoiceChat {
         let pid2 = pid.clone();
         let buf = self.output_buffer.clone();
 
-        // Spawn a task to read RTP, decode Opus → PCM, and push to the shared buffer.
+        // Allocate a per-peer buffer slot so the mixer can sum contributions
+        // from all peers instead of serializing playback.
+        let peer_buf_idx = buf.add_peer_buffer();
+        self.peer_buffer_indices
+            .lock()
+            .insert(pid.clone(), peer_buf_idx);
+
+        // Spawn a task to read RTP, decode Opus → PCM, and push to the per-peer buffer.
         // We only capture the VoiceBuffer (Send + Sync), not the cpal stream.
         tokio::spawn(async move {
             let mut decoder = match opus::Decoder::new(48000, opus::Channels::Mono) {
@@ -370,7 +426,7 @@ impl VoiceChat {
                 match decoder.decode(&rtp_packet.payload, &mut pcm_buf, true) {
                     Ok(n_samples) => {
                         if n_samples > 0 {
-                            buf.push_samples(&pcm_buf[..n_samples]);
+                            buf.push_samples(peer_buf_idx, &pcm_buf[..n_samples]);
                         }
                     }
                     Err(ref e) if e.code() == opus::ErrorCode::BufferTooSmall => {

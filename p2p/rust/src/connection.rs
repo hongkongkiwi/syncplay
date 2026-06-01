@@ -30,7 +30,7 @@ use crate::state::{ConnectionStateMachine, SharedStateMachine};
 use crate::wire;
 
 pub const PROTOCOL_VERSION: &str = "2.0.0";
-const DATA_CHANNEL_LABEL: &str = "syncplay-v2";
+pub const DATA_CHANNEL_LABEL: &str = "syncplay-v2";
 const STUN_FALLBACK: &[&str] = &[
     "stun:stun.l.google.com:19302",
     "stun:stun1.l.google.com:19302",
@@ -90,6 +90,7 @@ pub struct Peer {
     pub dc: Arc<RTCDataChannel>,
     pub pc: Arc<RTCPeerConnection>,
     pub ice_state: Arc<Mutex<IceState>>,
+    pub queued_ice: Mutex<Vec<RTCIceCandidateInit>>,
 }
 
 impl Peer {
@@ -98,6 +99,19 @@ impl Peer {
             .send(data)
             .await
             .map_err(|e| anyhow::anyhow!("dc send: {e}"))
+    }
+
+    /// Flush all queued ICE candidates to the peer connection.
+    pub async fn flush_queued_ice(&self) {
+        let candidates: Vec<_> = {
+            let mut queued = self.queued_ice.lock();
+            queued.drain(..).collect()
+        };
+        for candidate in candidates {
+            if let Err(e) = self.pc.add_ice_candidate(candidate).await {
+                warn!("Failed to add queued ICE candidate: {e}");
+            }
+        }
     }
 }
 
@@ -441,6 +455,7 @@ impl ConnectionManager {
                         }
                     }
                     Ok(Message::Close(_)) | Err(_) => {
+                        cm.0.state.set_offline("signaling lost");
                         debug!("Signaling websocket closed");
                         break;
                     }
@@ -539,6 +554,10 @@ impl ConnectionManager {
     // ── Sending ──────────────────────────────────────────────────
 
     pub async fn send_all(&self, data: &Bytes, skip: Option<&str>) {
+        if !self.is_host() {
+            warn!("send_all called by non-host; ignoring");
+            return;
+        }
         for entry in self.0.peers.iter() {
             if Some(entry.key().as_str()) != skip {
                 if let Err(err) = entry.send(data).await {
@@ -559,6 +578,10 @@ impl ConnectionManager {
     }
 
     pub async fn bcast<T: wire::MessagePayload>(&self, p: &T, skip: Option<&str>) {
+        if !self.is_host() {
+            warn!("bcast called by non-host; ignoring");
+            return;
+        }
         match wire::encode(p) {
             Ok(data) => self.send_all(&data, skip).await,
             Err(e) => error!("Failed to encode broadcast: {e}"),
@@ -602,10 +625,6 @@ impl ConnectionManager {
     // ── WebRTC lifecycle ─────────────────────────────────────────
 
     pub async fn dial(&self, pid_str: &str, uname: &str) -> Result<()> {
-        if self.0.peers.contains_key(pid_str) {
-            debug!("Already connected to {uname} ({pid_str})");
-            return Ok(());
-        }
         info!("dial → {uname} ({pid_str})");
 
         let api = APIBuilder::new().build();
@@ -614,16 +633,30 @@ impl ConnectionManager {
         let dc = pc.create_data_channel(DATA_CHANNEL_LABEL, None).await?;
 
         let ice_state = Arc::new(Mutex::new(IceState::New));
-        self.0.peers.insert(
-            pid_str.to_string(),
-            Peer {
-                peer_id: pid_str.to_string(),
-                username: uname.to_string(),
-                dc: dc.clone(),
-                pc: pc.clone(),
-                ice_state: ice_state.clone(),
-            },
-        );
+
+        // Use entry() to avoid double-insert race
+        use dashmap::mapref::entry::Entry;
+        match self.0.peers.entry(pid_str.to_string()) {
+            Entry::Occupied(_) => {
+                debug!("Already connected to {uname} ({pid_str})");
+                return Ok(());
+            }
+            Entry::Vacant(vac) => {
+                vac.insert(Peer {
+                    peer_id: pid_str.to_string(),
+                    username: uname.to_string(),
+                    dc: dc.clone(),
+                    pc: pc.clone(),
+                    ice_state: ice_state.clone(),
+                    queued_ice: Mutex::new(Vec::new()),
+                });
+            }
+        }
+
+        // Flush any queued ICE candidates inline
+        if let Some(peer) = self.0.peers.get(pid_str) {
+            peer.flush_queued_ice().await;
+        }
 
         // ICE tracking — updates Peer's ice_state
         let is = ice_state.clone();
@@ -699,21 +732,39 @@ impl ConnectionManager {
         self._send_hello(pid_str).await;
 
         // Notify voice chat about the new peer connection
-        self.fire_pc(pc, pid_str);
+        self.fire_pc(pc.clone(), pid_str);
         Ok(())
     }
 
     pub async fn on_offer(&self, from: &str, sdp: &str) -> Result<()> {
-        if self.0.peers.contains_key(from) {
-            debug!("Already connected to {from}, ignoring duplicate");
-            return Ok(());
-        }
         info!("offer ← {from}");
 
         let api = APIBuilder::new().build();
         let ice_conf = self.ice_conf();
         let pc = Arc::new(api.new_peer_connection(ice_conf).await?);
         let ice_state = Arc::new(Mutex::new(IceState::Checking));
+
+        // Create a local data channel and insert partial Peer entry early
+        let dc = pc.create_data_channel(DATA_CHANNEL_LABEL, None).await?;
+        let from_owned = from.to_string();
+
+        // Use entry() to only insert if not already present (race-free)
+        use dashmap::mapref::entry::Entry;
+        match self.0.peers.entry(from_owned.clone()) {
+            Entry::Occupied(_) => {
+                debug!("Peer {from} already in map; not inserting partial entry");
+            }
+            Entry::Vacant(vac) => {
+                vac.insert(Peer {
+                    peer_id: from_owned.clone(),
+                    username: "unknown".to_string(),
+                    dc: dc.clone(),
+                    pc: pc.clone(),
+                    ice_state: ice_state.clone(),
+                    queued_ice: Mutex::new(Vec::new()),
+                });
+            }
+        }
 
         // ICE tracking
         let is = ice_state.clone();
@@ -752,7 +803,7 @@ impl ConnectionManager {
             Box::pin(async {})
         }));
 
-        // DC → validate label, store peer, dispatch messages
+        // DC → update peer entry (replace locally-created dc with received dc)
         let cm2 = self.clone();
         let pc2 = pc.clone();
         let f2 = from.to_string();
@@ -764,6 +815,7 @@ impl ConnectionManager {
             }
             let cm3 = cm2.clone();
             let f3 = f2.clone();
+            // Update the existing peer entry with the received DC
             cm3.0.peers.insert(
                 f3.clone(),
                 Peer {
@@ -772,6 +824,7 @@ impl ConnectionManager {
                     dc: dc.clone(),
                     pc: pc2.clone(),
                     ice_state: is2.clone(),
+                    queued_ice: Mutex::new(Vec::new()),
                 },
             );
             dc.on_message(Box::new(move |msg| {
@@ -829,21 +882,33 @@ impl ConnectionManager {
     }
 
     pub async fn on_ice(&self, from: &str, cand: &str, mid: &str, mline: u16) -> Result<()> {
+        let candidate = RTCIceCandidateInit {
+            candidate: cand.into(),
+            sdp_mid: if mid.is_empty() {
+                None
+            } else {
+                Some(mid.into())
+            },
+            sdp_mline_index: Some(mline),
+            username_fragment: None,
+        };
         if let Some(p) = self.0.peers.get(from) {
-            p.pc.add_ice_candidate(RTCIceCandidateInit {
-                candidate: cand.into(),
-                sdp_mid: if mid.is_empty() {
-                    None
-                } else {
-                    Some(mid.into())
-                },
-                sdp_mline_index: Some(mline),
-                username_fragment: None,
-            })
-            .await
-            .context("add ice candidate")?;
+            p.pc.add_ice_candidate(candidate)
+                .await
+                .context("add ice candidate")?;
         } else {
-            warn!("ICE candidate from unknown peer {from}");
+            // Peer not found — try entry() to queue on a partial entry if one exists
+            use dashmap::mapref::entry::Entry;
+            match self.0.peers.entry(from.to_string()) {
+                Entry::Occupied(occ) => {
+                    // Partial entry exists (pc being created) — queue the candidate
+                    occ.get().queued_ice.lock().push(candidate);
+                    debug!("Queued ICE candidate for {from} (PC still being created)");
+                }
+                Entry::Vacant(_) => {
+                    warn!("ICE candidate from unknown peer {from}");
+                }
+            }
         }
         Ok(())
     }
@@ -898,6 +963,14 @@ impl ConnectionManager {
             .get(pid)
             .map(|p| p.username.clone())
             .unwrap_or_else(|| "unknown".to_string());
+
+        // Fire on_disconnect callbacks before removing the stale peer
+        {
+            let on_disconnect = self.0.on_disconnect.lock();
+            for f in on_disconnect.iter() {
+                f(pid.to_string(), uname.clone());
+            }
+        }
 
         // Remove the stale peer (but don't fire leave yet)
         if let Some((_, p)) = self.0.peers.remove(pid) {

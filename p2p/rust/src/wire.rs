@@ -53,6 +53,12 @@ impl_payload!(ControllerChangePayload, ControllerChange);
 /// Encode any payload into a wire frame.
 pub fn encode<T: MessagePayload>(payload: &T) -> Result<Bytes, WireError> {
     let body = rmp_serde::to_vec(payload)?;
+    if body.len() > MAX_PAYLOAD_SIZE {
+        return Err(WireError::OversizedPayload {
+            size: body.len(),
+            max: MAX_PAYLOAD_SIZE,
+        });
+    }
     let mut buf = BytesMut::with_capacity(HEADER_SIZE + body.len());
     buf.put_u32(T::msg_type() as u32);
     buf.put_u32(body.len() as u32);
@@ -70,9 +76,9 @@ pub fn decode_header(buf: &[u8]) -> Result<(MessageType, usize), WireError> {
     let payload_len = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
     if payload_len > MAX_PAYLOAD_SIZE {
         warn!("Rejecting oversized payload: {payload_len} bytes");
-        return Err(WireError::Incomplete {
-            need: MAX_PAYLOAD_SIZE,
-            have: payload_len,
+        return Err(WireError::OversizedPayload {
+            size: payload_len,
+            max: MAX_PAYLOAD_SIZE,
         });
     }
     let frame_len = HEADER_SIZE + payload_len;
@@ -119,7 +125,27 @@ pub fn decode_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<
 }
 
 /// Full decode: returns (bytes_consumed, MessageType, decoded_payload).
-pub fn decode<T: serde::de::DeserializeOwned>(
+/// Validates that the decoded header type matches T's expected message type.
+/// Use `decode_unchecked` to skip type validation (e.g., for dispatching).
+pub fn decode<T: MessagePayload + serde::de::DeserializeOwned>(
+    buf: &[u8],
+) -> Result<(usize, MessageType, T), WireError> {
+    let (msg_type, frame_len) = decode_header(buf)?;
+    let expected = T::msg_type();
+    if msg_type != expected {
+        return Err(WireError::TypeMismatch {
+            expected: expected as u32,
+            actual: msg_type as u32,
+        });
+    }
+    let payload_bytes = &buf[HEADER_SIZE..frame_len];
+    let payload: T = rmp_serde::from_slice(payload_bytes)?;
+    Ok((frame_len, msg_type, payload))
+}
+
+/// Full decode without type validation — for dispatch contexts where
+/// the caller already matched on MessageType.
+pub fn decode_unchecked<T: serde::de::DeserializeOwned>(
     buf: &[u8],
 ) -> Result<(usize, MessageType, T), WireError> {
     let (msg_type, frame_len) = decode_header(buf)?;
@@ -175,6 +201,15 @@ pub fn encode_user_info(p: &UserInfoPayload) -> Result<Bytes, WireError> {
     encode(p)
 }
 pub fn encode_peer_disconnect(p: &PeerDisconnectPayload) -> Result<Bytes, WireError> {
+    encode(p)
+}
+pub fn encode_voice_mute(p: &VoiceMutePayload) -> Result<Bytes, WireError> {
+    encode(p)
+}
+pub fn encode_subtitle_info(p: &SubtitleInfoPayload) -> Result<Bytes, WireError> {
+    encode(p)
+}
+pub fn encode_controller_change(p: &ControllerChangePayload) -> Result<Bytes, WireError> {
     encode(p)
 }
 
@@ -409,6 +444,44 @@ mod tests {
                 reason: "left".into(),
             },
             MessageType::PeerDisconnect,
+        );
+    }
+
+    #[test]
+    fn test_voice_mute() {
+        roundtrip(&VoiceMutePayload { muted: true }, MessageType::VoiceMute);
+        roundtrip(&VoiceMutePayload { muted: false }, MessageType::VoiceMute);
+    }
+
+    #[test]
+    fn test_subtitle_info() {
+        roundtrip(
+            &SubtitleInfoPayload {
+                subtitles: vec![SubtitleTrack {
+                    filename: "movie.eng.srt".into(),
+                    size: 4096,
+                    language: Some("eng".into()),
+                }],
+            },
+            MessageType::SubtitleInfo,
+        );
+    }
+
+    #[test]
+    fn test_controller_change() {
+        roundtrip(
+            &ControllerChangePayload {
+                peer_id: "peer-1".into(),
+                action: ControllerAction::Add,
+            },
+            MessageType::ControllerChange,
+        );
+        roundtrip(
+            &ControllerChangePayload {
+                peer_id: "peer-2".into(),
+                action: ControllerAction::Remove,
+            },
+            MessageType::ControllerChange,
         );
     }
 

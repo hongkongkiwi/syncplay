@@ -39,7 +39,12 @@ use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirecti
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_remote::TrackRemote;
 
+use crate::connection::DATA_CHANNEL_LABEL;
+
 use std::future::Future;
+
+/// Timeout for TrackRemote::read operations to prevent hanging.
+const TRACK_READ_TIMEOUT_SECS: u64 = 30;
 
 // ── Config ────────────────────────────────────────────────────────────
 
@@ -80,7 +85,7 @@ pub struct SfuPeer {
 /// A room managed by the SFU server.
 pub struct SfuRoom {
     pub peers: DashMap<String, SfuPeer>,
-    /// Ordered list of peer IDs, for host election.
+    /// Ordered list of peer IDs, for host election. Also guards capacity check.
     pub join_order: Mutex<Vec<String>>,
 }
 
@@ -91,6 +96,9 @@ pub struct SfuRouter {
     rooms: Arc<DashMap<String, Arc<SfuRoom>>>,
     /// Channel to send server-level events (peer join/leave) to signaling layer.
     events_tx: mpsc::UnboundedSender<SfuEvent>,
+    /// Receiver side of events channel — stored to prevent the channel from closing.
+    #[allow(dead_code)]
+    events_rx: Option<Arc<Mutex<mpsc::UnboundedReceiver<SfuEvent>>>>,
 }
 
 /// Events emitted by the SFU router to the signaling layer.
@@ -153,12 +161,13 @@ impl SfuServer {
             ..Default::default()
         };
 
-        let (events_tx, _) = mpsc::unbounded_channel();
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
 
         Ok(Self {
             router: SfuRouter {
                 rooms: Arc::new(DashMap::new()),
                 events_tx,
+                events_rx: Some(Arc::new(Mutex::new(events_rx))),
             },
             api,
             ice_config,
@@ -192,7 +201,7 @@ impl SfuServer {
 
         let dc = pc
             .create_data_channel(
-                "syncplay-v2",
+                DATA_CHANNEL_LABEL,
                 Some(RTCDataChannelInit {
                     ordered: Some(true),
                     ..Default::default()
@@ -200,6 +209,15 @@ impl SfuServer {
             )
             .await?;
 
+        // Set remote description from client's offer BEFORE wiring peer
+        let offer = RTCSessionDescription::offer(sdp.to_string())?;
+        pc.set_remote_description(offer).await?;
+
+        // Create answer
+        let answer = pc.create_answer(None).await?;
+        pc.set_local_description(answer.clone()).await?;
+
+        // Wire peer into room AFTER SDP validation succeeds
         let peer = SfuPeer {
             pc: pc.clone(),
             dc: dc.clone(),
@@ -207,18 +225,7 @@ impl SfuServer {
             audio_senders: Mutex::new(HashMap::new()),
         };
 
-        // Wire up room routing (clone Arc so we can use pc later)
         self.wire_peer(room, peer_id, peer, pc.clone()).await?;
-
-        // Set remote description from client's offer
-
-        // Set remote description from client's offer
-        let offer = RTCSessionDescription::offer(sdp.to_string())?;
-        pc.set_remote_description(offer).await?;
-
-        // Create answer
-        let answer = pc.create_answer(None).await?;
-        pc.set_local_description(answer.clone()).await?;
 
         Ok(answer.sdp)
     }
@@ -321,12 +328,45 @@ impl SfuServer {
             })
             .clone();
 
-        if room_obj.peers.len() >= max_peers {
-            return Err(anyhow::anyhow!("Room is full (max {max_peers})"));
+        // Check room capacity atomically using join_order Mutex
+        {
+            let mut order = room_obj.join_order.lock();
+            if order.len() >= max_peers {
+                return Err(anyhow::anyhow!("Room is full (max {max_peers})"));
+            }
+            order.push(pid.clone());
         }
 
         room_obj.peers.insert(pid.clone(), peer);
-        room_obj.join_order.lock().push(pid.clone());
+
+        // ── For late-joining peers: create audio tracks for all existing peers ──
+        let new_peer = room_obj.peers.get(&pid).context("Peer vanished")?;
+        let existing_peer_ids: Vec<String> = room_obj
+            .peers
+            .iter()
+            .filter(|e| e.key() != &pid)
+            .map(|e| e.key().clone())
+            .collect();
+
+        for from_peer_id in &existing_peer_ids {
+            match create_opus_track(from_peer_id) {
+                Ok(local_track) => match new_peer.pc.add_track(local_track.clone()).await {
+                    Ok(_) => {
+                        new_peer
+                            .audio_senders
+                            .lock()
+                            .insert(from_peer_id.clone(), local_track);
+                        info!("[sfu] Late-joiner audio track: {pid} ← {from_peer_id}");
+                    }
+                    Err(e) => {
+                        warn!("[sfu] Failed to add late-joiner audio track to {pid}: {e}");
+                    }
+                },
+                Err(e) => {
+                    warn!("[sfu] Failed to create late-joiner audio track: {e}");
+                }
+            }
+        }
 
         // ── Data channel message routing ─────────────────────────
         let room_obj_2 = room_obj.clone();
@@ -434,11 +474,17 @@ async fn forward_audio_track(
         }
     }
 
-    // Read RTP packets and forward
+    // Read RTP packets and forward with timeout
     let mut buf = vec![0u8; 1500];
     loop {
-        match incoming_track.read(&mut buf).await {
-            Ok((rtp_packet, _attrs)) => {
+        let read_result = tokio::time::timeout(
+            Duration::from_secs(TRACK_READ_TIMEOUT_SECS),
+            incoming_track.read(&mut buf),
+        )
+        .await;
+
+        match read_result {
+            Ok(Ok((rtp_packet, _attrs))) => {
                 let sample = webrtc::media::Sample {
                     data: rtp_packet.payload,
                     duration: Duration::from_millis(20),
@@ -460,8 +506,15 @@ async fn forward_audio_track(
                     }
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 debug!("[sfu] Audio read from {from_peer_id} ended: {e}");
+                break;
+            }
+            Err(_timeout) => {
+                warn!(
+                    "[sfu] Audio read from {from_peer_id} timed out after {}s — closing",
+                    TRACK_READ_TIMEOUT_SECS
+                );
                 break;
             }
         }

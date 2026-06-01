@@ -150,6 +150,12 @@ impl ConnectionStateMachine {
     /// Validate a transition. Returns Err(reason) if invalid.
     fn validate(from: &ConnectionState, to: &ConnectionState) -> Result<(), String> {
         use ConnectionState::*;
+
+        // Same-state transitions are always valid (no-op)
+        if from == to {
+            return Ok(());
+        }
+
         match (from, to) {
             // Error and Offline are always valid destinations
             (_, Error { .. }) | (_, Offline) => Ok(()),
@@ -192,6 +198,9 @@ impl ConnectionStateMachine {
     pub fn set_connecting(&self) {
         let to = ConnectionState::Connecting;
         let cur = self.get();
+        if cur == to {
+            return; // same state, no-op
+        }
         if let Err(e) = Self::validate(&cur, &to) {
             log::warn!("[state] {e}");
             return;
@@ -202,6 +211,9 @@ impl ConnectionStateMachine {
     pub fn set_handshaking(&self) {
         let to = ConnectionState::Handshaking;
         let cur = self.get();
+        if cur == to {
+            return; // same state, no-op
+        }
         if let Err(e) = Self::validate(&cur, &to) {
             log::warn!("[state] {e}");
             return;
@@ -212,6 +224,9 @@ impl ConnectionStateMachine {
     pub fn set_connecting_peers(&self, peer_count: usize) {
         let to = ConnectionState::ConnectingPeers { peer_count };
         let cur = self.get();
+        if cur == to {
+            return; // same state with same peer_count, no-op
+        }
         if let Err(e) = Self::validate(&cur, &to) {
             log::warn!("[state] {e}");
             return;
@@ -221,12 +236,16 @@ impl ConnectionStateMachine {
 
     pub fn set_ready(&self, peer_count: usize) {
         let to = ConnectionState::Ready { peer_count };
+        let cur = self.get();
+        // Exact same state — no-op
+        if cur == to {
+            return;
+        }
         // Allow Ready → Ready for peer count changes
-        if matches!(self.get(), ConnectionState::Ready { .. }) {
+        if matches!(cur, ConnectionState::Ready { .. }) {
             *self.state.lock() = to;
             return;
         }
-        let cur = self.get();
         if let Err(e) = Self::validate(&cur, &to) {
             log::warn!("[state] {e}");
             return;
@@ -239,12 +258,16 @@ impl ConnectionStateMachine {
             attempt,
             max_attempts,
         };
+        let cur = self.get();
+        // Exact same state — no-op
+        if cur == to {
+            return;
+        }
         // Allow Reconnecting → Reconnecting for attempt updates
-        if matches!(self.get(), ConnectionState::Reconnecting { .. }) {
+        if matches!(cur, ConnectionState::Reconnecting { .. }) {
             *self.state.lock() = to;
             return;
         }
-        let cur = self.get();
         if let Err(e) = Self::validate(&cur, &to) {
             log::warn!("[state] {e}");
             return;

@@ -211,10 +211,18 @@ pub struct SubtitleTrack {
     pub language: Option<String>,
 }
 
+/// Action for controller management (add or remove a controller).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ControllerAction {
+    Add,
+    Remove,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControllerChangePayload {
     pub peer_id: String,
-    pub action: String, // "add" or "remove"
+    pub action: ControllerAction,
 }
 
 impl SubtitleInfoPayload {
@@ -473,26 +481,32 @@ mod tests {
     #[test]
     fn test_all_payloads_clone_and_debug() {
         // Every payload type must be Clone + Debug + PartialEq
+        // 1. HelloPayload
         let hello = HelloPayload::new("x", "1.0", vec![]);
         let _c = hello.clone();
         let _s = format!("{hello:?}");
 
+        // 2. PlaystatePayload
         let ps = PlaystatePayload::new(0.0, true, false, "x", 1);
         let _c = ps.clone();
         let _s = format!("{ps:?}");
 
+        // 3. PlaystateRequestPayload
         let psr = PlaystateRequestPayload::seek(0.0);
         let _c = psr.clone();
         let _s = format!("{psr:?}");
 
+        // 4. ChatPayload
         let chat = ChatPayload::new("x", "x");
         let _c = chat.clone();
         let _s = format!("{chat:?}");
 
+        // 5. ReadinessPayload
         let ready = ReadinessPayload::new("x", true, false, "x");
         let _c = ready.clone();
         let _s = format!("{ready:?}");
 
+        // 6. PlaylistChangePayload
         let pl = PlaylistChangePayload {
             files: vec![],
             index: 0,
@@ -501,6 +515,16 @@ mod tests {
         let _c = pl.clone();
         let _s = format!("{pl:?}");
 
+        // 7. PlaylistRequestPayload
+        let plr = PlaylistRequestPayload {
+            action: PlaylistAction::SetPlaylist,
+            files: vec![],
+            index: 0,
+        };
+        let _c = plr.clone();
+        let _s = format!("{plr:?}");
+
+        // 8. FileInfoPayload
         let fi = FileInfoPayload {
             username: "x".into(),
             file: None,
@@ -508,6 +532,7 @@ mod tests {
         let _c = fi.clone();
         let _s = format!("{fi:?}");
 
+        // 9. FileTransferPayload
         let ft = FileTransferPayload {
             transfer_id: "x".into(),
             chunk_index: 0,
@@ -519,10 +544,30 @@ mod tests {
         let _c = ft.clone();
         let _s = format!("{ft:?}");
 
+        // 10. FileRequestPayload
+        let fr = FileRequestPayload::new("x", 0, "");
+        let _c = fr.clone();
+        let _s = format!("{fr:?}");
+
+        // 11. FileResponsePayload
+        let fresp = FileResponsePayload::accept("x", "", 0);
+        let _c = fresp.clone();
+        let _s = format!("{fresp:?}");
+
+        // 12. LatencyPingPayload
         let latency = LatencyPingPayload { send_time: 0 };
         let _c = latency.clone();
         let _s = format!("{latency:?}");
 
+        // 13. LatencyPongPayload
+        let pong = LatencyPongPayload {
+            send_time: 0,
+            receive_time: 0,
+        };
+        let _c = pong.clone();
+        let _s = format!("{pong:?}");
+
+        // 14. HostElectedPayload
         let host = HostElectedPayload {
             host_id: "x".into(),
             reason: "x".into(),
@@ -530,6 +575,7 @@ mod tests {
         let _c = host.clone();
         let _s = format!("{host:?}");
 
+        // 15. UserInfoPayload
         let ui = UserInfoPayload {
             username: "x".into(),
             features: vec![],
@@ -537,9 +583,28 @@ mod tests {
         let _c = ui.clone();
         let _s = format!("{ui:?}");
 
+        // 16. PeerDisconnectPayload
         let pd = PeerDisconnectPayload { reason: "x".into() };
         let _c = pd.clone();
         let _s = format!("{pd:?}");
+
+        // 17. VoiceMutePayload
+        let vm = VoiceMutePayload { muted: false };
+        let _c = vm.clone();
+        let _s = format!("{vm:?}");
+
+        // 18. SubtitleInfoPayload
+        let si = SubtitleInfoPayload { subtitles: vec![] };
+        let _c = si.clone();
+        let _s = format!("{si:?}");
+
+        // 19. ControllerChangePayload
+        let cc = ControllerChangePayload {
+            peer_id: "x".into(),
+            action: ControllerAction::Add,
+        };
+        let _c = cc.clone();
+        let _s = format!("{cc:?}");
     }
 
     #[test]
@@ -551,6 +616,33 @@ mod tests {
         assert_eq!(json, r#""pause""#);
         let json = serde_json::to_string(&PlaystateAction::Play).unwrap();
         assert_eq!(json, r#""play""#);
+
+        // Verify rmp_serde roundtrip for all variants
+        for action in [
+            PlaystateAction::Seek,
+            PlaystateAction::Pause,
+            PlaystateAction::Play,
+        ] {
+            let encoded = rmp_serde::to_vec(&action).unwrap();
+            let decoded: PlaystateAction = rmp_serde::from_slice(&encoded).unwrap();
+            assert_eq!(decoded, action);
+        }
+    }
+
+    #[test]
+    fn test_controller_action_serialization() {
+        // Verify serde rename serializes correctly
+        let json = serde_json::to_string(&ControllerAction::Add).unwrap();
+        assert_eq!(json, r#""add""#);
+        let json = serde_json::to_string(&ControllerAction::Remove).unwrap();
+        assert_eq!(json, r#""remove""#);
+
+        // Verify rmp_serde roundtrip for all variants
+        for action in [ControllerAction::Add, ControllerAction::Remove] {
+            let encoded = rmp_serde::to_vec(&action).unwrap();
+            let decoded: ControllerAction = rmp_serde::from_slice(&encoded).unwrap();
+            assert_eq!(decoded, action);
+        }
     }
 
     #[test]

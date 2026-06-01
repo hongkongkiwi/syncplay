@@ -194,7 +194,33 @@ impl FileTransfer {
             debug!("Sent chunk {i}/{total_chunks} to {peer_id}");
         }
 
+        // Check if file size changed during transfer (concurrent write detection)
+        let final_size = std::fs::metadata(path)
+            .with_context(|| format!("Cannot re-stat {filepath}"))?
+            .len();
+        if final_size != size {
+            warn!(
+                "File size changed during transfer ({} → {} bytes) — skipping fingerprint",
+                size, final_size
+            );
+            return Ok(());
+        }
+
         let fingerprint = format!("{:x}", hasher.finalize());
+
+        // Send fingerprint as a final special chunk for integrity verification
+        let final_chunk = FileTransferPayload {
+            transfer_id: transfer_id.to_string(),
+            chunk_index: u64::MAX,
+            offset: size,
+            total_size: size,
+            chunk_size: fingerprint.len() as u32,
+            data: fingerprint.clone().into_bytes(),
+        };
+        self.conn
+            .send_one(peer_id, &wire::encode(&final_chunk)?)
+            .await?;
+
         info!("File transfer complete: {filepath} → {peer_id} ({size} bytes, {total_chunks} chunks, sha256={:.12})", &fingerprint);
         Ok(())
     }
@@ -215,6 +241,40 @@ impl FileTransfer {
         msg: &FileTransferPayload,
         save_dir: &str,
     ) -> Result<Option<String>> {
+        // Fingerprint chunk (chunk_index = u64::MAX) — final integrity check
+        if msg.chunk_index == u64::MAX {
+            let sender_hash = String::from_utf8_lossy(&msg.data);
+            let transfers = self.transfers.lock();
+            if let Some(entry) = transfers.get(&msg.transfer_id) {
+                // Reassemble all received data to compute our hash
+                let mut data = Vec::with_capacity(entry.total_size as usize);
+                for i in 0..entry.expected_chunks {
+                    if let Some(chunk) = entry.chunks.get(&i) {
+                        data.extend_from_slice(chunk);
+                    }
+                }
+                let our_hash = format!("{:x}", Sha256::digest(&data));
+                if our_hash.as_str() == sender_hash.trim() {
+                    info!(
+                        "SHA-256 verified for transfer {}: {}",
+                        msg.transfer_id,
+                        &our_hash[..12]
+                    );
+                } else {
+                    warn!(
+                        "SHA-256 MISMATCH for transfer {}: sender={} local={:.12}",
+                        msg.transfer_id,
+                        sender_hash.trim(),
+                        &our_hash
+                    );
+                }
+            }
+            // Fingerprint chunk doesn't affect completion logic — it's just
+            // a verification. The transfer was already completed when all
+            // data chunks arrived.
+            return Ok(None);
+        }
+
         // Reject transfers exceeding the size cap (anti-OOM protection)
         if msg.total_size > MAX_TRANSFER_SIZE {
             warn!(
@@ -236,7 +296,7 @@ impl FileTransfer {
                 ),
                 total_size: msg.total_size,
                 chunks: HashMap::new(),
-                expected_chunks: msg.total_size.div_ceil(DEFAULT_CHUNK_SIZE as u64),
+                expected_chunks: msg.total_size.div_ceil(msg.chunk_size as u64),
             });
 
         entry.chunks.insert(msg.chunk_index, msg.data.clone());

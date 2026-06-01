@@ -17,6 +17,12 @@ pub enum WireError {
 
     #[error("msgpack decode error: {0}")]
     Decode(#[from] rmp_serde::decode::Error),
+
+    #[error("payload too large: {size} bytes exceeds max {max}")]
+    OversizedPayload { size: usize, max: usize },
+
+    #[error("type mismatch: expected type 0x{expected:02x}, got 0x{actual:02x}")]
+    TypeMismatch { expected: u32, actual: u32 },
 }
 
 #[derive(Error, Debug)]

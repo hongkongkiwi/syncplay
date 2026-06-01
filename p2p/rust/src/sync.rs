@@ -230,7 +230,7 @@ impl SyncManager {
         for cid in &controllers {
             let cp = ControllerChangePayload {
                 peer_id: cid.clone(),
-                action: "add".into(),
+                action: ControllerAction::Add,
             };
             if let Ok(data) = wire::encode(&cp) {
                 if let Err(e) = self.conn.send_one(target, &data).await {
@@ -326,10 +326,12 @@ impl SyncManager {
     }
 
     pub async fn send_voice_mute(&self, muted: bool) {
-        let p = crate::messages::VoiceMutePayload { muted };
+        let p = VoiceMutePayload { muted };
         if self.conn.is_host() {
+            // Host relays to all peers to notify them of the mute state
             self.conn.bcast(&p, None).await;
         } else {
+            // Non-host sends to host for relaying
             match wire::encode(&p) {
                 Ok(frame) => self.send_to_host(&frame).await,
                 Err(e) => error!("encode voice mute: {e}"),
@@ -421,7 +423,12 @@ impl SyncManager {
         }
     }
 
+    /// Send current file info — only the host can broadcast this.
     pub async fn send_file_info(&self, file: Option<FileMetadata>) {
+        if !self.conn.is_host() {
+            warn!("send_file_info ignored — not host");
+            return;
+        }
         self.conn
             .bcast(
                 &FileInfoPayload {
@@ -442,12 +449,17 @@ impl SyncManager {
     pub fn is_controller(&self, pid: &str) -> bool {
         self.room.lock().controllers.contains(pid) || pid == self.conn.pid()
     }
-    pub async fn send_controller_change(&self, peer_id: &str, action: &str) {
+    /// Send controller change — only the host can broadcast this.
+    pub async fn send_controller_change(&self, peer_id: &str, action: ControllerAction) {
+        if !self.conn.is_host() {
+            warn!("send_controller_change ignored — not host");
+            return;
+        }
         self.conn
             .bcast(
                 &ControllerChangePayload {
                     peer_id: peer_id.into(),
-                    action: action.into(),
+                    action,
                 },
                 None,
             )
@@ -688,7 +700,14 @@ impl SyncManager {
                             Ok(frame) => {
                                 let c = c2.clone();
                                 tokio::spawn(async move {
-                                    c.send_all(&frame, None).await;
+                                    // Re-check is_host() before broadcasting in case host changed
+                                    if c.is_host() {
+                                        c.send_all(&frame, None).await;
+                                    } else {
+                                        warn!(
+                                            "PlaystateRequest: no longer host, skipping broadcast"
+                                        );
+                                    }
                                 });
                             }
                             Err(e) => error!("encode playstate: {e}"),
@@ -877,35 +896,50 @@ impl SyncManager {
             }
         });
 
-        // VoiceMute — store peer mute status in dedicated map
+        // VoiceMute — store peer mute status and host relays to other peers
         let vm = self.voice_mutes.clone();
+        let c7 = conn.clone();
         self.conn.on_msg(
             MessageType::VoiceMute,
             move |_: MessageType, data: &[u8], from: String| {
-                if let Ok(p) = rmp_serde::from_slice::<crate::messages::VoiceMutePayload>(data) {
+                if let Ok(p) = rmp_serde::from_slice::<VoiceMutePayload>(data) {
                     info!("Peer {from} muted={}", p.muted);
-                    vm.lock().insert(from, p.muted);
+                    vm.lock().insert(from.clone(), p.muted);
+                    // Host relays VoiceMute to all other peers
+                    if c7.is_host() {
+                        let c = c7.clone();
+                        let p2 = p;
+                        tokio::spawn(async move {
+                            c.bcast(&p2, None).await;
+                        });
+                    }
                 }
             },
         );
 
         // ControllerChange — sync controller set across peers
+        // Only accept from host to prevent spoofing
         let ct_room = room.clone();
+        let ct_conn = conn.clone();
         self.conn.on_msg(
             MessageType::ControllerChange,
             move |_: MessageType, data: &[u8], _from: String| {
+                // Only accept controller changes from the current host
+                if _from != ct_conn.hid() {
+                    warn!("ControllerChange from non-host {_from} — ignored");
+                    return;
+                }
                 if let Ok(p) = rmp_serde::from_slice::<ControllerChangePayload>(data) {
                     let mut r = ct_room.lock();
-                    match p.action.as_str() {
-                        "add" => {
+                    match p.action {
+                        ControllerAction::Add => {
                             r.controllers.insert(p.peer_id.clone());
                         }
-                        "remove" => {
+                        ControllerAction::Remove => {
                             r.controllers.remove(&p.peer_id);
                         }
-                        _ => {}
                     }
-                    info!("Controller {}: {}", p.action, p.peer_id);
+                    info!("Controller {:?}: {}", p.action, p.peer_id);
                 }
             },
         );
