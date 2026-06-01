@@ -607,14 +607,15 @@ impl ConnectionManager {
     }
 
     async fn _send_hello(&self, target: &str) {
-        let features = self
+        let (features, room) = self
             .0
             .config
             .lock()
             .as_ref()
-            .map(|c| c.features.clone())
+            .map(|c| (c.features.clone(), c.room.clone()))
             .unwrap_or_default();
-        let p = crate::messages::HelloPayload::new(&self.uname(), PROTOCOL_VERSION, features);
+        let p =
+            crate::messages::HelloPayload::new(&self.uname(), PROTOCOL_VERSION, &room, features);
         if let Ok(data) = wire::encode(&p) {
             if let Err(e) = self.send_one(target, &data).await {
                 warn!("Hello to {target} failed: {e}");

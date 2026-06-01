@@ -15,7 +15,7 @@ fn e2e_wire_all_message_types_roundtrip() {
     let messages: Vec<(MessageType, Vec<u8>)> = vec![
         (
             MessageType::Hello,
-            wire::encode(&HelloPayload::new("alice", "2.0", vec!["chat".into()]))
+            wire::encode(&HelloPayload::new("alice", "2.0", "", vec!["chat".into()]))
                 .unwrap()
                 .to_vec(),
         ),
@@ -104,7 +104,7 @@ fn e2e_wire_all_message_types_roundtrip() {
 #[test]
 fn e2e_multiple_frames_in_stream() {
     // Simulate a real data stream with multiple frames back-to-back
-    let hello = wire::encode(&HelloPayload::new("x", "1.0", vec![])).unwrap();
+    let hello = wire::encode(&HelloPayload::new("x", "1.0", "", vec![])).unwrap();
     let playstate = wire::encode(&PlaystatePayload::new(1.0, false, false, "h", 1)).unwrap();
     let chat = wire::encode(&ChatPayload::new("b", "hi")).unwrap();
 
@@ -174,6 +174,7 @@ fn e2e_message_size_limits() {
     let hello = wire::encode(&HelloPayload::new(
         "alice",
         "2.0",
+        "",
         vec!["chat".into(), "readiness".into()],
     ))
     .unwrap();

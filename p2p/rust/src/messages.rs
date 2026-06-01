@@ -37,6 +37,9 @@ pub enum MessageType {
 pub struct HelloPayload {
     pub username: String,
     pub version: String,
+    /// Room name for belt-and-suspenders validation on the P2P channel
+    #[serde(default)]
+    pub room: String,
     pub features: Vec<String>,
 }
 
@@ -49,6 +52,17 @@ pub struct PlaystatePayload {
     #[serde(rename = "setBy")]
     pub set_by: String,
     pub seq: u64,
+    /// Unix milliseconds timestamp for latency compensation.
+    /// Receivers add (now_ms - timestamp) to the position.
+    #[serde(default = "crate::now_ms")]
+    pub timestamp: u64,
+    /// Playback speed (1.0 = normal, 2.0 = double). Default 1.0.
+    #[serde(default = "default_speed")]
+    pub speed: f64,
+}
+
+fn default_speed() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -65,12 +79,17 @@ pub enum PlaystateAction {
     Seek,
     Pause,
     Play,
+    /// Set playback speed (1.0 = normal, 2.0 = double speed)
+    SetSpeed(f64),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatPayload {
     pub from: String,
     pub message: String,
+    /// Unix milliseconds when the message was created
+    #[serde(default = "crate::now_ms")]
+    pub timestamp: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -234,10 +253,11 @@ impl SubtitleInfoPayload {
 // ── Convenience builders ─────────────────────────────────────────────
 
 impl HelloPayload {
-    pub fn new(username: &str, version: &str, features: Vec<String>) -> Self {
+    pub fn new(username: &str, version: &str, room: &str, features: Vec<String>) -> Self {
         Self {
             username: username.into(),
             version: version.into(),
+            room: room.into(),
             features,
         }
     }
@@ -251,6 +271,26 @@ impl PlaystatePayload {
             do_seek,
             set_by: set_by.into(),
             seq,
+            timestamp: crate::now_ms(),
+            speed: 1.0,
+        }
+    }
+    pub fn with_speed(
+        position: f64,
+        paused: bool,
+        do_seek: bool,
+        set_by: &str,
+        seq: u64,
+        speed: f64,
+    ) -> Self {
+        Self {
+            position,
+            paused,
+            do_seek,
+            set_by: set_by.into(),
+            seq,
+            timestamp: crate::now_ms(),
+            speed,
         }
     }
 }
@@ -277,6 +317,13 @@ impl PlaystateRequestPayload {
             request_id: Uuid::new_v4().to_string(),
         }
     }
+    pub fn set_speed(speed: f64) -> Self {
+        Self {
+            action: PlaystateAction::SetSpeed(speed),
+            position: 0.0,
+            request_id: Uuid::new_v4().to_string(),
+        }
+    }
 }
 
 impl ChatPayload {
@@ -284,6 +331,7 @@ impl ChatPayload {
         Self {
             from: from.into(),
             message: message.into(),
+            timestamp: crate::now_ms(),
         }
     }
 }
@@ -378,7 +426,7 @@ mod tests {
 
     #[test]
     fn test_hello_builder() {
-        let p = HelloPayload::new("alice", "2.0.0", vec!["chat".into(), "playlist".into()]);
+        let p = HelloPayload::new("alice", "2.0.0", "", vec!["chat".into(), "playlist".into()]);
         assert_eq!(p.username, "alice");
         assert_eq!(p.version, "2.0.0");
         assert_eq!(p.features.len(), 2);
@@ -482,7 +530,7 @@ mod tests {
     fn test_all_payloads_clone_and_debug() {
         // Every payload type must be Clone + Debug + PartialEq
         // 1. HelloPayload
-        let hello = HelloPayload::new("x", "1.0", vec![]);
+        let hello = HelloPayload::new("x", "1.0", "", vec![]);
         let _c = hello.clone();
         let _s = format!("{hello:?}");
 

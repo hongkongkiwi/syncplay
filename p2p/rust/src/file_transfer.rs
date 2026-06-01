@@ -148,6 +148,17 @@ impl FileTransfer {
         Ok(tid)
     }
 
+    /// Cancel an incoming transfer by removing its assembly buffer.
+    /// The transfer_id is the one returned by request_file or seen in FileTransferPayload.
+    pub fn cancel(&self, transfer_id: &str) {
+        let mut transfers = self.transfers.lock();
+        if transfers.remove(transfer_id).is_some() {
+            info!("Cancelled transfer {transfer_id}");
+        } else {
+            warn!("Cancel: no transfer found for {transfer_id}");
+        }
+    }
+
     /// Send a file — streamed chunk-by-chunk, no OOM.
     pub async fn send_file(
         &self,

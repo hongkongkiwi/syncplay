@@ -46,6 +46,7 @@ struct RoomState {
     playlist_index: usize,
     controllers: HashSet<String>,
     ready_states: HashMap<String, bool>,
+    speed: f64,
 }
 
 impl Default for RoomState {
@@ -59,6 +60,7 @@ impl Default for RoomState {
             playlist_index: 0,
             controllers: HashSet::new(),
             ready_states: HashMap::new(),
+            speed: 1.0,
         }
     }
 }
@@ -301,6 +303,31 @@ impl SyncManager {
         }
     }
 
+    pub async fn request_set_speed(&self, speed: f64) {
+        if self.conn.is_host() {
+            {
+                let mut r = self.room.lock();
+                r.speed = speed;
+                r.seq += 1;
+            }
+            self.bcast_ps(false).await;
+        } else {
+            match wire::encode(&PlaystateRequestPayload::set_speed(speed)) {
+                Ok(frame) => self.send_to_host(&frame).await,
+                Err(e) => error!("encode set_speed: {e}"),
+            }
+        }
+    }
+
+    pub async fn update_speed(&self, speed: f64) {
+        if !self.conn.is_host() {
+            return;
+        }
+        let mut r = self.room.lock();
+        r.speed = speed;
+        r.seq += 1;
+    }
+
     // ── Chat ──────────────────────────────────────────────────────
 
     pub async fn send_chat(&self, msg: &str) {
@@ -510,12 +537,15 @@ impl SyncManager {
     }
 
     async fn bcast_ps(&self, do_seek: bool) {
-        let (pos, paused, sb, seq) = {
+        let (pos, paused, sb, seq, speed) = {
             let r = self.room.lock();
-            (r.position, r.paused, r.set_by.clone(), r.seq)
+            (r.position, r.paused, r.set_by.clone(), r.seq, r.speed)
         };
         self.conn
-            .bcast(&PlaystatePayload::new(pos, paused, do_seek, &sb, seq), None)
+            .bcast(
+                &PlaystatePayload::with_speed(pos, paused, do_seek, &sb, seq, speed),
+                None,
+            )
             .await;
     }
 
@@ -547,7 +577,7 @@ impl SyncManager {
                         let f = from.clone();
                         let f2 = feats.clone();
                         tokio::spawn(async move {
-                            let p = HelloPayload::new(&c.uname(), PROTOCOL_VERSION, f2);
+                            let p = HelloPayload::new(&c.uname(), PROTOCOL_VERSION, "", f2);
                             if let Ok(data) = wire::encode(&p) {
                                 let _ = c.send_one(&f, &data).await;
                             }
@@ -604,20 +634,36 @@ impl SyncManager {
                             debug!("Stale playstate seq={}", p.seq);
                             return;
                         }
-                        r.position = p.position;
+                        // Latency compensation: adjust position by network delay
+                        let now = crate::now_ms();
+                        let latency_secs = if p.timestamp > 0 && now > p.timestamp {
+                            (now - p.timestamp) as f64 / 1000.0
+                        } else {
+                            0.0
+                        };
+                        let adjusted_pos = if !p.paused {
+                            p.position + latency_secs * p.speed
+                        } else {
+                            p.position
+                        };
+                        r.position = adjusted_pos;
                         r.paused = p.paused;
                         r.set_by = p.set_by;
                         r.seq = p.seq;
+                        if (p.speed - 1.0).abs() > 0.001 {
+                            r.speed = p.speed;
+                        }
                         drop(r);
                         // Drive local player to match
                         if let Some(ref sock) = *psock.lock() {
                             let sock_path = sock.clone();
                             if p.do_seek {
                                 let s = sock_path.clone();
+                                let seek_pos = adjusted_pos;
                                 tokio::spawn(async move {
                                     if let Err(e) =
                                         crate::player_controller::PlayerController::seek(
-                                            &s, p.position,
+                                            &s, seek_pos,
                                         )
                                         .await
                                     {
@@ -690,13 +736,20 @@ impl SyncManager {
                                     r.set_by = from.clone();
                                     r.seq += 1;
                                 }
+                                PlaystateAction::SetSpeed(new_speed) => {
+                                    r.speed = new_speed;
+                                    r.set_by = from.clone();
+                                    r.seq += 1;
+                                }
                             }
                         }
-                        let (pos, paused, sb, seq) = {
+                        let (pos, paused, sb, seq, speed) = {
                             let r = r2.lock();
-                            (r.position, r.paused, r.set_by.clone(), r.seq)
+                            (r.position, r.paused, r.set_by.clone(), r.seq, r.speed)
                         };
-                        match wire::encode(&PlaystatePayload::new(pos, paused, do_seek, &sb, seq)) {
+                        match wire::encode(&PlaystatePayload::with_speed(
+                            pos, paused, do_seek, &sb, seq, speed,
+                        )) {
                             Ok(frame) => {
                                 let c = c2.clone();
                                 tokio::spawn(async move {
@@ -965,11 +1018,11 @@ async fn host_loop(
                     debug!("Host loop: no longer host, sleeping");
                     continue;
                 }
-                let (pos, paused, sb, seq) = {
+                let (pos, paused, sb, seq, speed) = {
                     let r = room.lock();
-                    (r.position, r.paused, r.set_by.clone(), r.seq)
+                    (r.position, r.paused, r.set_by.clone(), r.seq, r.speed)
                 };
-                conn.bcast(&PlaystatePayload::new(pos, paused, false, &sb, seq), None).await;
+                conn.bcast(&PlaystatePayload::with_speed(pos, paused, false, &sb, seq, speed), None).await;
             }
         }
     }

@@ -33,6 +33,8 @@ pub struct PlayerState {
 pub enum PlayerType {
     Mpv,
     Vlc,
+    /// IINA — macOS player with mpv-compatible IPC via --mpv-input-ipc-server
+    Iina,
 }
 
 /// Events emitted by the player controller.
@@ -83,8 +85,12 @@ impl PlayerController {
         let mut cmd = Command::new(player_path);
 
         match self.player_type {
-            PlayerType::Mpv => {
-                cmd.arg(format!("--input-ipc-server={ipc_socket}"))
+            PlayerType::Mpv | PlayerType::Iina => {
+                let ipc_flag = match self.player_type {
+                    PlayerType::Iina => "--mpv-input-ipc-server",
+                    _ => "--input-ipc-server",
+                };
+                cmd.arg(format!("{ipc_flag}={ipc_socket}"))
                     .arg("--idle=yes")
                     .arg("--keep-open=yes")
                     .arg("--no-terminal")
@@ -130,6 +136,7 @@ impl PlayerController {
             match self.player_type {
                 PlayerType::Mpv => "mpv",
                 PlayerType::Vlc => "VLC",
+                PlayerType::Iina => "IINA",
             },
             self.child.as_ref().map(|c| c.id())
         );

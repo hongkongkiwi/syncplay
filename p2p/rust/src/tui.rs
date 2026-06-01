@@ -292,6 +292,9 @@ async fn handle_input(
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => {
                     if s.input.is_empty() {
+                        drop(s);
+                        // Graceful quit: notify peers before disconnecting
+                        sync.get_connection().disconnect().await;
                         return true;
                     }
                     s.input.clear();
@@ -934,7 +937,7 @@ async fn handle_command(input: &str, state: &Arc<Mutex<UiState>>, sync: &SyncMan
     let arg1 = parts.get(1).copied().unwrap_or("");
     let arg2 = parts.get(2).copied().unwrap_or("");
     let response = match cmd {
-        "/help" | "/h" => "/send <file> /playlist add/index /controller add/remove /ready /react /shrug /tableflip /lenny /file <path> /settings".to_string(),
+        "/help" | "/h" => "/send <file> [peer] /playlist add/index/clear /controller add/remove /ready /react /users /nick <name> /cancel /shrug /tableflip /lenny /file <path> /settings".to_string(),
         "/send" | "/download" | "/dl" => {
             if arg1.is_empty() { "Usage: /send <filepath>".to_string() }
             else {
@@ -971,7 +974,23 @@ async fn handle_command(input: &str, state: &Arc<Mutex<UiState>>, sync: &SyncMan
             if let Ok(n) = arg2.parse::<usize>() { sync.set_playlist_index(n).await; format!("Jumping to item {n}") }
             else { "Usage: /playlist index <n>".to_string() }
         }
+        "/playlist" if arg1 == "clear" => {
+            sync.set_playlist(vec![]).await;
+            "Playlist cleared".to_string()
+        }
         "/ready" => { sync.set_ready(true, None).await; "You are now ready".to_string() }
+        "/users" | "/who" => {
+            let stats = sync.get_peer_stats();
+            let names: Vec<String> = stats.iter().map(|(_, name, _, _)| name.clone()).collect();
+            format!("{} peers: {}", names.len(), names.join(", "))
+        }
+        "/nick" => {
+            if arg1.is_empty() { "Usage: /nick <newname>".to_string() }
+            else { format!("Nick change requires reconnect — restart with --username {arg1}") }
+        }
+        "/cancel" => {
+            "To cancel a transfer, restart the client — transfers cannot be cancelled mid-flight".to_string()
+        }
         cmd if cmd.starts_with("/controller") => {
             if !sync.is_host() { "Only host can manage controllers".to_string() }
             else if arg1 == "add" && !arg2.is_empty() { sync.add_controller(arg2); sync.send_controller_change(arg2, crate::messages::ControllerAction::Add).await; format!("{arg2} can now control playback") }

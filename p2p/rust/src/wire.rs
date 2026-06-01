@@ -236,7 +236,12 @@ mod tests {
 
     #[test]
     fn test_hello() {
-        let p = HelloPayload::new("alice", "2.0.0", vec!["chat".into(), "readiness".into()]);
+        let p = HelloPayload::new(
+            "alice",
+            "2.0.0",
+            "",
+            vec!["chat".into(), "readiness".into()],
+        );
         roundtrip(&p, MessageType::Hello);
     }
 
@@ -487,7 +492,7 @@ mod tests {
 
     #[test]
     fn test_incomplete_buffer() {
-        let p = HelloPayload::new("x", "1.0", vec![]);
+        let p = HelloPayload::new("x", "1.0", "", vec![]);
         let frame = encode(&p).expect("encode");
         assert!(decode_header(&frame[..4]).is_err());
         assert!(decode_header(&frame[..7]).is_err());
@@ -501,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_incomplete_payload() {
-        let p = HelloPayload::new("x", "1.0", vec![]);
+        let p = HelloPayload::new("x", "1.0", "", vec![]);
         let frame = encode(&p).expect("encode");
         // Only header, no payload
         assert!(decode_header(&frame[..HEADER_SIZE]).is_err());
@@ -509,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_multiple_frames() {
-        let h = encode_hello(&HelloPayload::new("a", "1.0", vec![])).expect("encode");
+        let h = encode_hello(&HelloPayload::new("a", "1.0", "", vec![])).expect("encode");
         let p =
             encode_playstate(&PlaystatePayload::new(1.0, false, false, "b", 1)).expect("encode");
         let mut combined = Vec::new();

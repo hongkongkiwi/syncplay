@@ -182,6 +182,8 @@ async fn main() -> anyhow::Result<()> {
     if !cfg.player.path.is_empty() {
         let ptype = if cfg.player.path.contains("mpv") {
             syncplay_p2p::player_controller::PlayerType::Mpv
+        } else if cfg.player.path.to_lowercase().contains("iina") {
+            syncplay_p2p::player_controller::PlayerType::Iina
         } else {
             syncplay_p2p::player_controller::PlayerType::Vlc
         };
@@ -205,6 +207,15 @@ async fn main() -> anyhow::Result<()> {
                             syncplay_p2p::player_controller::PlayerEvent::StateUpdated(st) => {
                                 if !st.paused || st.position > 0.1 {
                                     sync2.update_playstate(st.position, st.paused);
+                                }
+                                // Transmit speed changes to peers
+                                if (st.speed - 1.0).abs() > 0.01 {
+                                    if sync2.is_host() {
+                                        // Host updates room state and broadcasts
+                                        sync2.update_speed(st.speed).await;
+                                    } else {
+                                        sync2.request_set_speed(st.speed).await;
+                                    }
                                 }
                             }
                             syncplay_p2p::player_controller::PlayerEvent::FileLoaded {
