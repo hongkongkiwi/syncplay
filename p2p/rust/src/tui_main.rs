@@ -483,7 +483,21 @@ async fn main() -> anyhow::Result<()> {
         _voice_chat = None;
     }
 
-    run_tui(state, sync, cfg.room, mic_muted).await?;
+    // Auto-save config for next session before moving room into run_tui
+    let config_path = dirs_next().join(".syncplay-config.json");
+    if let Err(e) = cfg.save(&config_path.to_string_lossy()) {
+        eprintln!("Warning: failed to save config: {e}");
+    }
+
+    let room = cfg.room.clone();
+    run_tui(state, sync, room, mic_muted).await?;
+
     println!("Goodbye!");
     Ok(())
+}
+
+fn dirs_next() -> std::path::PathBuf {
+    std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
