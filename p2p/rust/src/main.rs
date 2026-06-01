@@ -1,13 +1,20 @@
 //! Syncplay P2P — WebSocket signaling server for WebRTC peer discovery.
 //!
 //! Usage:
-//!   syncplay-signaling [--port PORT] [--bind ADDR]
+//!   syncplay-signaling [--port PORT] [--bind ADDR] [--sfu]
+//!
+//! In default mode, peers connect via full-mesh WebRTC (P2P).
+//! With --sfu, the server acts as a Selective Forwarding Unit:
+//!   • Each peer opens ONE WebRTC connection to the server
+//!   • The server routes data channel messages between peers
+//!   • The server forwards audio tracks (receive from one, send to others)
 //!
 //! Environment:
 //!   PORT — port to listen on (overridden by --port)
 
 use std::net::SocketAddr;
 
+use syncplay_p2p::sfu::{SfuConfig, SfuServer};
 use syncplay_p2p::signalling::SignalingServer;
 
 fn usage() -> ! {
@@ -16,6 +23,7 @@ fn usage() -> ! {
     eprintln!("Options:");
     eprintln!("  --port, -p PORT    Port to listen on (default: 8998, env: PORT)");
     eprintln!("  --bind, -b ADDR    Bind address (default: 127.0.0.1)");
+    eprintln!("  --sfu              Enable SFU mode (star topology, server routes data + audio)");
     eprintln!("  --help, -h         Show this help");
     eprintln!("  --version, -V      Show version");
     std::process::exit(0);
@@ -35,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(8998);
     let mut bind = "127.0.0.1".to_string();
+    let mut sfu_mode = false;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -61,6 +70,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 bind = args[i].clone();
             }
+            "--sfu" => {
+                sfu_mode = true;
+            }
             other => {
                 eprintln!("Unknown flag: {other}");
                 eprintln!("Try --help");
@@ -71,11 +83,20 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let addr: SocketAddr = format!("{bind}:{port}").parse()?;
-    let server = SignalingServer::new();
+
+    let mode_label = if sfu_mode { "SFU" } else { "P2P" };
     eprintln!(
-        "Syncplay signaling server v{}, listening on {addr}",
+        "Syncplay signaling server v{} ({mode_label} mode), listening on {addr}",
         env!("CARGO_PKG_VERSION")
     );
+
+    let server = if sfu_mode {
+        let sfu = SfuServer::new(SfuConfig::default()).await?;
+        SignalingServer::new().with_sfu(sfu)
+    } else {
+        SignalingServer::new()
+    };
+
     server.run(addr).await?;
 
     Ok(())

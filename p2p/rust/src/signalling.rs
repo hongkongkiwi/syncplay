@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::sfu::SfuServer;
 use anyhow::Result;
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
@@ -194,6 +195,7 @@ fn err(code: &str, message: &str) -> ServerMessage {
 
 pub struct SignalingServer {
     rooms: Arc<DashMap<String, Arc<Mutex<Room>>>>,
+    sfu_server: Option<Arc<SfuServer>>,
 }
 
 impl Default for SignalingServer {
@@ -206,20 +208,31 @@ impl SignalingServer {
     pub fn new() -> Self {
         Self {
             rooms: Arc::new(DashMap::new()),
+            sfu_server: None,
         }
+    }
+
+    /// Enable SFU mode — WebRTC connections are routed through the server
+    /// instead of peer-to-peer. Each client maintains a single connection
+    /// to the server, which routes data channels and forwards audio.
+    pub fn with_sfu(mut self, sfu: SfuServer) -> Self {
+        self.sfu_server = Some(Arc::new(sfu));
+        self
     }
 
     pub async fn run(&self, addr: SocketAddr) -> Result<()> {
         let listener = TcpListener::bind(addr).await?;
         info!("[signaling] listening on {addr}");
         let rooms = self.rooms.clone();
+        let sfu = self.sfu_server.clone();
 
         loop {
             match listener.accept().await {
                 Ok((stream, peer_addr)) => {
                     let rooms = rooms.clone();
+                    let sfu = sfu.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(rooms, stream, peer_addr).await {
+                        if let Err(e) = handle_connection(rooms, sfu, stream, peer_addr).await {
                             error!("Connection error from {peer_addr}: {e}");
                         }
                     });
@@ -236,6 +249,7 @@ impl SignalingServer {
 
 async fn handle_connection(
     rooms: Arc<DashMap<String, Arc<Mutex<Room>>>>,
+    sfu_server: Option<Arc<SfuServer>>,
     stream: TcpStream,
     _addr: SocketAddr,
 ) -> Result<()> {
@@ -419,7 +433,50 @@ async fn handle_connection(
                                         warn!("[signal] oversized payload from {pid}: {} bytes", payload_json.len());
                                         continue;
                                     }
-                                    // Validate target exists in room
+
+                                    // ── SFU routing: target="_server" → handle SDP/ICE server-side ──
+                                    if target == "_server" {
+                                        if let Some(ref sfu) = sfu_server {
+                                            match payload.kind.as_str() {
+                                                "offer" => {
+                                                    match sfu.handle_offer(rname, pid, "", &payload.sdp).await {
+                                                        Ok(answer_sdp) => {
+                                                            send_json(&tx, &ServerMessage::SignalRelay {
+                                                                from: "_server".into(),
+                                                                payload: SignalPayload {
+                                                                    kind: "answer".into(),
+                                                                    sdp: answer_sdp,
+                                                                    candidate: String::new(),
+                                                                    sdp_mid: String::new(),
+                                                                    sdp_mline_index: 0,
+                                                                },
+                                                            });
+                                                        }
+                                                        Err(e) => {
+                                                            warn!("[sfu] offer failed: {e}");
+                                                            send_json(&tx, &err("sfu_error", &format!("Offer failed: {e}")));
+                                                        }
+                                                    }
+                                                }
+                                                "ice" => {
+                                                    if let Err(e) = sfu.handle_ice(
+                                                        rname, pid,
+                                                        &payload.candidate,
+                                                        &payload.sdp_mid,
+                                                        payload.sdp_mline_index,
+                                                    ).await {
+                                                        warn!("[sfu] ICE failed: {e}");
+                                                    }
+                                                }
+                                                _ => {
+                                                    warn!("[sfu] unknown signal kind: {}", payload.kind);
+                                                }
+                                            }
+                                        }
+                                        continue;
+                                    }
+
+                                    // Standard P2P relay
                                     if let Some(room) = rooms.get(rname) {
                                         let r = room.lock();
                                         if let Some(target_peer) = r.peers.get(&target) {

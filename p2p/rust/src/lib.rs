@@ -11,6 +11,7 @@ pub mod file_transfer;
 pub mod messages;
 pub mod player;
 pub mod player_controller;
+pub mod sfu;
 pub mod signalling;
 pub mod state;
 pub mod sync;
