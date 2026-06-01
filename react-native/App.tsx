@@ -13,8 +13,8 @@ import {
   FolderOpen,
   Globe,
   KeyRound,
-  Link,
   Library,
+  Link,
   ListPlus,
   MessageCircle,
   MonitorPlay,
@@ -23,14 +23,12 @@ import {
   Plug,
   Send,
   Settings as SettingsIcon,
-  ShieldCheck,
   Shuffle,
   Trash2,
   Undo2,
-  UserCheck,
   Users
 } from 'lucide-react-native';
-import { useEffect, useMemo, useReducer, useRef, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
   AppState,
   FlatList,
@@ -47,36 +45,25 @@ import {
   View
 } from 'react-native';
 
-import { SyncplayConnection, type ConnectionConfig, type PlaybackSnapshot } from './src/syncplay/connection';
-import { type PrivacyMode, type SyncplayFile } from './src/syncplay/protocol';
 import {
-  createInitialSyncplayState,
-  syncplayReducer,
-  type RoomUser,
-  type SyncplayMessage
-} from './src/syncplay/state';
-import {
-  PUBLIC_SERVER_OPTIONS,
-  formatServerAddress,
-  parseServerAddress
-} from './src/syncplay/servers';
-import { generateManagedRoomPassword, normalizeManagedRoomPassword } from './src/syncplay/managedRooms';
+  P2PConnection,
+  type ConnectionState,
+  type P2PConnectionConfig,
+  type FileEntry,
+  type PeerState,
+  type RoomStateSnapshot,
+  type SyncEvent,
+} from './src/syncplay/connectionV2';
 import { parseTimestamp } from './src/syncplay/playback';
 import {
   assetToMediaLibraryItem,
   formatBytes,
   formatClockTime,
   formatTime,
-  getTransferDisplay,
-  isManagedRoomName,
   parseSlashCommand,
-  shouldAnnounceMediaOnConnection,
   shuffleFiles,
-  statusLabel,
-  stripManagedRoomName
 } from './src/app/appHelpers';
 import { scanMediaDirectory } from './src/app/directoryScanner';
-import { createExpoTransferSink, createExpoTransferSource } from './src/app/fileTransferSink';
 import {
   PREFERENCES_STORAGE_KEY,
   createPersistedPreferences,
@@ -86,15 +73,7 @@ import {
 } from './src/app/preferences';
 import { resolvePlaylistItem } from './src/app/playlistPlayback';
 import { calculateSyncCorrection } from './src/app/syncControl';
-import { shouldAutoPlay, startAutoPlayCountdown } from './src/app/autoPlay';
 import { ErrorBoundary } from './src/app/ErrorBoundary';
-import {
-  addRoomToSavedList,
-  buildRoomOptions,
-  filterVisibleRooms,
-  parseRoomEntry,
-  resolveJoinRoomEntry
-} from './src/syncplay/rooms';
 import {
   addMediaItems,
   buildDirectoryLabels,
@@ -108,65 +87,106 @@ import {
   type AppScreenId
 } from './src/navigation/screens';
 
+// ── Types ──────────────────────────────────────────────────────────────────
+
+type SyncplayFile = {
+  name: string;
+  duration: number;
+  size: number;
+};
+
 type ConnectionForm = {
-  serverAddress: string;
+  host: string;
   username: string;
   room: string;
   password: string;
-  useTls: boolean;
 };
-type ConnectionTextField = Exclude<keyof ConnectionForm, 'useTls'>;
+type ConnectionTextField = Exclude<keyof ConnectionForm, never>;
+
+type ChatMessage = {
+  id: string;
+  text: string;
+  username?: string;
+  kind?: string;
+  createdAt: number;
+};
 
 const defaultForm: ConnectionForm = {
-  serverAddress: 'syncplay.pl:8999',
+  host: 'syncplay.pl',
   username: 'Mobile',
   room: 'default',
-  password: '',
-  useTls: false
+  password: ''
 };
 
+let messageIdCounter = 0;
+function nextMessageId(): string {
+  return `msg-${++messageIdCounter}-${Date.now()}`;
+}
+
+function statusLabel(state: ConnectionState): string {
+  switch (state) {
+    case 'offline': return 'Disconnected';
+    case 'connecting': return 'Connecting…';
+    case 'handshaking': return 'Handshaking…';
+    case 'connecting_peers': return 'Connecting peers…';
+    case 'ready': return 'Connected';
+    case 'reconnecting': return 'Reconnecting…';
+    case 'error': return 'Error';
+    default: return 'Unknown';
+  }
+}
+
+// ── App ────────────────────────────────────────────────────────────────────
+
 export default function App() {
-  const [state, dispatch] = useReducer(syncplayReducer, undefined, createInitialSyncplayState);
+  // Connection state
+  const [connectionState, setConnectionState] = useState<ConnectionState>('offline');
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+
+  // Room state (synced from P2P)
+  const [playstate, setPlaystate] = useState<{ position: number; paused: boolean; setBy: string; speed: number }>({
+    position: 0, paused: true, setBy: '', speed: 1.0,
+  });
+  const [playlist, setPlaylist] = useState<{ files: string[]; index: number }>({ files: [], index: 0 });
+  const [roomPeers, setRoomPeers] = useState<PeerState[]>([]);
+
+  // Chat messages
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+
+  // Form & local UI
   const [form, setForm] = useState(defaultForm);
   const [chatDraft, setChatDraft] = useState('');
   const [mediaUri, setMediaUri] = useState<string | null>(null);
+  const [media, setMedia] = useState<SyncplayFile | null>(null);
   const [mediaLibrary, setMediaLibrary] = useState<MediaLibraryItem[]>([]);
-  const [transferDirectory, setTransferDirectory] = useState<Directory | null>(null);
   const [streamUrl, setStreamUrl] = useState('');
   const [seekDraft, setSeekDraft] = useState('0:00');
   const [playlistUrl, setPlaylistUrl] = useState('');
-  const [managedRoomName, setManagedRoomName] = useState('');
-  const [operatorPassword, setOperatorPassword] = useState('');
-  const [savedRooms, setSavedRooms] = useState<string[]>(['default']);
-  const [roomListDraft, setRoomListDraft] = useState('default');
-  const [autosaveJoinedRooms, setAutosaveJoinedRooms] = useState(true);
-  const [hideEmptyRooms, setHideEmptyRooms] = useState(false);
-  const [controlPasswords, setControlPasswords] = useState<Record<string, string>>({});
   const [isReady, setIsReady] = useState(false);
   const [syncPaused, setSyncPaused] = useState(false);
   const [autoReconnect, setAutoReconnect] = useState(true);
   const [autoFileSwitch, setAutoFileSwitch] = useState(true);
   const [keepPlayingInBackground, setKeepPlayingInBackground] = useState(true);
-  const [privacyMode, setPrivacyMode] = useState<PrivacyMode>('full');
-  const [autoPlayEnabled, setAutoPlayEnabled] = useState(false);
-  const [autoPlayThreshold, setAutoPlayThreshold] = useState(2);
   const [timeOffset, setTimeOffset] = useState(0);
   const [loopMode, setLoopMode] = useState<LoopMode>('none');
-  const [autoPlayCountdown, setAutoPlayCountdown] = useState<number | null>(null);
   const [missingMediaName, setMissingMediaName] = useState<string | null>(null);
   const [preferencesLoaded, setPreferencesLoaded] = useState(false);
   const [activeScreen, setActiveScreen] = useState<AppScreenId>(getInitialScreen(false));
-  const playbackRef = useRef<PlaybackSnapshot>({ position: null, paused: true });
+  const [savedRooms, setSavedRooms] = useState<string[]>(['default']);
+  const [roomListDraft, setRoomListDraft] = useState('default');
+  const [autosaveJoinedRooms, setAutosaveJoinedRooms] = useState(true);
+  const [hideEmptyRooms, setHideEmptyRooms] = useState(false);
+
+  // Refs
   const lastSentPositionRef = useRef(0);
   const previousSeekPositionRef = useRef<number | null>(null);
-  const lastConnectionConfigRef = useRef<ConnectionConfig | null>(null);
+  const lastConnectionConfigRef = useRef<P2PConnectionConfig | null>(null);
   const manualDisconnectRef = useRef(false);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAppliedPlaylistKeyRef = useRef<string | null>(null);
   const lastAutoFileSwitchRef = useRef<string | null>(null);
-  const openedTransferSocketsRef = useRef<Map<string, string>>(new Map());
-  const wasConnectedRef = useRef(false);
   const isApplyingRemoteRef = useRef(false);
+  const usernameRef = useRef(form.username);
 
   const player = useVideoPlayer(mediaUri, instance => {
     instance.timeUpdateEventInterval = 0.5;
@@ -183,134 +203,182 @@ export default function App() {
   });
   const statusEvent = useEvent(player, 'statusChange', { status: player.status });
 
-  const connection = useMemo(
-    () =>
-      new SyncplayConnection(
-        (status, error) =>
-          dispatch({
-            type: 'connection-status',
-            status,
-            ...(error === undefined ? {} : { error })
-          }),
-        message => dispatch({ type: 'server-message', message }),
-        () => playbackRef.current
-      ),
-    []
-  );
+  const connection = useMemo(() => {
+    const conn = new P2PConnection(form.username);
+    // Subscribe to state manager events
+    conn.stateManager.onSyncEvent((event: SyncEvent) => {
+      handleSyncEvent(event, conn);
+    });
+    return conn;
+  }, []);
+
+  // Keep username ref in sync
+  useEffect(() => {
+    usernameRef.current = form.username;
+  }, [form.username]);
+
+  // ── SyncEvent handler ───────────────────────────────────────────────────
+
+  function handleSyncEvent(event: SyncEvent, conn: P2PConnection) {
+    switch (event.type) {
+      case 'chat': {
+        const data = event.data as { from: string; message: string; timestamp: number };
+        if (data.from === usernameRef.current) break;
+        setMessages(prev => [...prev, {
+          id: nextMessageId(),
+          text: data.message,
+          username: data.from,
+          kind: 'chat',
+          createdAt: data.timestamp || Date.now(),
+        }].slice(-500));
+        break;
+      }
+      case 'playstate': {
+        const snapshot = event.data as RoomStateSnapshot;
+        setPlaystate({
+          position: snapshot.position,
+          paused: snapshot.paused,
+          setBy: snapshot.setBy,
+          speed: snapshot.speed,
+        });
+        setPlaylist({
+          files: snapshot.playlist.map(f => f.name),
+          index: snapshot.playlistIndex,
+        });
+        setRoomPeers(Object.values(snapshot.peers));
+        // Update readiness from snapshot
+        const myReady = snapshot.readyStates[usernameRef.current] ?? false;
+        setIsReady(myReady);
+        break;
+      }
+      case 'user-join': {
+        refreshPeers(conn);
+        break;
+      }
+      case 'user-leave': {
+        const leaveData = event.data as { username: string; reason: string };
+        refreshPeers(conn);
+        setMessages(prev => [...prev, {
+          id: nextMessageId(),
+          text: `${leaveData.username} left (${leaveData.reason})`,
+          kind: 'system',
+          createdAt: Date.now(),
+        }].slice(-500));
+        break;
+      }
+      case 'host-change': {
+        refreshPeers(conn);
+        break;
+      }
+      case 'error': {
+        setConnectionError(String(event.data ?? 'Unknown error'));
+        break;
+      }
+    }
+  }
+
+  function refreshPeers(conn: P2PConnection) {
+    const snap = conn.stateManager.getSnapshot();
+    setRoomPeers(Object.values(snap.peers));
+    setPlaylist({
+      files: snap.playlist.map(f => f.name),
+      index: snap.playlistIndex,
+    });
+  }
+
+  // ── Preferences persistence ─────────────────────────────────────────────
 
   useEffect(() => {
     let alive = true;
     AsyncStorage.getItem(PREFERENCES_STORAGE_KEY)
       .then(value => {
-        if (!alive) {
-          return;
-        }
-
+        if (!alive) return;
         const preferences = parsePersistedPreferences(value);
         if (preferences) {
-          setForm(preferences.form);
+          // Map old serverAddress to new host field
+          const mappedForm: ConnectionForm = {
+            host: preferences.form.serverAddress?.split(':')[0] ?? 'syncplay.pl',
+            username: preferences.form.username ?? 'Mobile',
+            room: preferences.form.room ?? 'default',
+            password: preferences.form.password ?? '',
+          };
+          setForm(mappedForm);
           setSavedRooms(preferences.savedRooms.length ? preferences.savedRooms : ['default']);
           setMediaLibrary(preferences.mediaLibrary);
-          setControlPasswords(preferences.controlPasswords);
           setAutosaveJoinedRooms(preferences.autosaveJoinedRooms);
           setHideEmptyRooms(preferences.hideEmptyRooms);
           setSyncPaused(preferences.syncPaused);
           setAutoReconnect(preferences.autoReconnect);
           setAutoFileSwitch(preferences.autoFileSwitch);
           setKeepPlayingInBackground(preferences.keepPlayingInBackground);
-          setPrivacyMode(preferences.privacyMode);
-          setAutoPlayEnabled(preferences.autoPlayEnabled);
-          setAutoPlayThreshold(preferences.autoPlayThreshold);
           setTimeOffset(preferences.timeOffset);
           setLoopMode(preferences.loopMode);
         }
       })
       .finally(() => {
-        if (alive) {
-          setPreferencesLoaded(true);
-        }
+        if (alive) setPreferencesLoaded(true);
       });
-
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
   }, []);
 
   useEffect(() => {
-    if (!preferencesLoaded) {
-      return;
-    }
-
-    const preferences = createPersistedPreferences({
-      form,
+    if (!preferencesLoaded) return;
+    const prefs = createPersistedPreferences({
+      form: form as unknown as Parameters<typeof createPersistedPreferences>[0]['form'],
       savedRooms,
       mediaLibrary,
-      controlPasswords,
+      controlPasswords: {},
       autosaveJoinedRooms,
       hideEmptyRooms,
       syncPaused,
       autoReconnect,
       autoFileSwitch,
       keepPlayingInBackground,
-      privacyMode,
-      autoPlayEnabled,
-      autoPlayThreshold,
+      privacyMode: 'full',
+      autoPlayEnabled: false,
+      autoPlayThreshold: 2,
       timeOffset,
-      loopMode
+      loopMode,
     });
-    AsyncStorage.setItem(PREFERENCES_STORAGE_KEY, serializePersistedPreferences(preferences));
+    AsyncStorage.setItem(PREFERENCES_STORAGE_KEY, serializePersistedPreferences(prefs));
   }, [
-    autosaveJoinedRooms,
-    autoFileSwitch,
-    autoReconnect,
-    controlPasswords,
-    form,
-    hideEmptyRooms,
-    keepPlayingInBackground,
-    mediaLibrary,
-    preferencesLoaded,
-    savedRooms,
-    syncPaused,
-    privacyMode,
-    autoPlayEnabled,
-    autoPlayThreshold,
-    timeOffset,
-    loopMode
+    autosaveJoinedRooms, autoFileSwitch, autoReconnect, form, hideEmptyRooms,
+    keepPlayingInBackground, mediaLibrary, preferencesLoaded, savedRooms,
+    syncPaused, timeOffset, loopMode,
   ]);
 
   useEffect(() => {
     player.staysActiveInBackground = keepPlayingInBackground;
   }, [keepPlayingInBackground, player]);
 
+  // ── App state (background) ──────────────────────────────────────────────
+
   useEffect(() => {
     const subscription = AppState.addEventListener('change', nextState => {
-      if (nextState !== 'active' && state.media) {
-        connection.sendPlayback(player.currentTime, !player.playing, true);
+      if (nextState !== 'active' && media) {
+        connection.sendPlaystate(player.currentTime, !player.playing, true);
         if (!keepPlayingInBackground && player.playing) {
           player.pause();
         }
       }
     });
-
     return () => subscription.remove();
-  }, [connection, keepPlayingInBackground, player, state.media]);
+  }, [connection, keepPlayingInBackground, player, media]);
+
+  // ── Auto-reconnect ──────────────────────────────────────────────────────
 
   useEffect(() => {
-    if (state.connection.status !== 'error' && state.connection.status !== 'disconnected') {
-      return;
-    }
-    if (!autoReconnect || manualDisconnectRef.current || !lastConnectionConfigRef.current) {
-      return;
-    }
-    if (reconnectTimerRef.current) {
-      return;
-    }
+    if (connectionState !== 'error' && connectionState !== 'offline') return;
+    if (!autoReconnect || manualDisconnectRef.current || !lastConnectionConfigRef.current) return;
+    if (reconnectTimerRef.current) return;
 
     reconnectTimerRef.current = setTimeout(() => {
       reconnectTimerRef.current = null;
       const config = lastConnectionConfigRef.current;
       if (config && autoReconnect && !manualDisconnectRef.current) {
-        connection.connect(config);
+        connection.connect(config).catch(err => {
+          setConnectionError(String(err));
+        });
       }
     }, 2500);
 
@@ -320,43 +388,20 @@ export default function App() {
         reconnectTimerRef.current = null;
       }
     };
-  }, [autoReconnect, connection, state.connection.status]);
+  }, [autoReconnect, connection, connectionState]);
 
-  useEffect(() => {
-    playbackRef.current = {
-      position: state.media ? player.currentTime : null,
-      paused: state.media ? !player.playing : true
-    };
-  }, [player, state.media, playingEvent.isPlaying, timeEvent.currentTime]);
-
-  useEffect(() => {
-    if (!state.media) {
-      return;
-    }
-
-    dispatch({
-      type: 'local-playback-updated',
-      position: timeEvent.currentTime,
-      paused: !playingEvent.isPlaying
-    });
-
-    const jump = Math.abs(timeEvent.currentTime - lastSentPositionRef.current);
-    if (jump > 1.5) {
-      connection.sendPlayback(timeEvent.currentTime, !playingEvent.isPlaying, true);
-    }
-    lastSentPositionRef.current = timeEvent.currentTime;
-  }, [connection, playingEvent.isPlaying, state.media, timeEvent.currentTime]);
+  // ── Sync correction ─────────────────────────────────────────────────────
 
   useEffect(() => {
     const correction = calculateSyncCorrection({
-      hasMedia: !!state.media,
+      hasMedia: !!media,
       syncPaused,
       localPosition: player.currentTime,
-      remotePosition: state.playback.position,
-      remotePaused: state.playback.paused,
+      remotePosition: playstate.position,
+      remotePaused: playstate.paused,
       localPlaying: player.playing,
-      doSeek: state.playback.doSeek,
-      timeOffset
+      doSeek: playstate.setBy !== '' && playstate.setBy !== form.username,
+      timeOffset,
     });
 
     isApplyingRemoteRef.current = true;
@@ -373,266 +418,140 @@ export default function App() {
     setTimeout(() => {
       isApplyingRemoteRef.current = false;
     }, 250);
-  }, [
-    player,
-    state.media,
-    state.playback.doSeek,
-    state.playback.paused,
-    state.playback.position,
-    syncPaused
-  ]);
+  }, [player, media, playstate.paused, playstate.position, playstate.setBy, syncPaused, playstate.speed, timeOffset, form.username]);
+
+  // ── Playback events → P2P ───────────────────────────────────────────────
 
   useEventListener(player, 'playingChange', event => {
-    if (!state.media || isApplyingRemoteRef.current) {
-      return;
-    }
-
-    connection.sendPlayback(player.currentTime, !event.isPlaying, false);
+    if (!media || isApplyingRemoteRef.current) return;
+    connection.sendPlaystate(player.currentTime, !event.isPlaying, false);
   });
 
-  useEventListener(player, 'sourceLoad', event => {
-    if (!state.media) {
-      return;
-    }
-
-    const media = {
-      ...state.media,
-      duration: Math.round(event.duration || state.media.duration)
-    };
-    dispatch({ type: 'media-updated', media });
-    connection.sendFile(media, privacyMode);
-  });
-
-  const roomUsers = state.rooms[state.profile.room] ?? [];
-  const transfers = Object.values(state.transfers);
-  const connected = state.connection.status === 'connected';
-  const currentRoomUser = roomUsers.find(user => user.username === state.profile.username);
-  const canControlRoom =
-    !isManagedRoomName(state.profile.room) ||
-    currentRoomUser?.isController === true ||
-    state.managedRoom.controllerRooms[state.profile.room] === state.profile.username;
-  const visibleRoomNames = filterVisibleRooms(state.rooms, hideEmptyRooms);
-  const roomOptions = buildRoomOptions(savedRooms, visibleRoomNames);
-  const mediaDirectoryLabels = buildDirectoryLabels(mediaLibrary);
+  // ── Playlist auto-apply ─────────────────────────────────────────────────
 
   useEffect(() => {
-    if (shouldAnnounceMediaOnConnection(wasConnectedRef.current, connected, state.media)) {
-      connection.sendFile(state.media, privacyMode);
-    }
-    wasConnectedRef.current = connected;
-  }, [connected, connection, state.media, privacyMode]);
+    const index = playlist.index;
+    const item = typeof index === 'number' ? playlist.files[index] : null;
+    if (!item) return;
 
-  useEffect(() => {
-    const index = state.playlist.index;
-    const item = typeof index === 'number' ? state.playlist.files[index] : null;
-    if (!item || state.playlist.updatedBy === state.profile.username) {
-      return;
-    }
-
-    const applyKey = `${index}:${item}:${state.playlist.updatedBy ?? ''}`;
-    if (lastAppliedPlaylistKeyRef.current === applyKey) {
-      return;
-    }
+    const applyKey = `${index}:${item}`;
+    if (lastAppliedPlaylistKeyRef.current === applyKey) return;
     lastAppliedPlaylistKeyRef.current = applyKey;
     openPlaylistItem(item);
-  }, [
-    mediaLibrary,
-    state.playlist.files,
-    state.playlist.index,
-    state.playlist.updatedBy,
-    state.profile.username
-  ]);
+  }, [mediaLibrary, playlist.files, playlist.index]);
+
+  // ── Auto file switch ────────────────────────────────────────────────────
 
   useEffect(() => {
-    if (!connected || !autoFileSwitch || mediaLibrary.length === 0) {
-      return;
-    }
+    if (connectionState !== 'ready' || !autoFileSwitch || mediaLibrary.length === 0) return;
 
-    const candidate = roomUsers.find(user => {
-      if (user.username === state.profile.username || !user.file?.name) {
-        return false;
-      }
-      if (state.media?.name === user.file.name) {
-        return false;
-      }
-      return Boolean(findMediaByName(mediaLibrary, user.file.name));
+    const candidate = roomPeers.find(peer => {
+      if (peer.username === form.username || !peer.file?.name) return false;
+      if (media?.name === peer.file.name) return false;
+      return Boolean(findMediaByName(mediaLibrary, peer.file.name));
     });
 
-    if (!candidate?.file?.name || lastAutoFileSwitchRef.current === candidate.file.name) {
-      return;
-    }
-
+    if (!candidate?.file?.name || lastAutoFileSwitchRef.current === candidate.file.name) return;
     lastAutoFileSwitchRef.current = candidate.file.name;
     openLibraryFileByName(candidate.file.name);
-  }, [autoFileSwitch, connected, mediaLibrary, roomUsers, state.media?.name, state.profile.username]);
+  }, [autoFileSwitch, connectionState, mediaLibrary, roomPeers, media?.name, form.username]);
+
+  // ── Screen auto-switch ──────────────────────────────────────────────────
 
   useEffect(() => {
-    if (!connected) {
-      openedTransferSocketsRef.current.clear();
-      return;
-    }
-
-    for (const transfer of transfers) {
-      if (transfer.status !== 'approved') {
-        openedTransferSocketsRef.current.delete(transfer.transferId);
-      }
-      if (
-        transfer.status !== 'approved' ||
-        !transfer.token ||
-        openedTransferSocketsRef.current.get(transfer.transferId) === transfer.token
-      ) {
-        continue;
-      }
-      if (transfer.role === 'receiver') {
-        openedTransferSocketsRef.current.set(transfer.transferId, transfer.token);
-        const sink = createExpoTransferSink(transfer.transferId, transfer.file?.name ?? transfer.transferId, transferDirectory ?? undefined);
-        connection.openTransferSocket(
-          {
-            transferId: transfer.transferId,
-            token: transfer.token,
-            role: 'receiver',
-            offset: sink.getOffset(),
-            file: transfer.file ?? null
-          },
-          sink,
-          completedPath => {
-            openedTransferSocketsRef.current.delete(transfer.transferId);
-            dispatch({ type: 'transfer-completed', transferId: transfer.transferId, completedPath });
-          },
-          undefined,
-          undefined,
-          error => {
-            openedTransferSocketsRef.current.delete(transfer.transferId);
-            dispatch({ type: 'transfer-failed', transferId: transfer.transferId, error: getTransferFailureMessage(error) });
-          }
-        );
-      } else if (transfer.role === 'sender') {
-        const sourceItem = findMediaByName(mediaLibrary, transfer.file?.name ?? state.media?.name);
-        if (!sourceItem) {
-          continue;
-        }
-        openedTransferSocketsRef.current.set(transfer.transferId, transfer.token);
-        connection.openTransferSocket(
-          {
-            transferId: transfer.transferId,
-            token: transfer.token,
-            role: 'sender',
-            offset: transfer.offset,
-            file: transfer.file ?? null
-          },
-          { write: () => undefined },
-          undefined,
-          createExpoTransferSource(sourceItem.uri),
-          undefined,
-          error => {
-            openedTransferSocketsRef.current.delete(transfer.transferId);
-            dispatch({ type: 'transfer-failed', transferId: transfer.transferId, error: getTransferFailureMessage(error) });
-          }
-        );
-      }
-    }
-  }, [connected, connection, mediaLibrary, state.media?.name, transferDirectory, transfers]);
-
-  useEffect(() => {
+    const connected = connectionState === 'ready';
     if (connected && activeScreen === 'connect') {
       setActiveScreen('watch');
     } else if (!connected && activeScreen !== 'connect') {
       setActiveScreen('connect');
     }
-  }, [activeScreen, connected]);
+  }, [activeScreen, connectionState]);
 
   useEffect(() => {
     setRoomListDraft(savedRooms.join('\n'));
   }, [savedRooms]);
 
-  // Auto-play countdown effect
+  // ── Playlist auto-advance ───────────────────────────────────────────────
+
   useEffect(() => {
-    if (!connected || !autoPlayEnabled || !state.media) {
-      setAutoPlayCountdown(null);
-      return;
-    }
-
-    const shouldStart = shouldAutoPlay(roomUsers, state.profile.username, {
-      enabled: autoPlayEnabled,
-      threshold: autoPlayThreshold
-    });
-
-    if (!shouldStart) {
-      setAutoPlayCountdown(null);
-      return;
-    }
-
-    const cleanup = startAutoPlayCountdown(
-      remaining => setAutoPlayCountdown(remaining),
-      () => {
-        setAutoPlayCountdown(null);
-        connection.sendPlayback(player.currentTime, false, false);
-      },
-      3
-    );
-
-    return cleanup;
-  }, [autoPlayEnabled, autoPlayThreshold, connected, player, roomUsers, state.media, state.profile.username, connection]);
-
-  // Playlist auto-advance effect
-  useEffect(() => {
-    if (!state.media || loopMode === 'single') {
-      return;
-    }
+    if (!media || loopMode === 'single') return;
 
     const playerStatus = player.status;
     const nearEnd = player.duration > 0 && player.currentTime >= player.duration - 0.5;
 
     if (playerStatus === 'readyToPlay' && nearEnd) {
-      const currentIndex = state.playlist.index;
+      const currentIndex = playlist.index;
       const nextIndex = typeof currentIndex === 'number' ? currentIndex + 1 : 0;
 
-      if (nextIndex < state.playlist.files.length) {
-        connection.sendPlaylistIndex(nextIndex);
-        openPlaylistItem(state.playlist.files[nextIndex]!);
+      if (nextIndex < playlist.files.length) {
+        connection.stateManager.setPlaylistIndex(nextIndex);
+        openPlaylistItem(playlist.files[nextIndex]!);
       } else if (loopMode === 'playlist') {
-        // Loop back to start
-        connection.sendPlaylistIndex(0);
-        const first = state.playlist.files[0];
-        if (first) {
-          openPlaylistItem(first);
-        }
+        connection.stateManager.setPlaylistIndex(0);
+        const first = playlist.files[0];
+        if (first) openPlaylistItem(first);
       }
     }
-  }, [loopMode, player.currentTime, player.duration, player.status, state.media, state.playlist.files, state.playlist.index, connection]);
+  }, [loopMode, player.currentTime, player.duration, player.status, media, playlist.files, playlist.index, connection]);
+
+  // ── Actions ─────────────────────────────────────────────────────────────
 
   function updateForm(key: ConnectionTextField, value: string) {
     setForm(current => ({ ...current, [key]: value }));
   }
 
   function connect() {
-    const server = parseServerAddress(form.serverAddress);
-    if (!server) {
-      dispatch({
-        type: 'connection-status',
-        status: 'error',
-        error: 'Enter a server as host:port.'
-      });
+    const host = form.host.trim();
+    if (!host) {
+      setConnectionError('Enter a host address.');
+      setConnectionState('error');
       return;
     }
 
-    dispatch({
-      type: 'profile-updated',
-      username: form.username.trim() || 'Mobile',
-      room: form.room.trim() || 'default'
-    });
-    const config = {
-      host: server.host,
-      port: server.port,
+    const config: P2PConnectionConfig = {
+      signalingUrl: `ws://${host}:8998`,
       username: form.username.trim() || 'Mobile',
       room: form.room.trim() || 'default',
-      tls: form.useTls,
-      ...(form.password.trim() ? { password: form.password.trim() } : {})
+      ...(form.password.trim() ? { password: form.password.trim() } : {}),
     };
+
     manualDisconnectRef.current = false;
     lastConnectionConfigRef.current = config;
-    updateForm('serverAddress', formatServerAddress(server));
-    connection.connect(config);
+    setConnectionError(null);
+    setConnectionState('connecting');
+
+    connection.connect(config).catch(err => {
+      setConnectionError(String(err));
+      setConnectionState('error');
+    });
+
+    // Watch for the stateManager's connection state changes
+    const checkState = setInterval(() => {
+      const cs = connection.stateManager.connectionState;
+      setConnectionState(cs);
+      if (cs === 'ready') {
+        // Refresh full snapshot on connect
+        const snap = connection.stateManager.getSnapshot();
+        setPlaystate({
+          position: snap.position,
+          paused: snap.paused,
+          setBy: snap.setBy,
+          speed: snap.speed,
+        });
+        setPlaylist({
+          files: snap.playlist.map(f => f.name),
+          index: snap.playlistIndex,
+        });
+        setRoomPeers(Object.values(snap.peers));
+        setIsReady(snap.readyStates[form.username] ?? false);
+      }
+      if (cs === 'error' || cs === 'offline') {
+        clearInterval(checkState);
+      }
+    }, 300);
+
+    // Cleanup after connection settles
+    setTimeout(() => clearInterval(checkState), 15000);
   }
 
   function disconnect() {
@@ -642,7 +561,9 @@ export default function App() {
       reconnectTimerRef.current = null;
     }
     connection.disconnect();
-    dispatch({ type: 'connection-status', status: 'disconnected' });
+    setConnectionState('offline');
+    setConnectionError(null);
+    setRoomPeers([]);
   }
 
   async function pickMedia() {
@@ -652,15 +573,11 @@ export default function App() {
       multiple: false
     });
 
-    if (result.canceled || !result.assets[0]) {
-      return;
-    }
+    if (result.canceled || !result.assets[0]) return;
 
     const asset = result.assets[0];
     const item = rememberMediaAssets([asset])[0];
-    if (item) {
-      loadMediaItem(item);
-    }
+    if (item) loadMediaItem(item);
   }
 
   async function pickMediaSearchFiles() {
@@ -670,14 +587,10 @@ export default function App() {
       multiple: true
     });
 
-    if (result.canceled || result.assets.length === 0) {
-      return;
-    }
+    if (result.canceled || result.assets.length === 0) return;
 
     const addedItems = rememberMediaAssets(result.assets);
-    if (!mediaUri && addedItems[0]) {
-      loadMediaItem(addedItems[0]);
-    }
+    if (!mediaUri && addedItems[0]) loadMediaItem(addedItems[0]);
   }
 
   async function pickMediaSearchDirectory() {
@@ -688,39 +601,20 @@ export default function App() {
         maxFiles: 750
       });
       if (scannedItems.length === 0) {
-        dispatch({
-          type: 'connection-status',
-          status: 'error',
-          error: 'No supported video files found in that folder.'
-        });
+        setConnectionError('No supported video files found in that folder.');
         return;
       }
 
       const nextItems = addMediaItems(mediaLibrary, scannedItems);
       setMediaLibrary(nextItems);
+
       if (!mediaUri) {
         const firstItem = nextItems.find(item => item.uri === scannedItems[0]?.uri);
-        if (firstItem) {
-          loadMediaItem(firstItem);
-        }
+        if (firstItem) loadMediaItem(firstItem);
       }
       setMissingMediaName(null);
     } catch (error) {
-      dispatch({
-        type: 'connection-status',
-        status: 'error',
-        error: error instanceof Error ? error.message : 'Could not read that folder.'
-      });
-    }
-  }
-
-  async function pickTransferDirectory() {
-    try {
-      const directory = await Directory.pickDirectoryAsync();
-      setTransferDirectory(directory);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Could not select download folder.';
-      dispatch({ type: 'connection-status', status: 'error', error: message });
+      setConnectionError(error instanceof Error ? error.message : 'Could not read that folder.');
     }
   }
 
@@ -735,61 +629,42 @@ export default function App() {
   }
 
   function loadMediaItem(item: MediaLibraryItem) {
-    const media: SyncplayFile = {
+    const file: SyncplayFile = {
       name: item.name,
       duration: item.duration ?? 0,
       size: item.size
     };
 
     setMediaUri(item.uri);
+    setMedia(file);
     setMissingMediaName(null);
-    dispatch({ type: 'media-updated', media });
-    if (connected) {
-      connection.sendFile(media, privacyMode);
-    }
   }
 
   function openLibraryFileByName(filename: string | null) {
     const item = findMediaByName(mediaLibrary, filename);
-    if (!item) {
-      return;
-    }
-
+    if (!item) return;
     loadMediaItem(item);
   }
 
   function openStream() {
     const url = streamUrl.trim();
-    if (!url) {
-      return;
-    }
-
+    if (!url) return;
     openStreamUri(url);
     setStreamUrl('');
   }
 
   function openStreamUri(url: string) {
-    const media: SyncplayFile = {
-      name: url,
-      duration: 0,
-      size: 0
-    };
-
+    const file: SyncplayFile = { name: url, duration: 0, size: 0 };
     setMediaUri(url);
+    setMedia(file);
     setMissingMediaName(null);
-    dispatch({ type: 'media-updated', media });
-    if (connected) {
-      connection.sendFile(media, privacyMode);
-    }
   }
 
   function sendChat() {
     const trimmed = chatDraft.trim();
-    if (!trimmed) {
-      return;
-    }
+    if (!trimmed) return;
 
-    const commandResult = parseSlashCommand(trimmed, state.profile.username);
+    const commandResult = parseSlashCommand(trimmed, form.username);
 
     if (commandResult) {
       switch (commandResult.kind) {
@@ -797,85 +672,46 @@ export default function App() {
           connection.sendChat(commandResult.text);
           break;
         case 'me':
-          connection.sendChat(`\\* ${state.profile.username} ${commandResult.action}`);
+          connection.sendChat(`* ${form.username} ${commandResult.action}`);
           break;
         case 'nick':
-          connection.sendUsername(commandResult.username);
-          dispatch({
-            type: 'profile-updated',
-            username: commandResult.username,
-            room: state.profile.room
-          });
+          updateForm('username', commandResult.username);
           break;
         case 'topic':
-          connection.sendTopic(commandResult.topic);
+          // Not supported in P2P — just send as chat
+          connection.sendChat(`Topic: ${commandResult.topic}`);
           break;
         case 'help':
-          dispatch({
-            type: 'connection-status',
-            status: state.connection.status,
-            error: commandResult.commands
-          });
+          setMessages(prev => [...prev, {
+            id: nextMessageId(),
+            text: commandResult.commands,
+            kind: 'system',
+            createdAt: Date.now(),
+          }].slice(-500));
           break;
       }
     } else {
-      connection.sendChat(trimmed);
+      // Try P2P slash commands
+      const p2pResult = connection.sendSlashCommand(trimmed);
+      if (p2pResult) {
+        setMessages(prev => [...prev, {
+          id: nextMessageId(),
+          text: p2pResult,
+          kind: 'system',
+          createdAt: Date.now(),
+        }].slice(-500));
+      } else {
+        connection.sendChat(trimmed);
+      }
     }
 
     setChatDraft('');
   }
 
-  function changeRoom() {
-    joinRoomEntry(form.room);
-  }
-
-  function joinRoomEntry(entry: string) {
-    const resolvedEntry = resolveJoinRoomEntry(entry, state.media?.name ?? null, 'default');
-    const parsed = parseRoomEntry(resolvedEntry);
-    if (!parsed.room) {
-      return;
-    }
-
-    const password = parsed.password ?? controlPasswords[parsed.room] ?? null;
-    if (parsed.password) {
-      setControlPasswords(current => ({ ...current, [parsed.room]: parsed.password as string }));
-      setOperatorPassword(parsed.password);
-    }
-
-    updateForm('room', parsed.room);
-    dispatch({
-      type: 'profile-updated',
-      username: state.profile.username,
-      room: parsed.room
-    });
-    connection.sendRoom(parsed.room);
-    if (password) {
-      connection.requestControlledRoom(parsed.room, password);
-    }
-    if (autosaveJoinedRooms) {
-      setSavedRooms(current => addRoomToSavedList(current, parsed.listValue));
-    }
-    setManagedRoomName(stripManagedRoomName(parsed.room));
-  }
-
-  function saveRoomListFromDraft() {
-    const rooms = roomListDraft
-      .split(/\r?\n/)
-      .map(room => room.trim())
-      .filter(Boolean)
-      .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: 'base' }));
-    setSavedRooms(Array.from(new Set(rooms)));
-  }
-
-  function addCurrentRoomToList() {
-    setSavedRooms(current => addRoomToSavedList(current, form.room));
-    setRoomListDraft(current => addRoomToSavedList(current.split(/\r?\n/), form.room).join('\n'));
-  }
-
   function toggleReady() {
     const next = !isReady;
     setIsReady(next);
-    connection.sendReady(next);
+    connection.sendReadiness(next);
   }
 
   function togglePlayback() {
@@ -889,62 +725,51 @@ export default function App() {
   function seekFromInput() {
     const nextPosition = parseTimestamp(seekDraft);
     if (nextPosition === null) {
-      dispatch({
-        type: 'connection-status',
-        status: 'error',
-        error: 'Enter a time like 1:23 or 1:02:03.'
-      });
+      setConnectionError('Enter a time like 1:23 or 1:02:03.');
       return;
     }
 
     previousSeekPositionRef.current = player.currentTime;
     player.currentTime = nextPosition;
-    connection.sendPlayback(nextPosition, !player.playing, true);
+    connection.sendPlaystate(nextPosition, !player.playing, true);
   }
 
   function undoSeek() {
     const previousPosition = previousSeekPositionRef.current;
-    if (previousPosition === null) {
-      return;
-    }
+    if (previousPosition === null) return;
 
     previousSeekPositionRef.current = player.currentTime;
     player.currentTime = previousPosition;
     setSeekDraft(formatTime(previousPosition));
-    connection.sendPlayback(previousPosition, !player.playing, true);
+    connection.sendPlaystate(previousPosition, !player.playing, true);
   }
 
   function addCurrentMediaToPlaylist() {
-    if (state.media?.name) {
-      sendPlaylist([...state.playlist.files, state.media.name]);
+    if (media?.name) {
+      sendPlaylist([...playlist.files, media.name]);
     }
   }
 
   function addPlaylistUrl() {
     const url = playlistUrl.trim();
-    if (!url) {
-      return;
-    }
-
-    sendPlaylist([...state.playlist.files, url]);
+    if (!url) return;
+    sendPlaylist([...playlist.files, url]);
     setPlaylistUrl('');
   }
 
   function clearPlaylist() {
-    sendPlaylist([]);
+    connection.stateManager.clearPlaylist();
+    setPlaylist({ files: [], index: 0 });
   }
 
-  function shufflePlaylist() {
-    sendPlaylist(shuffleFiles(state.playlist.files));
+  function shufflePlaylistAction() {
+    sendPlaylist(shuffleFiles(playlist.files));
   }
 
   function playPlaylistIndex(index: number) {
-    const item = state.playlist.files[index];
-    if (!item) {
-      return;
-    }
-
-    connection.sendPlaylistIndex(index);
+    const item = playlist.files[index];
+    if (!item) return;
+    connection.stateManager.setPlaylistIndex(index);
     openPlaylistItem(item);
   }
 
@@ -960,42 +785,47 @@ export default function App() {
     }
     if (resolved.kind === 'missing') {
       setMissingMediaName(resolved.filename);
-      dispatch({
-        type: 'connection-status',
-        status: 'error',
-        error: `Could not find ${resolved.filename} in media search.`
-      });
+      setConnectionError(`Could not find ${resolved.filename} in media search.`);
     }
   }
 
   function sendPlaylist(files: string[]) {
     const deduped = Array.from(new Set(files.map(file => file.trim()).filter(Boolean)));
-    connection.sendPlaylist(deduped);
+    connection.stateManager.addToPlaylist(deduped);
+    // Optimistically update local playlist state
+    setPlaylist(prev => ({ ...prev, files: deduped }));
   }
 
-  function createManagedRoom() {
-    const room = (managedRoomName.trim() || stripManagedRoomName(state.profile.room)).trim();
-    if (!room) {
-      return;
+  function joinRoom() {
+    const room = form.room.trim() || 'default';
+    updateForm('room', room);
+    if (autosaveJoinedRooms) {
+      const rooms = [...new Set([room, ...savedRooms])].sort();
+      setSavedRooms(rooms);
     }
-
-    const password = generateManagedRoomPassword();
-    setOperatorPassword(password);
-    connection.requestControlledRoom(room, password);
+    disconnect();
+    setTimeout(() => connect(), 300);
   }
 
-  function identifyAsController() {
-    const password = normalizeManagedRoomPassword(operatorPassword);
-    if (!password) {
-      return;
-    }
-
-    setOperatorPassword(password);
-    connection.requestControlledRoom(state.profile.room, password);
+  function saveRoomListFromDraft() {
+    const rooms = roomListDraft
+      .split(/\r?\n/)
+      .map(room => room.trim())
+      .filter(Boolean)
+      .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: 'base' }));
+    setSavedRooms(Array.from(new Set(rooms)));
   }
 
-  const selectedServerAddress = parseServerAddress(form.serverAddress);
-  const selectedServerText = selectedServerAddress ? formatServerAddress(selectedServerAddress) : '';
+  function addCurrentRoomToList() {
+    const rooms = [...new Set([form.room, ...savedRooms])].sort();
+    setSavedRooms(rooms);
+    setRoomListDraft(rooms.join('\n'));
+  }
+
+  const connected = connectionState === 'ready';
+  const mediaDirectoryLabels = buildDirectoryLabels(mediaLibrary);
+
+  // ── Render ──────────────────────────────────────────────────────────────
 
   const screenContent =
     activeScreen === 'connect' ? (
@@ -1005,32 +835,15 @@ export default function App() {
           <Text style={styles.panelTitle}>Connection</Text>
         </View>
         <View style={styles.connectionSummary}>
-          <SummaryItem label="Server" value={selectedServerText || form.serverAddress || 'host:port'} />
+          <SummaryItem label="Host" value={form.host || 'host'} />
           <SummaryItem label="Username" value={form.username.trim() || 'Mobile'} />
           <SummaryItem label="Room" value={form.room.trim() || 'default'} />
-          <SummaryItem label="Transport" value={form.useTls ? 'TLS' : 'TCP'} />
-        </View>
-        <Text style={styles.label}>Public servers</Text>
-        <View style={styles.serverOptionGrid}>
-          {PUBLIC_SERVER_OPTIONS.map(option => {
-            const selected = selectedServerText === option.address;
-            return (
-              <Pressable
-                key={option.address}
-                style={[styles.serverOption, selected && styles.serverOptionSelected]}
-                onPress={() => updateForm('serverAddress', option.address)}
-              >
-                <Text style={[styles.serverOptionText, selected && styles.serverOptionTextSelected]}>
-                  {option.address}
-                </Text>
-              </Pressable>
-            );
-          })}
+          <SummaryItem label="Protocol" value="P2P v2.0" />
         </View>
         <Field
-          label="Server address"
-          value={form.serverAddress}
-          onChangeText={value => updateForm('serverAddress', value)}
+          label="Host address"
+          value={form.host}
+          onChangeText={value => updateForm('host', value)}
           autoCapitalize="none"
         />
         <View style={styles.gridTwo}>
@@ -1042,19 +855,11 @@ export default function App() {
           <Field label="Room" value={form.room} onChangeText={value => updateForm('room', value)} />
         </View>
         <Field
-          label="Server password"
+          label="Password"
           value={form.password}
           onChangeText={value => updateForm('password', value)}
           secureTextEntry
         />
-        <Pressable
-          style={[styles.switchPill, form.useTls && styles.switchPillOn]}
-          onPress={() => setForm(current => ({ ...current, useTls: !current.useTls }))}
-        >
-          <Text style={[styles.switchText, form.useTls && styles.switchTextOn]}>
-            {form.useTls ? 'TLS on' : 'Plain TCP'}
-          </Text>
-        </Pressable>
         <View style={styles.buttonRow}>
           <ActionButton
             label={connected ? 'Disconnect' : 'Connect'}
@@ -1063,7 +868,7 @@ export default function App() {
             onPress={connected ? disconnect : connect}
           />
         </View>
-        {state.connection.error ? <Text style={styles.errorText}>{state.connection.error}</Text> : null}
+        {connectionError ? <Text style={styles.errorText}>{connectionError}</Text> : null}
         <View style={styles.divider} />
         <View style={styles.panelTitleRow}>
           <MonitorPlay color="#7fd2ff" size={18} />
@@ -1130,7 +935,7 @@ export default function App() {
           </Pressable>
           <View style={styles.transportMeta}>
             <Text style={styles.mediaName} numberOfLines={1}>
-              {state.media?.name ?? 'No media loaded'}
+              {media?.name ?? 'No media loaded'}
             </Text>
             <Text style={styles.smallText}>
               {formatTime(timeEvent.currentTime)} / {formatTime(player.duration || 0)}
@@ -1190,9 +995,7 @@ export default function App() {
                   style={styles.userReadyButton}
                   onPress={() => {
                     const dir = item.uri.substring(0, item.uri.lastIndexOf('/'));
-                    if (dir) {
-                      void Linking.openURL(dir);
-                    }
+                    if (dir) void Linking.openURL(dir);
                   }}
                 >
                   <FolderOpen color="#d7e5ef" size={14} />
@@ -1206,30 +1009,45 @@ export default function App() {
       <View style={styles.panel}>
         <View style={styles.panelTitleRow}>
           <Users color="#7fd2ff" size={18} />
-          <Text style={styles.panelTitle}>{state.profile.room}</Text>
-          <Text style={styles.countText}>{roomUsers.length}</Text>
+          <Text style={styles.panelTitle}>{form.room}</Text>
+          <Text style={styles.countText}>{roomPeers.length}</Text>
         </View>
         <FlatList
-          data={roomUsers}
+          data={roomPeers}
           keyExtractor={item => item.username}
           scrollEnabled={false}
-          ListEmptyComponent={<Text style={styles.mutedText}>No room list yet.</Text>}
+          ListEmptyComponent={<Text style={styles.mutedText}>No peers connected.</Text>}
           renderItem={({ item }) => (
-            <UserRow
-              user={item}
-              currentUser={state.profile.username}
-              canSetReady={connected && canControlRoom}
-              onSetReady={nextReady => connection.sendUserReady(item.username, nextReady)}
-              canOpenFile={Boolean(item.file?.name && findMediaByName(mediaLibrary, item.file.name))}
-              onOpenFile={() => openLibraryFileByName(item.file?.name ?? null)}
-              canRequestDownload={Boolean(
-                connected &&
-                  state.server.features.fileTransfer &&
-                  item.username !== state.profile.username &&
-                  item.file?.name
-              )}
-              onRequestDownload={() => connection.requestTransfer(item.username)}
-            />
+            <View style={styles.userRow}>
+              <View style={styles.userAvatar}>
+                <Text style={styles.userInitial}>{item.username.slice(0, 1).toUpperCase()}</Text>
+              </View>
+              <View style={styles.userMain}>
+                <Text style={styles.userName}>
+                  {item.username}
+                  {item.username === form.username ? ' (you)' : ''}
+                  {item.isHost ? ' · host' : ''}
+                  {item.isController ? ' · controller' : ''}
+                </Text>
+                <Text style={styles.smallText} numberOfLines={1}>
+                  {item.file?.name ?? 'No file'} {item.file ? `· ${formatBytes(item.file.size)}` : ''}
+                </Text>
+              </View>
+              <View style={[styles.readyBadge, item.isReady && styles.readyBadgeOn]}>
+                <Text style={[styles.readyText, item.isReady && styles.readyTextOn]}>
+                  {item.isReady ? 'Ready' : 'Wait'}
+                </Text>
+              </View>
+              {item.file?.name && findMediaByName(mediaLibrary, item.file.name) ? (
+                <Pressable style={styles.userReadyButton} onPress={() => openLibraryFileByName(item.file?.name ?? null)}>
+                  {/^[a-z][a-z\d+.-]*:\/\//i.test(item.file.name) ? (
+                    <Globe color="#d7e5ef" size={16} />
+                  ) : (
+                    <Film color="#d7e5ef" size={16} />
+                  )}
+                </Pressable>
+              ) : null}
+            </View>
           )}
         />
         <View style={styles.divider} />
@@ -1239,27 +1057,7 @@ export default function App() {
         </View>
         <View style={styles.inlineRow}>
           <Field label="Room" value={form.room} onChangeText={value => updateForm('room', value)} />
-          <ActionButton label="Join" icon={Users} tone="ghost" onPress={changeRoom} disabled={!connected} />
-        </View>
-        <View style={styles.serverOptionGrid}>
-          {roomOptions.map(room => (
-            <Pressable
-              key={room}
-              style={[styles.serverOption, form.room === parseRoomEntry(room).room && styles.serverOptionSelected]}
-              onPress={() => joinRoomEntry(room)}
-              disabled={!connected}
-            >
-              <Text
-                style={[
-                  styles.serverOptionText,
-                  form.room === parseRoomEntry(room).room && styles.serverOptionTextSelected
-                ]}
-                numberOfLines={1}
-              >
-                {room}
-              </Text>
-            </Pressable>
-          ))}
+          <ActionButton label="Join" icon={Users} tone="ghost" onPress={joinRoom} disabled={!connected} />
         </View>
         <View style={styles.buttonRow}>
           <ActionButton
@@ -1276,14 +1074,6 @@ export default function App() {
           >
             <Text style={[styles.switchText, autosaveJoinedRooms && styles.switchTextOn]}>
               {autosaveJoinedRooms ? 'Autosave joins' : 'Manual saves'}
-            </Text>
-          </Pressable>
-          <Pressable
-            style={[styles.switchPill, hideEmptyRooms && styles.switchPillOn]}
-            onPress={() => setHideEmptyRooms(value => !value)}
-          >
-            <Text style={[styles.switchText, hideEmptyRooms && styles.switchTextOn]}>
-              {hideEmptyRooms ? 'Hiding empty' : 'Showing empty'}
             </Text>
           </Pressable>
         </View>
@@ -1303,16 +1093,16 @@ export default function App() {
         <View style={styles.panelTitleRow}>
           <ListPlus color="#7fd2ff" size={18} />
           <Text style={styles.panelTitle}>Playlist</Text>
-          <Text style={styles.countText}>{state.playlist.files.length}</Text>
+          <Text style={styles.countText}>{playlist.files.length}</Text>
         </View>
         <FlatList
-          data={state.playlist.files}
+          data={playlist.files}
           keyExtractor={(item, index) => `${item}-${index}`}
           scrollEnabled={false}
           ListEmptyComponent={<Text style={styles.mutedText}>No playlist yet.</Text>}
           renderItem={({ item, index }) => (
             <Pressable
-              style={[styles.playlistRow, state.playlist.index === index && styles.playlistRowActive]}
+              style={[styles.playlistRow, playlist.index === index && styles.playlistRowActive]}
               onPress={() => playPlaylistIndex(index)}
             >
               <Text style={styles.playlistIndex}>{index + 1}</Text>
@@ -1332,171 +1122,23 @@ export default function App() {
             icon={Film}
             tone="ghost"
             onPress={addCurrentMediaToPlaylist}
-            disabled={!connected || !state.media}
+            disabled={!connected || !media}
           />
           <ActionButton
             label="Shuffle"
             icon={Shuffle}
             tone="ghost"
-            onPress={shufflePlaylist}
-            disabled={!connected || state.playlist.files.length < 2}
+            onPress={shufflePlaylistAction}
+            disabled={!connected || playlist.files.length < 2}
           />
           <ActionButton
             label="Clear"
             icon={Trash2}
             tone="ghost"
             onPress={clearPlaylist}
-            disabled={!connected || state.playlist.files.length === 0}
+            disabled={!connected || playlist.files.length === 0}
           />
         </View>
-        <View style={styles.divider} />
-        <View style={styles.panelTitleRow}>
-          <ShieldCheck color="#7fd2ff" size={18} />
-          <Text style={styles.panelTitle}>Managed Room</Text>
-        </View>
-        <View style={styles.inlineRow}>
-          <Field label="Room" value={managedRoomName} onChangeText={setManagedRoomName} />
-          <ActionButton
-            label="Create"
-            icon={ShieldCheck}
-            tone="ghost"
-            onPress={createManagedRoom}
-            disabled={!connected}
-          />
-        </View>
-        <View style={styles.inlineRow}>
-          <Field
-            label="Operator password"
-            value={operatorPassword}
-            onChangeText={setOperatorPassword}
-            autoCapitalize="characters"
-          />
-          <ActionButton
-            label="Identify"
-            icon={KeyRound}
-            tone="ghost"
-            onPress={identifyAsController}
-            disabled={!connected}
-          />
-        </View>
-      </View>
-    ) : activeScreen === 'transfers' ? (
-      <View style={styles.panel}>
-        <View style={styles.panelTitleRow}>
-          <Download color="#7fd2ff" size={18} />
-          <Text style={styles.panelTitle}>Transfers</Text>
-          <Text style={styles.countText}>{transfers.length}</Text>
-          <ActionButton label="Folder" icon={FolderOpen} tone="ghost" onPress={pickTransferDirectory} />
-        </View>
-        <FlatList
-          data={transfers}
-          keyExtractor={item => item.transferId}
-          scrollEnabled={false}
-          ListEmptyComponent={<Text style={styles.mutedText}>No transfers yet.</Text>}
-          renderItem={({ item }) => {
-            const display = getTransferDisplay(item);
-            const retryOffset = Math.max(item.transferred, item.offset);
-            const canResume = item.status.startsWith('paused') && display.canRetry;
-            const canRetry = item.status === 'failed' && display.canRetry;
-            const canCancel = !['incoming-request', 'complete', 'cancelled'].includes(item.status);
-
-            return (
-              <View style={styles.transferRow}>
-                <View style={styles.transferHeader}>
-                  <Download color={item.status === 'failed' ? colors.error : colors.accent} size={17} />
-                  <View style={styles.transferTitleBlock}>
-                    <Text style={styles.playlistText} numberOfLines={1}>
-                      {item.file?.name ?? item.transferId}
-                    </Text>
-                    <Text style={styles.transferDetail} numberOfLines={2}>
-                      {display.detail}
-                    </Text>
-                  </View>
-                  <View style={[styles.transferStatusBadge, item.status === 'failed' && styles.transferStatusBadgeError]}>
-                    <Text style={[styles.transferStatusText, item.status === 'failed' && styles.transferStatusTextError]}>
-                      {display.label}
-                    </Text>
-                  </View>
-                </View>
-                {item.status !== 'incoming-request' ? (
-                  <View style={styles.transferProgressTrack}>
-                    <View style={[styles.transferProgressFill, { width: `${Math.round(display.progress * 100)}%` }]} />
-                  </View>
-                ) : null}
-                <View style={styles.transferFooter}>
-                  <Text style={styles.smallText}>
-                    {item.role === 'sender' ? 'Sending' : 'Receiving'} {item.size ? `· ${formatBytes(item.size)}` : ''}
-                  </Text>
-                  <View style={styles.transferActions}>
-                    {item.status === 'downloading' ? (
-                      <Pressable
-                        style={styles.transferIconButton}
-                        accessibilityLabel="Pause transfer"
-                        onPress={() => connection.pauseTransfer(item.transferId, item.role ?? 'receiver')}
-                      >
-                        <Pause color="#d7e5ef" size={16} />
-                      </Pressable>
-                    ) : null}
-                    {item.status === 'incoming-request' ? (
-                      <Pressable
-                        style={styles.transferIconButton}
-                        accessibilityLabel="Accept transfer"
-                        onPress={() => {
-                          const sourceItem = findMediaByName(mediaLibrary, item.file?.name ?? state.media?.name);
-                          if (sourceItem) {
-                            connection.sendTransferDecision({ transferId: item.transferId, accepted: true });
-                          } else {
-                            connection.sendTransferDecision({ transferId: item.transferId, accepted: false, reason: 'missing-local-media' });
-                          }
-                        }}
-                      >
-                        <Check color="#d7e5ef" size={16} />
-                      </Pressable>
-                    ) : null}
-                    {item.status === 'incoming-request' ? (
-                      <Pressable
-                        style={styles.transferIconButton}
-                        accessibilityLabel="Reject transfer"
-                        onPress={() => connection.sendTransferDecision({ transferId: item.transferId, accepted: false, reason: 'rejected' })}
-                      >
-                        <Trash2 color="#d7e5ef" size={16} />
-                      </Pressable>
-                    ) : null}
-                    {canResume ? (
-                      <Pressable
-                        style={styles.transferActionButton}
-                        accessibilityLabel="Resume transfer"
-                        onPress={() => connection.resumeTransfer(item.transferId, retryOffset, item.fingerprint)}
-                      >
-                        <Play color="#d7e5ef" size={15} />
-                        <Text style={styles.transferActionText}>Resume</Text>
-                      </Pressable>
-                    ) : null}
-                    {canRetry ? (
-                      <Pressable
-                        style={styles.transferActionButton}
-                        accessibilityLabel="Retry transfer"
-                        onPress={() => dispatch({ type: 'transfer-retry', transferId: item.transferId })}
-                      >
-                        <Undo2 color="#d7e5ef" size={15} />
-                        <Text style={styles.transferActionText}>Retry</Text>
-                      </Pressable>
-                    ) : null}
-                    {canCancel ? (
-                      <Pressable
-                        style={styles.transferIconButton}
-                        accessibilityLabel="Cancel transfer"
-                        onPress={() => connection.cancelTransfer(item.transferId, item.role ?? 'receiver')}
-                      >
-                        <Trash2 color="#d7e5ef" size={16} />
-                      </Pressable>
-                    ) : null}
-                  </View>
-                </View>
-              </View>
-            );
-          }}
-        />
       </View>
     ) : activeScreen === 'chat' ? (
       <View style={styles.panel}>
@@ -1505,11 +1147,23 @@ export default function App() {
           <Text style={styles.panelTitle}>Chat</Text>
         </View>
         <FlatList
-          data={state.messages}
+          data={messages}
           keyExtractor={item => item.id}
           scrollEnabled={false}
           ListEmptyComponent={<Text style={styles.mutedText}>Messages will appear here.</Text>}
-          renderItem={({ item }) => <MessageRow message={item} />}
+          renderItem={({ item }) => (
+            <View style={styles.messageRow}>
+              <View style={styles.messageHeader}>
+                <Text style={item.kind === 'chat' ? styles.messageUser : styles.messageKind}>
+                  {item.kind === 'chat' ? item.username : item.kind}
+                </Text>
+                <Text style={styles.messageTime}>
+                  {formatClockTime(item.createdAt)}
+                </Text>
+              </View>
+              <Text style={styles.messageText}>{item.text}</Text>
+            </View>
+          )}
         />
         <View style={styles.chatInputRow}>
           <TextInput
@@ -1589,64 +1243,6 @@ export default function App() {
         </View>
         <View style={styles.settingRow}>
           <View style={styles.settingText}>
-            <Text style={styles.userName}>Privacy mode</Text>
-            <Text style={styles.smallText}>Full info / hashed filename / send nothing.</Text>
-          </View>
-          <View style={styles.inlineRow}>
-            {(['full', 'hashed', 'none'] as PrivacyMode[]).map(mode => (
-              <Pressable
-                key={mode}
-                style={[
-                  styles.switchPill,
-                  privacyMode === mode && styles.switchPillOn
-                ]}
-                onPress={() => setPrivacyMode(mode)}
-              >
-                <Text style={[styles.switchText, privacyMode === mode && styles.switchTextOn]}>
-                  {mode === 'full' ? 'Full' : mode === 'hashed' ? 'Hashed' : 'None'}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-        </View>
-        <View style={styles.settingRow}>
-          <View style={styles.settingText}>
-            <Text style={styles.userName}>Auto-play</Text>
-            <Text style={styles.smallText}>Unpause everyone when all users in the room are ready.</Text>
-          </View>
-          <Pressable
-            style={[styles.switchPill, autoPlayEnabled && styles.switchPillOn]}
-            onPress={() => setAutoPlayEnabled(value => !value)}
-          >
-            <Text style={[styles.switchText, autoPlayEnabled && styles.switchTextOn]}>
-              {autoPlayEnabled ? 'On' : 'Off'}
-            </Text>
-          </Pressable>
-        </View>
-        {autoPlayEnabled ? (
-          <View style={styles.settingRow}>
-            <View style={styles.settingText}>
-              <Text style={styles.userName}>Auto-play users</Text>
-              <Text style={styles.smallText}>Minimum users needed (2–10).</Text>
-            </View>
-            <TextInput
-              style={[styles.input, { width: 60, textAlign: 'center' }]}
-              value={String(autoPlayThreshold)}
-              onChangeText={value => {
-                const num = parseInt(value, 10);
-                if (num >= 2 && num <= 10) {
-                  setAutoPlayThreshold(num);
-                } else if (value === '') {
-                  setAutoPlayThreshold(2);
-                }
-              }}
-              keyboardType="number-pad"
-              placeholderTextColor="#64788b"
-            />
-          </View>
-        ) : null}
-        <View style={styles.settingRow}>
-          <View style={styles.settingText}>
             <Text style={styles.userName}>Time offset</Text>
             <Text style={styles.smallText}>Seconds to shift your playback. +1.5 or -0.5.</Text>
           </View>
@@ -1691,7 +1287,7 @@ export default function App() {
           <View style={styles.settingText}>
             <Text style={styles.userName}>Current connection</Text>
             <Text style={styles.smallText}>
-              {form.serverAddress} · {state.profile.username} · {state.profile.room}
+              {form.host} · {form.username} · {form.room}
             </Text>
           </View>
           <ActionButton
@@ -1715,12 +1311,11 @@ export default function App() {
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
           <View style={styles.header}>
             <View>
-              <Text style={styles.brand}>Syncplay Mobile</Text>
+              <Text style={styles.brand}>Syncplay P2P</Text>
               <Text style={styles.screenTitle}>{getScreenTitle(activeScreen)}</Text>
               <Text style={styles.statusText}>
-                {statusLabel(state.connection.status)}
-                {state.server.version ? ` · server ${state.server.version}` : ''}
-                {autoPlayCountdown !== null ? ` · Auto-play in ${autoPlayCountdown}` : ''}
+                {statusLabel(connectionState)}
+                {connected ? ` · ${roomPeers.length} peer${roomPeers.length !== 1 ? 's' : ''}` : ''}
               </Text>
             </View>
             <View style={[styles.statusDot, connected ? styles.dotLive : styles.dotIdle]} />
@@ -1734,6 +1329,8 @@ export default function App() {
     </ErrorBoundary>
   );
 }
+
+// ── Sub-components ────────────────────────────────────────────────────────
 
 type FieldProps = {
   label: string;
@@ -1797,10 +1394,6 @@ function SummaryItem({ label, value }: { label: string; value: string }) {
   );
 }
 
-function getTransferFailureMessage(error: Error): string {
-  return error.message.trim() || String(error).trim() || 'Transfer failed. Retry if both devices are still online.';
-}
-
 function BottomTabs({
   activeScreen,
   connected,
@@ -1810,9 +1403,10 @@ function BottomTabs({
   connected: boolean;
   onSelect: (screen: AppScreenId) => void;
 }) {
+  const screens = APP_SCREENS.filter(s => s.id !== 'transfers'); // Remove transfers tab
   return (
     <View style={styles.bottomTabs}>
-      {APP_SCREENS.map(screen => {
+      {screens.map(screen => {
         const active = activeScreen === screen.id;
         const disabled = !connected && screen.id !== 'connect';
         return (
@@ -1833,108 +1427,16 @@ function BottomTabs({
 
 function renderTabIcon(screenId: AppScreenId, color: string) {
   switch (screenId) {
-    case 'connect':
-      return <Plug color={color} size={17} />;
-    case 'watch':
-      return <Film color={color} size={17} />;
-  case 'room':
-      return <Users color={color} size={17} />;
-    case 'transfers':
-      return <Download color={color} size={17} />;
-    case 'chat':
-      return <MessageCircle color={color} size={17} />;
-    case 'settings':
-      return <SettingsIcon color={color} size={17} />;
-    default:
-      return null;
+    case 'connect': return <Plug color={color} size={17} />;
+    case 'watch': return <Film color={color} size={17} />;
+    case 'room': return <Users color={color} size={17} />;
+    case 'chat': return <MessageCircle color={color} size={17} />;
+    case 'settings': return <SettingsIcon color={color} size={17} />;
+    default: return null;
   }
 }
 
-function UserRow({
-  user,
-  currentUser,
-  canSetReady,
-  onSetReady,
-  canOpenFile,
-  onOpenFile,
-  canRequestDownload,
-  onRequestDownload
-}: {
-  user: RoomUser;
-  currentUser: string;
-  canSetReady: boolean;
-  onSetReady: (nextReady: boolean) => void;
-  canOpenFile: boolean;
-  onOpenFile: () => void;
-  canRequestDownload: boolean;
-  onRequestDownload: () => void;
-}) {
-  return (
-    <View style={styles.userRow}>
-      <View style={styles.userAvatar}>
-        <Text style={styles.userInitial}>{user.username.slice(0, 1).toUpperCase()}</Text>
-      </View>
-      <View style={styles.userMain}>
-        <Text style={styles.userName}>
-          {user.username}
-          {user.username === currentUser ? ' (you)' : ''}
-        </Text>
-        <Text style={styles.smallText} numberOfLines={1}>
-          {user.file?.name ?? 'No file'} {user.file ? `· ${formatBytes(user.file.size)}` : ''}
-        </Text>
-      </View>
-      <View style={[styles.readyBadge, user.isReady && styles.readyBadgeOn]}>
-        <Text style={[styles.readyText, user.isReady && styles.readyTextOn]}>
-          {user.isReady ? 'Ready' : 'Wait'}
-        </Text>
-      </View>
-      {canSetReady ? (
-        <Pressable style={styles.userReadyButton} onPress={() => onSetReady(!user.isReady)}>
-          <UserCheck color="#d7e5ef" size={16} />
-        </Pressable>
-      ) : null}
-      {canOpenFile ? (
-        <Pressable style={styles.userReadyButton} onPress={onOpenFile}>
-          {user.file?.name && /^[a-z][a-z\d+.-]*:\/\//i.test(user.file.name) ? (
-            <Globe color="#d7e5ef" size={16} />
-          ) : (
-            <Film color="#d7e5ef" size={16} />
-          )}
-        </Pressable>
-      ) : user.file?.name && !canOpenFile ? (
-        <View style={[styles.userReadyButton, styles.disabledButton]}>
-          {/^[a-z][a-z\d+.-]*:\/\//i.test(user.file.name) ? (
-            <Globe color={colors.muted} size={16} />
-          ) : (
-            <Film color={colors.muted} size={16} />
-          )}
-        </View>
-      ) : null}
-      {canRequestDownload ? (
-        <Pressable style={styles.userReadyButton} onPress={onRequestDownload}>
-          <Download color="#d7e5ef" size={16} />
-        </Pressable>
-      ) : null}
-    </View>
-  );
-}
-
-function MessageRow({ message }: { message: SyncplayMessage }) {
-  const isChat = message.kind === 'chat';
-  return (
-    <View style={styles.messageRow}>
-      <View style={styles.messageHeader}>
-        <Text style={isChat ? styles.messageUser : styles.messageKind}>
-          {isChat ? message.username : message.kind}
-        </Text>
-        <Text style={styles.messageTime}>
-          {formatClockTime(message.createdAt)}
-        </Text>
-      </View>
-      <Text style={styles.messageText}>{message.text}</Text>
-    </View>
-  );
-}
+// ── Styles ────────────────────────────────────────────────────────────────
 
 const colors = {
   bg: '#061015',
@@ -1951,574 +1453,182 @@ const colors = {
 };
 
 const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: colors.bg
-  },
-  container: {
-    flex: 1
-  },
-  content: {
-    padding: 16,
-    gap: 14
-  },
+  safe: { flex: 1, backgroundColor: colors.bg },
+  container: { flex: 1 },
+  content: { padding: 16, gap: 14 },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingTop: 8
+    paddingTop: 8,
   },
-  brand: {
-    color: colors.text,
-    fontSize: 28,
-    fontWeight: '800',
-    letterSpacing: 0
-  },
-  screenTitle: {
-    color: colors.accent,
-    fontSize: 15,
-    fontWeight: '800',
-    marginTop: 6
-  },
-  statusText: {
-    color: colors.muted,
-    fontSize: 13,
-    marginTop: 4
-  },
-  statusDot: {
-    width: 14,
-    height: 14,
-    borderRadius: 7
-  },
-  dotLive: {
-    backgroundColor: colors.green
-  },
-  dotIdle: {
-    backgroundColor: colors.faint
-  },
+  brand: { color: colors.text, fontSize: 28, fontWeight: '800', letterSpacing: 0 },
+  screenTitle: { color: colors.accent, fontSize: 15, fontWeight: '800', marginTop: 6 },
+  statusText: { color: colors.muted, fontSize: 13, marginTop: 4 },
+  statusDot: { width: 14, height: 14, borderRadius: 7 },
+  dotLive: { backgroundColor: colors.green },
+  dotIdle: { backgroundColor: colors.faint },
   videoShell: {
     minHeight: 210,
     borderRadius: 8,
     backgroundColor: '#020608',
     overflow: 'hidden',
     borderColor: colors.line,
-    borderWidth: 1
+    borderWidth: 1,
   },
-  video: {
-    width: '100%',
-    aspectRatio: 16 / 9
-  },
-  emptyVideo: {
-    minHeight: 210,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 24
-  },
-  emptyTitle: {
-    color: colors.text,
-    fontSize: 18,
-    fontWeight: '700',
-    marginTop: 12
-  },
-  emptyCopy: {
-    color: colors.muted,
-    fontSize: 13,
-    marginTop: 6,
-    textAlign: 'center'
-  },
+  video: { width: '100%', aspectRatio: 16 / 9 },
+  emptyVideo: { minHeight: 210, alignItems: 'center', justifyContent: 'center', padding: 24 },
+  emptyTitle: { color: colors.text, fontSize: 18, fontWeight: '700', marginTop: 12 },
+  emptyCopy: { color: colors.muted, fontSize: 13, marginTop: 6, textAlign: 'center' },
   transport: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
     padding: 12,
     borderRadius: 8,
-    backgroundColor: colors.panel
+    backgroundColor: colors.panel,
   },
   roundButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.accent
+    width: 48, height: 48, borderRadius: 24,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: colors.accent,
   },
-  transportMeta: {
-    flex: 1,
-    minWidth: 0
-  },
-  mediaName: {
-    color: colors.text,
-    fontSize: 15,
-    fontWeight: '700'
-  },
+  transportMeta: { flex: 1, minWidth: 0 },
+  mediaName: { color: colors.text, fontSize: 15, fontWeight: '700' },
   secondaryIconButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
+    width: 42, height: 42, borderRadius: 8,
+    alignItems: 'center', justifyContent: 'center',
     backgroundColor: colors.panelSoft,
-    borderColor: colors.line,
-    borderWidth: 1
+    borderColor: colors.line, borderWidth: 1,
   },
   panel: {
-    borderRadius: 8,
-    padding: 14,
-    gap: 12,
+    borderRadius: 8, padding: 14, gap: 12,
     backgroundColor: colors.panel,
-    borderColor: colors.line,
-    borderWidth: 1
+    borderColor: colors.line, borderWidth: 1,
   },
-  panelTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8
-  },
-  panelTitle: {
-    color: colors.text,
-    fontSize: 17,
-    fontWeight: '800',
-    flex: 1
-  },
-  connectionSummary: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8
-  },
+  panelTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  panelTitle: { color: colors.text, fontSize: 17, fontWeight: '800', flex: 1 },
+  connectionSummary: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   summaryItem: {
-    flexGrow: 1,
-    flexBasis: '47%',
-    minHeight: 54,
-    borderRadius: 8,
-    paddingHorizontal: 11,
-    paddingVertical: 8,
-    justifyContent: 'center',
-    backgroundColor: colors.bg,
-    borderColor: colors.line,
-    borderWidth: 1
+    flexGrow: 1, flexBasis: '47%', minHeight: 54,
+    borderRadius: 8, paddingHorizontal: 11, paddingVertical: 8,
+    justifyContent: 'center', backgroundColor: colors.bg,
+    borderColor: colors.line, borderWidth: 1,
   },
-  summaryLabel: {
-    color: colors.muted,
-    fontSize: 11,
-    fontWeight: '800'
-  },
-  summaryValue: {
-    color: colors.text,
-    fontSize: 14,
-    fontWeight: '800',
-    marginTop: 4
-  },
-  countText: {
-    color: colors.muted,
-    fontSize: 13
-  },
-  gridTwo: {
-    flexDirection: 'row',
-    gap: 10
-  },
-  inlineRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: 10
-  },
-  divider: {
-    height: 1,
-    backgroundColor: colors.line,
-    marginVertical: 2
-  },
-  serverOptionGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8
-  },
+  summaryLabel: { color: colors.muted, fontSize: 11, fontWeight: '800' },
+  summaryValue: { color: colors.text, fontSize: 14, fontWeight: '800', marginTop: 4 },
+  countText: { color: colors.muted, fontSize: 13 },
+  gridTwo: { flexDirection: 'row', gap: 10 },
+  inlineRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 10 },
+  divider: { height: 1, backgroundColor: colors.line, marginVertical: 2 },
+  serverOptionGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   serverOption: {
-    minHeight: 38,
-    borderRadius: 8,
-    paddingHorizontal: 11,
-    justifyContent: 'center',
-    backgroundColor: colors.panelSoft,
-    borderColor: colors.line,
-    borderWidth: 1
+    minHeight: 38, borderRadius: 8, paddingHorizontal: 11,
+    justifyContent: 'center', backgroundColor: colors.panelSoft,
+    borderColor: colors.line, borderWidth: 1,
   },
-  serverOptionSelected: {
-    backgroundColor: colors.accent,
-    borderColor: colors.accent
-  },
-  serverOptionText: {
-    color: colors.text,
-    fontSize: 13,
-    fontWeight: '800'
-  },
-  serverOptionTextSelected: {
-    color: colors.ink
-  },
-  field: {
-    flex: 1,
-    gap: 6
-  },
-  label: {
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: '700'
-  },
+  serverOptionSelected: { backgroundColor: colors.accent, borderColor: colors.accent },
+  serverOptionText: { color: colors.text, fontSize: 13, fontWeight: '800' },
+  serverOptionTextSelected: { color: colors.ink },
+  field: { flex: 1, gap: 6 },
+  label: { color: colors.muted, fontSize: 12, fontWeight: '700' },
   input: {
-    minHeight: 44,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    color: colors.text,
-    backgroundColor: colors.bg,
-    borderColor: colors.line,
-    borderWidth: 1
+    minHeight: 44, borderRadius: 8, paddingHorizontal: 12,
+    color: colors.text, backgroundColor: colors.bg,
+    borderColor: colors.line, borderWidth: 1,
   },
-  textArea: {
-    minHeight: 88,
-    paddingTop: 10,
-    textAlignVertical: 'top'
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 10
-  },
+  textArea: { minHeight: 88, paddingTop: 10, textAlignVertical: 'top' },
+  buttonRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 10 },
   actionButton: {
-    minHeight: 42,
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8
+    minHeight: 42, borderRadius: 8, paddingHorizontal: 14,
+    flexDirection: 'row', alignItems: 'center', gap: 8,
   },
-  primaryButton: {
-    backgroundColor: colors.accent
-  },
-  ghostButton: {
-    backgroundColor: colors.panelSoft,
-    borderColor: colors.line,
-    borderWidth: 1
-  },
-  disabledButton: {
-    opacity: 0.45
-  },
-  actionText: {
-    color: colors.text,
-    fontSize: 14,
-    fontWeight: '800'
-  },
-  primaryActionText: {
-    color: colors.ink
-  },
+  primaryButton: { backgroundColor: colors.accent },
+  ghostButton: { backgroundColor: colors.panelSoft, borderColor: colors.line, borderWidth: 1 },
+  disabledButton: { opacity: 0.45 },
+  actionText: { color: colors.text, fontSize: 14, fontWeight: '800' },
+  primaryActionText: { color: colors.ink },
   switchPill: {
-    minHeight: 42,
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    justifyContent: 'center',
-    backgroundColor: colors.panelSoft,
-    borderColor: colors.line,
-    borderWidth: 1
+    minHeight: 42, borderRadius: 8, paddingHorizontal: 14,
+    justifyContent: 'center', backgroundColor: colors.panelSoft,
+    borderColor: colors.line, borderWidth: 1,
   },
-  switchPillOn: {
-    backgroundColor: '#283222',
-    borderColor: '#557047'
-  },
-  switchText: {
-    color: colors.text,
-    fontSize: 14,
-    fontWeight: '800'
-  },
-  switchTextOn: {
-    color: colors.green
-  },
+  switchPillOn: { backgroundColor: '#283222', borderColor: '#557047' },
+  switchText: { color: colors.text, fontSize: 14, fontWeight: '800' },
+  switchTextOn: { color: colors.green },
   settingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-    paddingVertical: 10,
-    borderTopColor: colors.line,
-    borderTopWidth: StyleSheet.hairlineWidth
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    gap: 12, paddingVertical: 10,
+    borderTopColor: colors.line, borderTopWidth: StyleSheet.hairlineWidth,
   },
-  settingText: {
-    flex: 1,
-    minWidth: 0
-  },
+  settingText: { flex: 1, minWidth: 0 },
   bottomTabs: {
-    flexDirection: 'row',
-    gap: 8,
-    paddingHorizontal: 12,
-    paddingTop: 10,
+    flexDirection: 'row', gap: 8, paddingHorizontal: 12, paddingTop: 10,
     paddingBottom: Platform.select({ ios: 22, android: 12, default: 12 }),
-    backgroundColor: colors.bg,
-    borderTopColor: colors.line,
-    borderTopWidth: 1
+    backgroundColor: colors.bg, borderTopColor: colors.line, borderTopWidth: 1,
   },
   tabButton: {
-    flex: 1,
-    minHeight: 50,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4,
-    backgroundColor: colors.panel,
-    borderColor: colors.line,
-    borderWidth: 1
+    flex: 1, minHeight: 50, borderRadius: 8,
+    alignItems: 'center', justifyContent: 'center', gap: 4,
+    backgroundColor: colors.panel, borderColor: colors.line, borderWidth: 1,
   },
-  tabButtonActive: {
-    backgroundColor: colors.accent,
-    borderColor: colors.accent
-  },
-  tabText: {
-    color: colors.muted,
-    fontSize: 11,
-    fontWeight: '800'
-  },
-  tabTextActive: {
-    color: colors.ink
-  },
+  tabButtonActive: { backgroundColor: colors.accent, borderColor: colors.accent },
+  tabText: { color: colors.muted, fontSize: 11, fontWeight: '800' },
+  tabTextActive: { color: colors.ink },
   userRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingVertical: 9,
-    borderTopColor: colors.line,
-    borderTopWidth: StyleSheet.hairlineWidth
+    flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 9,
+    borderTopColor: colors.line, borderTopWidth: StyleSheet.hairlineWidth,
   },
   userAvatar: {
-    width: 34,
-    height: 34,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#243847'
+    width: 34, height: 34, borderRadius: 8,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: '#243847',
   },
-  userInitial: {
-    color: colors.text,
-    fontSize: 14,
-    fontWeight: '800'
-  },
-  userMain: {
-    flex: 1,
-    minWidth: 0
-  },
-  userName: {
-    color: colors.text,
-    fontSize: 14,
-    fontWeight: '700'
-  },
-  readyBadge: {
-    borderRadius: 8,
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    backgroundColor: '#1c2830'
-  },
-  readyBadgeOn: {
-    backgroundColor: '#2c4028'
-  },
-  readyText: {
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: '800'
-  },
-  readyTextOn: {
-    color: colors.green
-  },
+  userInitial: { color: colors.text, fontSize: 14, fontWeight: '800' },
+  userMain: { flex: 1, minWidth: 0 },
+  userName: { color: colors.text, fontSize: 14, fontWeight: '700' },
+  readyBadge: { borderRadius: 8, paddingHorizontal: 9, paddingVertical: 5, backgroundColor: '#1c2830' },
+  readyBadgeOn: { backgroundColor: '#2c4028' },
+  readyText: { color: colors.muted, fontSize: 12, fontWeight: '800' },
+  readyTextOn: { color: colors.green },
   userReadyButton: {
-    width: 34,
-    height: 34,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
+    width: 34, height: 34, borderRadius: 8,
+    alignItems: 'center', justifyContent: 'center',
     backgroundColor: colors.panelSoft,
-    borderColor: colors.line,
-    borderWidth: 1
-  },
-  transferRow: {
-    gap: 9,
-    paddingVertical: 11,
-    borderTopColor: colors.line,
-    borderTopWidth: StyleSheet.hairlineWidth
-  },
-  transferHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10
-  },
-  transferTitleBlock: {
-    flex: 1,
-    minWidth: 0
-  },
-  transferDetail: {
-    color: colors.muted,
-    fontSize: 12,
-    marginTop: 4,
-    lineHeight: 16
-  },
-  transferStatusBadge: {
-    borderRadius: 8,
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    backgroundColor: '#1c2830'
-  },
-  transferStatusBadgeError: {
-    backgroundColor: '#3b2527'
-  },
-  transferStatusText: {
-    color: colors.accent,
-    fontSize: 11,
-    fontWeight: '800'
-  },
-  transferStatusTextError: {
-    color: colors.error
-  },
-  transferProgressTrack: {
-    height: 6,
-    borderRadius: 3,
-    overflow: 'hidden',
-    backgroundColor: colors.bg
-  },
-  transferProgressFill: {
-    height: '100%',
-    borderRadius: 3,
-    backgroundColor: colors.accent
-  },
-  transferFooter: {
-    minHeight: 34,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 10
-  },
-  transferActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8
-  },
-  transferIconButton: {
-    width: 34,
-    height: 34,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.panelSoft,
-    borderColor: colors.line,
-    borderWidth: 1
-  },
-  transferActionButton: {
-    minHeight: 34,
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: colors.panelSoft,
-    borderColor: colors.line,
-    borderWidth: 1
-  },
-  transferActionText: {
-    color: colors.text,
-    fontSize: 12,
-    fontWeight: '800'
+    borderColor: colors.line, borderWidth: 1,
   },
   playlistRow: {
-    minHeight: 40,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingVertical: 8,
-    borderTopColor: colors.line,
-    borderTopWidth: StyleSheet.hairlineWidth
+    minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingVertical: 8, borderTopColor: colors.line, borderTopWidth: StyleSheet.hairlineWidth,
   },
-  playlistRowActive: {
-    backgroundColor: colors.panelSoft
-  },
-  playlistIndex: {
-    width: 24,
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: '800',
-    textAlign: 'center'
-  },
-  playlistText: {
-    flex: 1,
-    minWidth: 0,
-    color: colors.text,
-    fontSize: 14,
-    fontWeight: '700'
-  },
+  playlistRowActive: { backgroundColor: colors.panelSoft },
+  playlistIndex: { width: 24, color: colors.muted, fontSize: 12, fontWeight: '800', textAlign: 'center' },
+  playlistText: { flex: 1, minWidth: 0, color: colors.text, fontSize: 14, fontWeight: '700' },
   mediaLibraryRow: {
-    minHeight: 40,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingVertical: 8,
-    borderTopColor: colors.line,
-    borderTopWidth: StyleSheet.hairlineWidth
+    minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingVertical: 8, borderTopColor: colors.line, borderTopWidth: StyleSheet.hairlineWidth,
   },
   messageRow: {
     paddingVertical: 8,
-    borderTopColor: colors.line,
-    borderTopWidth: StyleSheet.hairlineWidth
+    borderTopColor: colors.line, borderTopWidth: StyleSheet.hairlineWidth,
   },
-  messageHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between'
-  },
-  messageUser: {
-    color: colors.accent,
-    fontSize: 12,
-    fontWeight: '800'
-  },
-  messageKind: {
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: '800',
-    textTransform: 'uppercase'
-  },
-  messageTime: {
-    color: colors.faint,
-    fontSize: 11
-  },
-  messageText: {
-    color: colors.text,
-    fontSize: 14,
-    marginTop: 2
-  },
-  chatInputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10
-  },
+  messageHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  messageUser: { color: colors.accent, fontSize: 12, fontWeight: '800' },
+  messageKind: { color: colors.muted, fontSize: 12, fontWeight: '800', textTransform: 'uppercase' },
+  messageTime: { color: colors.faint, fontSize: 11 },
+  messageText: { color: colors.text, fontSize: 14, marginTop: 2 },
+  chatInputRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   chatInput: {
-    flex: 1,
-    minHeight: 44,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    color: colors.text,
-    backgroundColor: colors.bg,
-    borderColor: colors.line,
-    borderWidth: 1
+    flex: 1, minHeight: 44, borderRadius: 8, paddingHorizontal: 12,
+    color: colors.text, backgroundColor: colors.bg,
+    borderColor: colors.line, borderWidth: 1,
   },
   sendButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.accent
+    width: 44, height: 44, borderRadius: 8,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: colors.accent,
   },
-  smallText: {
-    color: colors.muted,
-    fontSize: 12,
-    marginTop: 3
-  },
-  mutedText: {
-    color: colors.muted,
-    fontSize: 13,
-    paddingVertical: 8
-  },
-  errorText: {
-    color: colors.error,
-    fontSize: 13
-  }
+  smallText: { color: colors.muted, fontSize: 12, marginTop: 3 },
+  mutedText: { color: colors.muted, fontSize: 13, paddingVertical: 8 },
+  errorText: { color: colors.error, fontSize: 13 },
 });
