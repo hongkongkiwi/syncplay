@@ -118,6 +118,8 @@ struct IncomingTransfer {
     total_size: u64,
     chunks: HashMap<u64, Vec<u8>>,
     expected_chunks: u64,
+    /// Expected SHA-256 fingerprint (empty = skip verification)
+    expected_fingerprint: String,
 }
 
 /// Handles peer-to-peer file transfers with SHA-256 integrity checking and chunked streaming delivery.
@@ -297,6 +299,14 @@ impl FileTransfer {
         }
 
         let mut transfers = self.transfers.lock();
+        // Reject chunk_size=0 to prevent division by zero
+        if msg.chunk_size == 0 {
+            warn!(
+                "FileTransfer from {} has chunk_size=0 — rejected",
+                msg.transfer_id
+            );
+            return Ok(None);
+        }
         let entry = transfers
             .entry(msg.transfer_id.clone())
             .or_insert_with(|| IncomingTransfer {
@@ -308,6 +318,7 @@ impl FileTransfer {
                 total_size: msg.total_size,
                 chunks: HashMap::new(),
                 expected_chunks: msg.total_size.div_ceil(msg.chunk_size as u64),
+                expected_fingerprint: String::new(), // set from FileResponse
             });
 
         entry.chunks.insert(msg.chunk_index, msg.data.clone());
@@ -328,11 +339,21 @@ impl FileTransfer {
                 }
             }
 
+            let fingerprint = format!("{:x}", Sha256::digest(&data));
+            // Verify fingerprint if one was provided
+            if !entry.expected_fingerprint.is_empty() && entry.expected_fingerprint != fingerprint {
+                warn!(
+                    "Fingerprint mismatch for {}: expected {}, got {:.12}",
+                    entry.filename, entry.expected_fingerprint, &fingerprint
+                );
+                transfers.remove(&msg.transfer_id);
+                return Ok(None);
+            }
+
             let out_path = Path::new(save_dir).join(&entry.filename);
             std::fs::create_dir_all(save_dir)?;
             std::fs::write(&out_path, &data)?;
 
-            let fingerprint = format!("{:x}", Sha256::digest(&data));
             info!(
                 "Transfer complete: {} ({} bytes, sha256={:.12})",
                 out_path.display(),
@@ -359,17 +380,22 @@ impl FileTransfer {
             },
         );
 
+        let transfers2 = self.transfers.clone();
         self.conn.on_msg(
             MessageType::FileResponse,
             move |_: MessageType, data: &[u8], _from: String| {
                 if let Ok(resp) = rmp_serde::from_slice::<FileResponsePayload>(data) {
                     if resp.accepted {
-                        info!("File request {} accepted", resp.transfer_id);
+                        info!("File request accepted by {_from}: {}", resp.transfer_id);
+                        // Store expected fingerprint for integrity verification
+                        if !resp.fingerprint.is_empty() {
+                            let mut transfers = transfers2.lock();
+                            if let Some(entry) = transfers.get_mut(&resp.transfer_id) {
+                                entry.expected_fingerprint = resp.fingerprint.clone();
+                            }
+                        }
                     } else {
-                        warn!(
-                            "File request {} rejected: {}",
-                            resp.transfer_id, resp.reason
-                        );
+                        info!("File request rejected by {_from}: {}", resp.reason);
                     }
                 }
             },

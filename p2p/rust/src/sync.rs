@@ -83,6 +83,8 @@ pub struct SyncManager {
     max_pl_items: usize,
     /// Features advertised to peers (from config)
     features: Vec<String>,
+    /// Prevents double-spawn of the host sync loop
+    host_loop_running: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Clone for SyncManager {
@@ -99,6 +101,7 @@ impl Clone for SyncManager {
             max_chat: self.max_chat,
             max_pl_items: self.max_pl_items,
             features: self.features.clone(),
+            host_loop_running: self.host_loop_running.clone(),
         }
     }
 }
@@ -123,6 +126,7 @@ impl SyncManager {
             max_chat,
             max_pl_items,
             features,
+            host_loop_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         mgr.register_handlers();
         // Wire up P2P reconnection on peer disconnect
@@ -138,16 +142,24 @@ impl SyncManager {
         let r = mgr.room.clone();
         let s = mgr.shutdown.clone();
         let m2 = mgr.clone();
+        let hlr1 = mgr.host_loop_running.clone();
+        let iv_cap = sync_interval_ms;
         conn.on_host(move |_new_id: String, reason: String| {
             if c.is_host() {
+                // Prevent double-spawn: only start if not already running
+                if hlr1.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    warn!("Host loop already running — skipping duplicate spawn");
+                    return;
+                }
                 info!("I am now the host ({reason}) — starting sync loop");
                 m2.add_controller(&c.pid());
                 let c2 = c.clone();
                 let r2 = r.clone();
                 let s2 = s.clone();
-                let iv2 = sync_interval_ms;
+                let hlr2 = hlr1.clone();
                 tokio::spawn(async move {
-                    host_loop(c2, r2, s2, iv2).await;
+                    host_loop(c2, r2, s2, iv_cap).await;
+                    hlr2.store(false, std::sync::atomic::Ordering::SeqCst);
                 });
             }
         });
@@ -160,12 +172,22 @@ impl SyncManager {
 
     pub async fn start(&self) {
         if self.conn.is_host() {
+            // Prevent double-spawn if on_host already started a loop
+            if self
+                .host_loop_running
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                warn!("Host loop already running — skipping start() spawn");
+                return;
+            }
             let c = self.conn.clone();
             let r = self.room.clone();
             let s = self.shutdown.clone();
             let iv = self.sync_interval_ms;
+            let hlr = self.host_loop_running.clone();
             tokio::spawn(async move {
                 host_loop(c, r, s, iv).await;
+                hlr.store(false, std::sync::atomic::Ordering::SeqCst);
             });
         }
         let c = self.conn.clone();
@@ -838,6 +860,17 @@ impl SyncManager {
                 if !c5.is_host() {
                     warn!("PlaylistRequest from non-host {from}");
                     return;
+                }
+                // Only controllers (or the host itself) can modify playlist
+                {
+                    let allowed = {
+                        let r = r5.lock();
+                        r.controllers.contains(&from) || from == c5.pid()
+                    };
+                    if !allowed {
+                        warn!("PlaylistRequest denied — {from} is not a controller");
+                        return;
+                    }
                 }
                 match rmp_serde::from_slice::<PlaylistRequestPayload>(data) {
                     Ok(req) => {

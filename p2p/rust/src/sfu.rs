@@ -382,6 +382,28 @@ impl SfuServer {
                 let room = room_obj_2.clone();
 
                 Box::pin(async move {
+                    // Security: only route authorized message types.
+                    // Host-authoritative messages (playstate, playlist, controller)
+                    // must only come from the room host. All peers can send chat, readiness.
+                    let should_route = match crate::wire::decode_header(&data) {
+                        Ok((crate::messages::MessageType::Playstate, _))
+                        | Ok((crate::messages::MessageType::PlaystateRequest, _))
+                        | Ok((crate::messages::MessageType::PlaylistChange, _))
+                        | Ok((crate::messages::MessageType::PlaylistRequest, _))
+                        | Ok((crate::messages::MessageType::ControllerChange, _))
+                        | Ok((crate::messages::MessageType::HostElected, _)) => {
+                            // Host-authoritative: only route if sender is the room host
+                            // (first peer in join_order is the host)
+                            let host_id =
+                                room.join_order.lock().first().cloned().unwrap_or_default();
+                            from_pid == host_id
+                        }
+                        _ => true, // Chat, readiness, latency, voice, files — all peers can send
+                    };
+                    if !should_route {
+                        warn!("[sfu] Blocked unauthorized message from {from_pid}");
+                        return;
+                    }
                     for entry in room.peers.iter() {
                         if entry.key() != &from_pid {
                             if let Err(e) = entry.value().dc.send(&data).await {
