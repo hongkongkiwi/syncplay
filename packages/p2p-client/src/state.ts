@@ -149,6 +149,11 @@ export class P2PStateManager {
   get myPeerId(): string { return this.peerId; }
   get connected(): boolean { return this._connected; }
 
+  /** Public accessor returning per-peer latencies */
+  getLatencies(): Record<string, number> {
+    return Object.fromEntries(this.latencyMap);
+  }
+
   /** Serializable snapshot for UI consumption */
   getSnapshot(): RoomStateSnapshot {
     return {
@@ -337,6 +342,14 @@ export class P2PStateManager {
     else this._transport.send(MessageType.PlaystateRequest, playstateRequestSetSpeed(speed));
   }
 
+  /** Host-only speed change WITHOUT broadcasting position */
+  updateSpeed(speed: number): void {
+    this.room.speed = speed;
+    if (this.isHost && this._transport && this._connected) {
+      this._transport.send(MessageType.PlaystateRequest, playstateRequestSetSpeed(speed));
+    }
+  }
+
   // ── Readiness ────────────────────────────────────────────────────
 
   setReady(isReady: boolean): void {
@@ -344,6 +357,17 @@ export class P2PStateManager {
     this.room.readyStates.set(this.username, isReady);
     this._transport.send(MessageType.Readiness, readinessPayload(
       this.username, isReady, true, this.username,
+    ));
+  }
+
+  /** Host sets another peer's readiness */
+  setReadyFor(targetUsername: string, isReady: boolean): void {
+    if (!this.isHost || !this._transport || !this._connected) return;
+    this.room.readyStates.set(targetUsername, isReady);
+    const peer = this.room.peers.get(targetUsername);
+    if (peer) peer.isReady = isReady;
+    this._transport.send(MessageType.Readiness, readinessPayload(
+      targetUsername, isReady, false, this.username,
     ));
   }
 
@@ -359,6 +383,20 @@ export class P2PStateManager {
     }
     const combined = [...this.room.playlist, ...entries].slice(0, MAX_PLAYLIST);
     this.room.playlist = combined;
+    this.broadcastPlaylist();
+  }
+
+  /** Replace entire playlist (not append) */
+  setPlaylist(files: string[]): void {
+    const entries: FileEntry[] = files.filter(f => f).map(f => ({ name: f, duration: 0 }));
+    if (!this.isHost && this._transport && this._connected) {
+      this._transport.send(MessageType.PlaylistRequest, {
+        action: PlaylistAction.SetPlaylist, files: entries, index: 0,
+      });
+      return;
+    }
+    this.room.playlist = entries.slice(0, MAX_PLAYLIST);
+    this.room.playlistIndex = 0;
     this.broadcastPlaylist();
   }
 
