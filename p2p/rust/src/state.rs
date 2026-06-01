@@ -136,13 +136,16 @@ impl ConnectionStateMachine {
     // ── Transitions ─────────────────────────────────────────────────
 
     fn transit(&self, to: ConnectionState, reason: &str) {
-        let from = self.state.lock().clone();
-        if from == to {
+        // Hold a single lock across read-validate-write to prevent TOCTOU
+        let mut state = self.state.lock();
+        let from = state.clone();
+        if *state == to {
             return; // no-op
         }
         let msg = format!("{from} → {to}  ({reason})");
         log::info!("[state] {msg}");
-        *self.state.lock() = to;
+        *state = to;
+        drop(state); // release before acquiring other locks
         *self.entered_at.lock() = Instant::now();
         *self.last_transition.lock() = msg;
     }

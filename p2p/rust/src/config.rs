@@ -19,8 +19,9 @@ pub struct P2pConfig {
     #[serde(default)]
     pub room: String,
 
-    /// Room password (empty = no password)
-    #[serde(default)]
+    /// Room password (empty = no password).
+    /// Skipped in serialization to prevent plaintext storage on disk.
+    #[serde(default, skip_serializing)]
     pub password: String,
 
     /// Media player settings

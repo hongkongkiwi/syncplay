@@ -149,6 +149,18 @@ struct PeerInfo {
 
 const MAX_PEERS_PER_ROOM: usize = 100;
 
+/// Constant-time byte comparison to prevent timing side-channel attacks.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 fn make_peer_id() -> String {
     use std::time::SystemTime;
     let ts = SystemTime::now()
@@ -359,7 +371,8 @@ async fn handle_connection(
                                 {
                                     let r = room_obj.lock();
                                     if let Some(pwd) = &r.password {
-                                        if pwd != &password {
+                                        // Constant-time comparison to prevent timing side-channel
+                                        if !constant_time_eq(pwd.as_bytes(), password.as_bytes()) {
                                             send_json(&tx, &err("wrong_password", "Incorrect room password"));
                                             continue;
                                         }

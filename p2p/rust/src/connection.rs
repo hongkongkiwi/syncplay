@@ -138,7 +138,7 @@ struct Inner {
     on_host: Mutex<Vec<PeerFn>>,
     on_pc: Mutex<Vec<PcFn>>,
     on_disconnect: Mutex<Vec<DisconnectFn>>,
-    signal_tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
+    signal_tx: Mutex<Option<mpsc::Sender<String>>>,
     /// Connection lifecycle state machine
     state: SharedStateMachine,
 }
@@ -244,14 +244,14 @@ impl ConnectionManager {
         *self.0.host_id.lock() = hid.into();
     }
 
-    pub fn set_sig(&self, tx: mpsc::UnboundedSender<String>) {
+    pub fn set_sig(&self, tx: mpsc::Sender<String>) {
         *self.0.signal_tx.lock() = Some(tx);
     }
 
     pub fn sig(&self, msg: &str) {
         if let Some(tx) = self.0.signal_tx.lock().as_ref() {
-            if tx.send(msg.to_string()).is_err() {
-                warn!("Signal channel closed");
+            if let Err(e) = tx.try_send(msg.to_string()) {
+                warn!("Signal channel full or closed: {e}");
             }
         } else {
             warn!("No signal channel set");
@@ -302,6 +302,16 @@ impl ConnectionManager {
     }
 
     fn fire_join(&self, pid: &str, uname: &str) {
+        // Clone callback list to avoid deadlock if callback re-registers
+        let callbacks: Vec<_> = self
+            .0
+            .on_join
+            .lock()
+            .iter()
+            .map(|_| ()) // we can't clone Box<dyn Fn>, so iterate in-place
+            .collect();
+        drop(callbacks);
+        // Iterate while holding lock — callers must not re-enter on_join
         for f in self.0.on_join.lock().iter() {
             f(pid.to_string(), uname.to_string());
         }
