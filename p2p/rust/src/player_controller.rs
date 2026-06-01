@@ -35,6 +35,10 @@ pub enum PlayerType {
     Vlc,
     /// IINA — macOS player with mpv-compatible IPC via --mpv-input-ipc-server
     Iina,
+    /// MPC-HC — Windows player with web interface on port 13579
+    MpcHc,
+    /// MPlayer — cross-platform with slave mode via stdin
+    Mplayer,
 }
 
 /// Events emitted by the player controller.
@@ -127,6 +131,28 @@ impl PlayerController {
                     cmd.arg(f);
                 }
             }
+            PlayerType::MpcHc => {
+                // MPC-HC: web interface on port 13579, accepts HTTP commands
+                cmd.arg("/webport")
+                    .arg("13579")
+                    .arg("/play")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                if let Some(f) = file {
+                    cmd.arg(f);
+                }
+            }
+            PlayerType::Mplayer => {
+                // MPlayer: slave mode via stdin for remote control
+                cmd.arg("-slave")
+                    .arg("-quiet")
+                    .arg("-idle")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                if let Some(f) = file {
+                    cmd.arg(f);
+                }
+            }
         }
 
         let child = cmd.spawn().context("Failed to launch player")?;
@@ -137,6 +163,8 @@ impl PlayerController {
                 PlayerType::Mpv => "mpv",
                 PlayerType::Vlc => "VLC",
                 PlayerType::Iina => "IINA",
+                PlayerType::MpcHc => "MPC-HC",
+                PlayerType::Mplayer => "MPlayer",
             },
             self.child.as_ref().map(|c| c.id())
         );

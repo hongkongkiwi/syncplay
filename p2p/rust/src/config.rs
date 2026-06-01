@@ -85,6 +85,10 @@ pub struct NetworkConfig {
     /// Max signaling reconnect attempts (0 = unlimited)
     #[serde(default)]
     pub max_reconnect_attempts: u32,
+
+    /// File transfer rate limit in bytes/sec (0 = unlimited)
+    #[serde(default)]
+    pub throttle_bytes_per_sec: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +163,7 @@ impl Default for NetworkConfig {
             turn_servers: vec![],
             reconnect_delay_secs: 5,
             max_reconnect_attempts: 5,
+            throttle_bytes_per_sec: 0, // unlimited by default
         }
     }
 }

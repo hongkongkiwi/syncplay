@@ -455,6 +455,23 @@ impl ConnectionManager {
             return Err(anyhow::anyhow!("No response from signaling server"));
         }
 
+        // Wire up the signaling send channel so SDP/ICE candidates can be relayed
+        // through this WebSocket connection
+        let (sig_tx, mut sig_rx) = mpsc::channel::<String>(256);
+        self.set_sig(sig_tx);
+
+        // Spawn writer: forwards signal messages to the WebSocket
+        let cm_clone = self.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = sig_rx.recv().await {
+                if let Err(e) = write.send(Message::Text(msg.into())).await {
+                    warn!("Signal write error: {e}");
+                    break;
+                }
+            }
+            cm_clone.0.state.set_offline("signaling write closed");
+        });
+
         let cm = self.clone();
         tokio::spawn(async move {
             while let Some(msg) = read.next().await {

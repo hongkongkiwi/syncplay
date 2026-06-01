@@ -14,6 +14,8 @@ use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
+use std::time::Duration;
+use tokio::time;
 use uuid::Uuid;
 
 use crate::connection::ConnectionManager;
@@ -126,6 +128,8 @@ struct IncomingTransfer {
 pub struct FileTransfer {
     conn: ConnectionManager,
     transfers: Arc<Mutex<HashMap<String, IncomingTransfer>>>,
+    /// Bytes/sec throttle for sending (0 = unlimited)
+    throttle_bytes_per_sec: u64,
 }
 
 impl FileTransfer {
@@ -133,7 +137,13 @@ impl FileTransfer {
         Self {
             conn,
             transfers: Arc::new(Mutex::new(HashMap::new())),
+            throttle_bytes_per_sec: 0,
         }
+    }
+
+    /// Set transfer rate limit in bytes/sec (0 = unlimited)
+    pub fn set_throttle(&mut self, bytes_per_sec: u64) {
+        self.throttle_bytes_per_sec = bytes_per_sec;
     }
 
     pub async fn request_file(
@@ -205,6 +215,13 @@ impl FileTransfer {
             };
             self.conn.send_one(peer_id, &wire::encode(&chunk)?).await?;
             debug!("Sent chunk {i}/{total_chunks} to {peer_id}");
+
+            // Rate limiting: throttle if configured
+            let throttle = self.throttle_bytes_per_sec;
+            if throttle > 0 {
+                let chunk_time = Duration::from_secs_f64(bytes_read as f64 / throttle as f64);
+                time::sleep(chunk_time).await;
+            }
         }
 
         // Check if file size changed during transfer (concurrent write detection)
