@@ -1,0 +1,13 @@
+{
+  "name": "syncplay-p2p-client",
+  "version": "2.0.0",
+  "description": "Shared Syncplay P2P v2.0.0 protocol library for web and React Native clients",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.2"
+  }
+}
