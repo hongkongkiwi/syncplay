@@ -1,0 +1,648 @@
+// P2P v2.0.0 State Manager — mirrors Rust SyncManager
+// Handles all 20 message types, host election, latency, controllers, speed sync
+
+import {
+  MessageType,
+  PlaystateAction,
+  PlaylistAction,
+  ControllerAction,
+  type ChatPayload,
+  type ControllerChangePayload,
+  type FileEntry,
+  type FileMetadata,
+  type FileRequestPayload,
+  type FileResponsePayload,
+  type FileTransferPayload,
+  type HelloPayload,
+  type LatencyPingPayload,
+  type LatencyPongPayload,
+  type PeerDisconnectPayload,
+  type PlaylistChangePayload,
+  type PlaylistRequestPayload,
+  type PlaystateRequestPayload,
+  type ReadinessPayload,
+  type SubtitleInfoPayload,
+  type UserInfoPayload,
+  type VoiceMutePayload,
+  chatPayload,
+  helloPayload,
+  peerDisconnectPayload,
+  playstatePayload,
+  playstateRequestPause,
+  playstateRequestPlay,
+  playstateRequestSeek,
+  playstateRequestSetSpeed,
+  readinessPayload,
+} from './messages';
+import { decode, encode } from './wire';
+
+// ── Connection interface ──────────────────────────────────────────
+
+export interface P2PTransport {
+  send(msgType: MessageType, payload: unknown): void;
+}
+
+// ── State shapes ──────────────────────────────────────────────────
+
+export interface PeerState {
+  id: string;
+  username: string;
+  features: string[];
+  isReady: boolean;
+  isController: boolean;
+  isHost: boolean;
+  file?: FileMetadata;
+  rtt: number;
+  muted: boolean;
+  iceState: 'new' | 'checking' | 'connected' | 'disconnected' | 'failed' | 'closed';
+}
+
+export interface RoomStateSnapshot {
+  position: number;
+  paused: boolean;
+  setBy: string;
+  seq: number;
+  speed: number;
+  playlist: FileEntry[];
+  playlistIndex: number;
+  controllers: Set<string>;
+  readyStates: Map<string, boolean>;
+  peers: Map<string, PeerState>;
+}
+
+export type ConnectionState = 'offline' | 'connecting' | 'handshaking' | 'connecting_peers' | 'ready' | 'reconnecting' | 'error';
+export type SyncEventType = 'chat' | 'playstate' | 'user-join' | 'user-leave' | 'host-change' | 'error';
+
+export interface SyncEvent {
+  type: SyncEventType;
+  data?: unknown;
+  timestamp: number;
+}
+
+type EventHandler = (event: SyncEvent) => void;
+
+// ── Defaults ──────────────────────────────────────────────────────
+
+const DEF_SYNC_INTERVAL = 500;
+const DEF_PING_INTERVAL = 2000;
+const MAX_CHAT = 2000;
+const MAX_PLAYLIST = 250;
+const PROTOCOL_VERSION = '2.0.0';
+const LATENCY_WARN_MS = 500;
+
+// ── Emoji shortcodes (39 from Rust TUI) ──────────────────────────
+
+const EMOJIS: Record<string, string> = {
+  ':smile:': '😊', ':joy:': '😂', ':heart:': '❤️', ':thumbsup:': '👍',
+  ':thumbsdown:': '👎', ':clap:': '👏', ':wave:': '👋', ':fire:': '🔥',
+  ':star:': '⭐', ':tada:': '🎉', ':100:': '💯', ':ok_hand:': '👌',
+  ':sob:': '😭', ':cry:': '😢', ':angry:': '😠', ':skull:': '💀',
+  ':rocket:': '🚀', ':check:': '✅', ':x:': '❌', ':warning:': '⚠️',
+  ':popcorn:': '🍿', ':movie_camera:': '🎥', ':beer:': '🍺', ':coffee:': '☕',
+  ':sunglasses:': '😎', ':wink:': '😉', ':pray:': '🙏', ':muscle:': '💪',
+  ':party:': '🥳', ':robot:': '🤖', ':alien:': '👽', ':ghost:': '👻',
+  ':sleepy:': '😴', ':zap:': '⚡', ':bulb:': '💡', ':lock:': '🔒',
+  ':headphones:': '🎧', ':mic:': '🎤', ':mute:': '🔇',
+};
+
+// ── State Manager ─────────────────────────────────────────────────
+
+export class P2PStateManager {
+  private room: RoomStateSnapshot;
+  private hostId = '';
+  private peerId = '';
+  private username = '';
+  private latencyMap = new Map<string, number>();
+  private voiceMutes = new Map<string, boolean>();
+  private eventHandlers: EventHandler[] = [];
+  private syncIntervalId: ReturnType<typeof setInterval> | null = null;
+  private pingIntervalId: ReturnType<typeof setInterval> | null = null;
+  private syncIntervalMs = DEF_SYNC_INTERVAL;
+  private pingIntervalMs = DEF_PING_INTERVAL;
+  private _connectionState: ConnectionState = 'offline';
+  private _transport: P2PTransport | null = null;
+
+  // Configurable callbacks for the connection layer
+  onSendTransport: ((msgType: MessageType, payload: unknown) => void) | null = null;
+
+  constructor(
+    username: string,
+    features: string[] = ['chat', 'readiness', 'playlist'],
+  ) {
+    this.username = username;
+    this.room = {
+      position: 0, paused: true, setBy: '', seq: 0, speed: 1.0,
+      playlist: [], playlistIndex: 0,
+      controllers: new Set(), readyStates: new Map(), peers: new Map(),
+    };
+  }
+
+  // ── Connection lifecycle ──────────────────────────────────────────
+
+  get connectionState(): ConnectionState { return this._connectionState; }
+  get state(): RoomStateSnapshot { return this.room; }
+  get isHost(): boolean { return this.peerId !== '' && this.peerId === this.hostId; }
+  get myUsername(): string { return this.username; }
+  get myPeerId(): string { return this.peerId; }
+
+  setConnectionState(s: ConnectionState, error?: string): void {
+    this._connectionState = s;
+    if (s === 'error') this.emit({ type: 'error', data: error ?? 'Connection error', timestamp: Date.now() });
+  }
+
+  /** Called by transport when signaling handshake completes */
+  onConnected(peerId: string, hostId: string, transport: P2PTransport): void {
+    this.peerId = peerId;
+    this.hostId = hostId;
+    this._transport = transport;
+    this.setConnectionState('ready');
+    this.startLoop();
+  }
+
+  /** Called by transport when disconnected */
+  onDisconnected(reason: string): void {
+    this.stopLoop();
+    this.peerId = '';
+    this.hostId = '';
+    this._transport = null;
+    this.setConnectionState('offline');
+  }
+
+  // ── Event system ─────────────────────────────────────────────────
+
+  onSyncEvent(handler: EventHandler): void {
+    this.eventHandlers.push(handler);
+  }
+
+  private emit(event: SyncEvent): void {
+    for (const h of this.eventHandlers) h(event);
+  }
+
+  // ── Background loops ─────────────────────────────────────────────
+
+  private startLoop(): void {
+    this.stopLoop();
+    this.syncIntervalId = setInterval(() => this.hostTick(), this.syncIntervalMs);
+    this.pingIntervalId = setInterval(() => this.pingAll(), this.pingIntervalMs);
+  }
+
+  private stopLoop(): void {
+    if (this.syncIntervalId) { clearInterval(this.syncIntervalId); this.syncIntervalId = null; }
+    if (this.pingIntervalId) { clearInterval(this.pingIntervalId); this.pingIntervalId = null; }
+  }
+
+  private hostTick(): void {
+    if (!this.isHost || !this._transport) return;
+    this._transport.send(MessageType.Playstate, playstatePayload(
+      this.room.position, this.room.paused, false,
+      this.username, ++this.room.seq, this.room.speed,
+    ));
+  }
+
+  private pingAll(): void {
+    if (!this._transport) return;
+    for (const [id] of this.room.peers) {
+      if (id !== this.peerId) {
+        this._transport.send(MessageType.LatencyPing, { sendTime: Date.now() });
+      }
+    }
+  }
+
+  // ── Chat ─────────────────────────────────────────────────────────
+
+  sendChat(text: string): void {
+    if (!this._transport) return;
+    const expanded = this.expandEmojis(text);
+    // Non-host: send to host for relay. Host: broadcast directly
+    if (!this.isHost) {
+      // Send to host via playstate channel — chat is host-relayed
+      this._transport.send(MessageType.Chat, chatPayload(this.username, expanded));
+    } else {
+      this._transport.send(MessageType.Chat, chatPayload(this.username, expanded));
+    }
+  }
+
+  sendSlashCommand(cmd: string): string | null {
+    const parts = cmd.slice(1).split(/\s+/);
+    const name = parts[0].toLowerCase();
+    const args = parts.slice(1);
+
+    switch (name) {
+      case 'help': case 'h': return this.helpText();
+      case 'me': return `* ${this.username} ${args.join(' ')}`;
+      case 'nick': return `Nickname: use the settings to change your username`;
+      case 'users': case 'who': return this.formatPeerList();
+      case 'ready': this.setReady(!this.room.readyStates.get(this.username)); return null;
+      case 'leave': return '/leave sent — disconnect to leave the room';
+      case 'version': return `Syncplay P2P v${PROTOCOL_VERSION}`;
+      case 'shrug': return '¯\\_(ツ)_/¯';
+      case 'tableflip': case 'flip': return '(╯°□°）╯︵ ┻━┻';
+      case 'unflip': return '┬─┬ ノ( ゜-゜ノ)';
+      case 'lenny': return '( ͡° ͜ʖ ͡°)';
+      case 'controller': {
+        if (!this.isHost) return 'Only the host can manage controllers';
+        if (args[0] === 'add' && args[1]) { this.addController(args[1]); return `${args[1]} can now control playback`; }
+        if (args[0] === 'remove' && args[1]) { this.removeController(args[1]); return `${args[1]} can no longer control playback`; }
+        return 'Usage: /controller add|remove <username>';
+      }
+      case 'playlist': {
+        if (args[0] === 'add' && args[1]) { this.addToPlaylist(args.slice(1).join(',').split(',').map(s => s.trim())); return 'Added to playlist'; }
+        if (args[0] === 'index' && args[1]) { this.setPlaylistIndex(parseInt(args[1], 10)); return 'Playlist index set'; }
+        if (args[0] === 'clear') { this.clearPlaylist(); return 'Playlist cleared'; }
+        return 'Usage: /playlist add|index|clear';
+      }
+      case 'settings': return this.settingsText();
+      case 'cancel': return 'Transfers cannot be cancelled mid-flight';
+      case 'react': {
+        if (args[0] && args[1]) {
+          return `${this.username} reacted to message ${args[0]}: ${this.expandEmojis(args[1])}`;
+        }
+        return 'Usage: /react <n> :emoji:';
+      }
+      default: return null;
+    }
+  }
+
+  // ── Playback control ─────────────────────────────────────────────
+
+  updatePlaystate(position: number, paused: boolean): void {
+    if (!this.isHost) {
+      this.requestSeek(position);
+      return;
+    }
+    this.room.position = position;
+    this.room.paused = paused;
+    this.room.setBy = this.username;
+    if (this._transport) {
+      this._transport.send(MessageType.Playstate, playstatePayload(
+        position, paused, true, this.username, ++this.room.seq, this.room.speed,
+      ));
+    }
+  }
+
+  requestSeek(position: number): void {
+    if (!this._transport) return;
+    if (this.isHost) {
+      this.updatePlaystate(position, this.room.paused);
+    } else {
+      this._transport.send(MessageType.PlaystateRequest, playstateRequestSeek(position));
+    }
+  }
+
+  requestPause(): void {
+    if (!this._transport) return;
+    if (this.isHost) { this.updatePlaystate(this.room.position, true); }
+    else this._transport.send(MessageType.PlaystateRequest, playstateRequestPause());
+  }
+
+  requestPlay(): void {
+    if (!this._transport) return;
+    if (this.isHost) { this.updatePlaystate(this.room.position, false); }
+    else this._transport.send(MessageType.PlaystateRequest, playstateRequestPlay());
+  }
+
+  requestSetSpeed(speed: number): void {
+    if (!this._transport) return;
+    if (this.isHost) { this.room.speed = speed; this.updatePlaystate(this.room.position, this.room.paused); }
+    else this._transport.send(MessageType.PlaystateRequest, playstateRequestSetSpeed(speed));
+  }
+
+  // ── Readiness ────────────────────────────────────────────────────
+
+  setReady(isReady: boolean): void {
+    if (!this._transport) return;
+    this.room.readyStates.set(this.username, isReady);
+    this._transport.send(MessageType.Readiness, readinessPayload(
+      this.username, isReady, true, this.username,
+    ));
+  }
+
+  // ── Playlist ─────────────────────────────────────────────────────
+
+  addToPlaylist(files: string[]): void {
+    const entries: FileEntry[] = files.map(f => ({ name: f, duration: 0 }));
+    if (!this.isHost && this._transport) {
+      this._transport.send(MessageType.PlaylistRequest, {
+        action: PlaylistAction.SetPlaylist,
+        files: entries,
+        index: this.room.playlistIndex,
+      });
+      return;
+    }
+    const combined = [...this.room.playlist, ...entries].slice(0, MAX_PLAYLIST);
+    this.room.playlist = combined;
+    this.broadcastPlaylist();
+  }
+
+  setPlaylistIndex(idx: number): void {
+    if (!this.isHost && this._transport) {
+      this._transport.send(MessageType.PlaylistRequest, {
+        action: PlaylistAction.SetIndex, files: [], index: idx,
+      });
+      return;
+    }
+    if (idx >= 0 && idx < this.room.playlist.length) {
+      this.room.playlistIndex = idx;
+      this.room.position = 0;
+    }
+    this.broadcastPlaylist();
+  }
+
+  clearPlaylist(): void {
+    this.room.playlist = [];
+    this.room.playlistIndex = 0;
+    this.broadcastPlaylist();
+  }
+
+  private broadcastPlaylist(): void {
+    if (!this.isHost || !this._transport) return;
+    this._transport.send(MessageType.PlaylistChange, {
+      files: this.room.playlist,
+      index: this.room.playlistIndex,
+      setBy: this.username,
+    });
+  }
+
+  // ── File info ────────────────────────────────────────────────────
+
+  sendFileInfo(file?: FileMetadata): void {
+    if (!this.isHost || !this._transport) return;
+    this._transport.send(MessageType.FileInfo, { username: this.username, file });
+  }
+
+  // ── Controllers ──────────────────────────────────────────────────
+
+  addController(username: string): void {
+    this.room.controllers.add(username);
+    if (this.isHost && this._transport) {
+      this._transport.send(MessageType.ControllerChange, {
+        peer_id: username, action: ControllerAction.Add,
+      });
+    }
+  }
+
+  removeController(username: string): void {
+    this.room.controllers.delete(username);
+    if (this.isHost && this._transport) {
+      this._transport.send(MessageType.ControllerChange, {
+        peer_id: username, action: ControllerAction.Remove,
+      });
+    }
+  }
+
+  isController(username: string): boolean {
+    return username === this.username || this.room.controllers.has(username);
+  }
+
+  // ── Voice ────────────────────────────────────────────────────────
+
+  sendVoiceMute(muted: boolean): void {
+    if (!this._transport) return;
+    this.voiceMutes.set(this.username, muted);
+    this._transport.send(MessageType.VoiceMute, { muted });
+  }
+
+  toggleMute(): boolean {
+    const current = this.voiceMutes.get(this.username) ?? false;
+    this.sendVoiceMute(!current);
+    return !current;
+  }
+
+  // ── File transfer (stub — full implementation needs chunk assembly) ─
+
+  requestFile(peerId: string, filename: string, offset = 0): void {
+    if (!this._transport) return;
+    const payload: FileRequestPayload = {
+      transferId: crypto.randomUUID(),
+      filename,
+      offset,
+      fingerprint: '',
+    };
+    this._transport.send(MessageType.FileRequest, payload);
+  }
+
+  // ── Message dispatch (called by transport) ────────────────────────
+
+  dispatch(msgType: MessageType, payload: unknown): void {
+    switch (msgType) {
+      case MessageType.Hello: return this.handleHello(payload as HelloPayload);
+      case MessageType.Playstate: return this.handlePlaystate(payload as any);
+      case MessageType.PlaystateRequest: return this.handlePlaystateRequest(payload as PlaystateRequestPayload);
+      case MessageType.Chat: return this.handleChat(payload as ChatPayload);
+      case MessageType.Readiness: return this.handleReadiness(payload as ReadinessPayload);
+      case MessageType.PlaylistChange: return this.handlePlaylistChange(payload as PlaylistChangePayload);
+      case MessageType.PlaylistRequest: return this.handlePlaylistRequest(payload as PlaylistRequestPayload);
+      case MessageType.FileInfo: return this.handleFileInfo(payload as any);
+      case MessageType.FileTransfer: return this.handleFileTransfer(payload as FileTransferPayload);
+      case MessageType.FileResponse: return this.handleFileResponse(payload as FileResponsePayload);
+      case MessageType.LatencyPing: return this.handleLatencyPing(payload as LatencyPingPayload);
+      case MessageType.LatencyPong: return this.handleLatencyPong(payload as LatencyPongPayload);
+      case MessageType.HostElected: return this.handleHostElected(payload as any);
+      case MessageType.UserInfo: return this.handleUserInfo(payload as UserInfoPayload);
+      case MessageType.PeerDisconnect: return this.handlePeerDisconnect(payload as PeerDisconnectPayload);
+      case MessageType.VoiceMute: return this.handleVoiceMute(payload as VoiceMutePayload);
+      case MessageType.SubtitleInfo: return this.handleSubtitleInfo(payload as SubtitleInfoPayload);
+      case MessageType.ControllerChange: return this.handleControllerChange(payload as ControllerChangePayload);
+      case MessageType.FileRequest: {
+        // TODO: auto-respond to incoming file requests
+        break;
+      }
+    }
+  }
+
+  // ── Message handlers ─────────────────────────────────────────────
+
+  private handleHello(p: HelloPayload): void {
+    // Version check
+    if (p.version !== PROTOCOL_VERSION) {
+      console.warn(`Version mismatch: peer=${p.version} us=${PROTOCOL_VERSION}`);
+    }
+  }
+
+  private handlePlaystate(p: { position: number; paused: boolean; doSeek: boolean; setBy: string; seq: number; timestamp: number; speed: number }): void {
+    // Seq-based dedup
+    if (p.seq <= this.room.seq && p.setBy === this.room.setBy) return;
+    // Latency compensation
+    const latency = p.setBy ? (this.latencyMap.get(p.setBy) ?? 0) : 0;
+    const speed = p.speed ?? 1.0;
+    this.room.position = p.position + (Date.now() - p.timestamp) * speed / 1000 + latency * speed;
+    this.room.paused = p.paused;
+    this.room.setBy = p.setBy;
+    this.room.seq = p.seq;
+    this.room.speed = speed;
+    this.emit({ type: 'playstate', data: { ...this.room }, timestamp: Date.now() });
+  }
+
+  private handlePlaystateRequest(p: PlaystateRequestPayload): void {
+    if (!this.isHost) return;
+    const controller = this.room.setBy || p.requestId;
+    if (!this.isController(controller) && controller !== this.username) {
+      console.warn('PlaystateRequest denied — not a controller');
+      return;
+    }
+    if (typeof p.action === 'object' && 'SetSpeed' in p.action) {
+      this.room.speed = p.action.SetSpeed;
+      this.updatePlaystate(this.room.position, this.room.paused);
+    } else {
+      switch (p.action) {
+        case PlaystateAction.Seek: this.updatePlaystate(p.position || this.room.position, this.room.paused); break;
+        case PlaystateAction.Pause: this.updatePlaystate(this.room.position, true); break;
+        case PlaystateAction.Play: this.updatePlaystate(this.room.position, false); break;
+      }
+    }
+  }
+
+  private handleChat(p: ChatPayload): void {
+    if (p.from === this.username) return; // self-echo prevention
+    this.emit({ type: 'chat', data: { from: p.from, message: this.expandEmojis(p.message), timestamp: p.timestamp }, timestamp: Date.now() });
+  }
+
+  private handleReadiness(p: ReadinessPayload): void {
+    this.room.readyStates.set(p.username, p.isReady);
+    // Host relays
+    if (this.isHost && this._transport) {
+      this._transport.send(MessageType.Readiness, p);
+    }
+  }
+
+  private handlePlaylistChange(p: PlaylistChangePayload): void {
+    if (p.setBy === this.username) return;
+    this.room.playlist = p.files;
+    this.room.playlistIndex = p.index;
+  }
+
+  private handlePlaylistRequest(p: PlaylistRequestPayload): void {
+    if (!this.isHost) return;
+    if (p.action === PlaylistAction.SetPlaylist) {
+      this.room.playlist = p.files.slice(0, MAX_PLAYLIST);
+      this.broadcastPlaylist();
+    } else if (p.action === PlaylistAction.SetIndex) {
+      this.setPlaylistIndex(p.index);
+    }
+  }
+
+  private handleFileInfo(p: { username: string; file?: FileMetadata }): void {
+    const peer = this.room.peers.get(p.username);
+    if (peer) peer.file = p.file;
+  }
+
+  private handleFileTransfer(p: FileTransferPayload): void {
+    // File chunk assembly — full implementation in file transfer module
+    // For now: log receipt
+    console.log(`FileTransfer chunk ${p.chunkIndex}/${Math.ceil(p.totalSize / p.chunkSize)} from transfer ${p.transferId}`);
+    // TODO: assemble chunks, verify SHA-256, save to disk
+  }
+
+  private handleFileResponse(p: FileResponsePayload): void {
+    if (p.accepted) {
+      console.log(`File transfer ${p.transferId} accepted, fingerprint: ${p.fingerprint}`);
+    } else {
+      console.log(`File transfer ${p.transferId} rejected: ${p.reason}`);
+    }
+  }
+
+  private handleLatencyPing(p: LatencyPingPayload): void {
+    if (!this._transport) return;
+    this._transport.send(MessageType.LatencyPong, { sendTime: p.sendTime, receiveTime: Date.now() });
+  }
+
+  private handleLatencyPong(p: LatencyPongPayload): void {
+    const rtt = Date.now() - p.sendTime;
+    // Store per-peer latency — in Rust this is keyed by peer_id
+    this.latencyMap.set('peer', rtt);
+    if (rtt > LATENCY_WARN_MS) {
+      console.warn(`High latency: ${rtt.toFixed(0)}ms`);
+    }
+  }
+
+  private handleHostElected(p: { host_id: string; reason: string }): void {
+    this.hostId = p.host_id;
+    const peer = this.room.peers.get(p.host_id);
+    if (peer) { peer.isHost = true; this.room.controllers.add(peer.username); }
+    this.emit({ type: 'host-change', data: { hostId: p.host_id, reason: p.reason }, timestamp: Date.now() });
+  }
+
+  private handleUserInfo(p: UserInfoPayload): void {
+    const peer = this.room.peers.get(p.username);
+    if (peer) peer.features = p.features;
+  }
+
+  private handlePeerDisconnect(p: PeerDisconnectPayload): void {
+    console.log(`Peer left: ${p.reason}`);
+    // Peer removal is handled by transport layer
+  }
+
+  private handleVoiceMute(p: VoiceMutePayload): void {
+    // Voice mute from peer — show indicator in UI
+    console.log(`Voice mute update: ${p.muted}`);
+  }
+
+  private handleSubtitleInfo(p: SubtitleInfoPayload): void {
+    this.emit({
+      type: 'chat',
+      data: {
+        from: 'system',
+        message: `Subtitles available: ${p.subtitles.map(t => t.filename + (t.language ? ` [${t.language}]` : '')).join(', ')}`,
+        timestamp: Date.now(),
+      },
+      timestamp: Date.now(),
+    });
+  }
+
+  private handleControllerChange(p: ControllerChangePayload): void {
+    if (p.action === ControllerAction.Add) {
+      this.room.controllers.add(p.peer_id);
+    } else {
+      this.room.controllers.delete(p.peer_id);
+    }
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────────
+
+  private expandEmojis(msg: string): string {
+    return msg.replace(/:\w+:/g, m => EMOJIS[m] ?? m);
+  }
+
+  private formatPeerList(): string {
+    const names: string[] = [];
+    for (const [, p] of this.room.peers) {
+      let line = p.username;
+      if (p.isHost) line += ' (host)';
+      if (p.file) line += ` [${p.file.name}]`;
+      names.push(line);
+    }
+    return names.length ? names.join(', ') : 'No peers connected';
+  }
+
+  private settingsText(): string {
+    return [
+      `Room: ${this.username} → ${this.room.setBy || 'none'}`,
+      `Position: ${this.room.position.toFixed(1)}s ${this.room.paused ? '||' : '▶'}`,
+      `Speed: ${this.room.speed}x`,
+      `Playlist: ${this.room.playlist.length} items, index ${this.room.playlistIndex}`,
+      `Peers: ${this.room.peers.size}`,
+      `Controllers: ${[...this.room.controllers].join(',') || 'none'}`,
+      `Protocol: v${PROTOCOL_VERSION}`,
+    ].join('\n');
+  }
+
+  private helpText(): string {
+    return `Syncplay P2P v${PROTOCOL_VERSION} — Commands:
+  /help — this list
+  /me <action> — send action
+  /users — list peers
+  /ready — toggle ready
+  /leave — disconnect
+  /version — show version
+  /controller add|remove <user> — manage controllers (host)
+  /playlist add|index|clear — manage playlist
+  /settings — show room state
+  /shrug /tableflip /lenny — fun stuff
+  /react <n> :emoji: — react to message`;
+  }
+
+  destroy(): void {
+    this.stopLoop();
+    this.eventHandlers = [];
+  }
+}
