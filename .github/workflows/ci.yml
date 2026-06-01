@@ -33,6 +33,9 @@ jobs:
         with:
           workspaces: p2p/rust
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
       - name: Format check
         run: cargo fmt -- --check
 
@@ -59,6 +62,9 @@ jobs:
         with:
           workspaces: p2p/rust
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
       - name: Unit tests
         run: cargo test --lib
 
@@ -78,6 +84,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: p2p/rust
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
       - name: Build signaling server
         run: cargo build --release --bin syncplay-signaling

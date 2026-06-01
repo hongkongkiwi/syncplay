@@ -590,10 +590,12 @@ mod tests {
 
     #[test]
     fn test_config_save_load_roundtrip_with_voice() {
-        let mut cfg = P2pConfig::default();
-        cfg.voice_enabled = true;
-        cfg.sfu_enabled = true;
-        cfg.download_dir = "/custom/download/dir".to_string();
+        let cfg = P2pConfig {
+            voice_enabled: true,
+            sfu_enabled: true,
+            download_dir: "/custom/download/dir".to_string(),
+            ..Default::default()
+        };
         let tmp = std::env::temp_dir().join("syncplay-test-voice.json");
         cfg.save(&tmp.to_string_lossy()).unwrap();
         let loaded = P2pConfig::load(&tmp.to_string_lossy()).unwrap();
@@ -606,8 +608,10 @@ mod tests {
 
     #[test]
     fn test_config_password_not_serialized() {
-        let mut cfg = P2pConfig::default();
-        cfg.password = "secret123".to_string();
+        let cfg = P2pConfig {
+            password: "secret123".to_string(),
+            ..Default::default()
+        };
         let json = serde_json::to_string_pretty(&cfg).unwrap();
         // Password should NOT appear in serialized output
         assert!(!json.contains("secret123"));

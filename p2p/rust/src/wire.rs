@@ -862,7 +862,7 @@ mod tests {
         let (consumed, _, decoded): (usize, MessageType, VoiceMutePayload) =
             decode(&frame).expect("decode");
         assert_eq!(consumed, frame.len());
-        assert_eq!(decoded.muted, true);
+        assert!(decoded.muted);
 
         // Binary payload with embedded nulls
         let binary = FileTransferPayload {
@@ -1197,7 +1197,7 @@ mod tests {
         // Minimum frame: header + minimum msgpack payload (e.g., false = 1 byte)
         let p = VoiceMutePayload { muted: false };
         let frame = encode(&p).expect("encode");
-        assert!(frame.len() >= HEADER_SIZE + 1);
+        assert!(frame.len() > HEADER_SIZE);
         let (mt, fl) = decode_header(&frame).expect("decode_header");
         assert_eq!(mt, MessageType::VoiceMute);
         assert_eq!(fl, frame.len());

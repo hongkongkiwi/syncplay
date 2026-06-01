@@ -755,7 +755,7 @@ mod tests {
         );
 
         // Verify the file was written
-        let written = std::fs::read(&saved_path.unwrap()).unwrap();
+        let written = std::fs::read(saved_path.unwrap()).unwrap();
         assert_eq!(written, data);
 
         // Transfer should be removed from map after completion
@@ -824,7 +824,7 @@ mod tests {
         assert!(saved.is_some(), "should complete after chunk 2");
 
         // Verify file contents
-        let written = std::fs::read(&saved.unwrap()).unwrap();
+        let written = std::fs::read(saved.unwrap()).unwrap();
         assert_eq!(written, data);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -917,7 +917,7 @@ mod tests {
         let saved = r.unwrap();
         assert!(saved.is_some(), "should complete with fresh transfer");
 
-        let written = std::fs::read(&saved.unwrap()).unwrap();
+        let written = std::fs::read(saved.unwrap()).unwrap();
         assert_eq!(written, vec![2u8; 5]);
 
         let _ = std::fs::remove_dir_all(&dir);
