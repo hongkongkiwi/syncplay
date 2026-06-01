@@ -114,6 +114,8 @@ struct Inner {
     peer_id: Mutex<String>,
     host_id: Mutex<String>,
     peers: DashMap<String, Peer>,
+    /// Virtual peers in SFU mode (peer_id → username). No direct PC.
+    virtual_peers: DashMap<String, String>,
     /// Peers currently attempting reconnection (peer_id → username)
     reconnecting: DashMap<String, String>,
     handlers: Mutex<Vec<(MessageType, MsgFn)>>,
@@ -143,6 +145,7 @@ impl ConnectionManager {
             peer_id: Default::default(),
             host_id: Default::default(),
             peers: DashMap::new(),
+            virtual_peers: DashMap::new(),
             reconnecting: DashMap::new(),
             handlers: Mutex::new(Vec::new()),
             on_join: Mutex::new(Vec::new()),
@@ -162,6 +165,7 @@ impl ConnectionManager {
             peer_id: Default::default(),
             host_id: Default::default(),
             peers: DashMap::new(),
+            virtual_peers: DashMap::new(),
             reconnecting: DashMap::new(),
             handlers: Mutex::new(Vec::new()),
             on_join: Mutex::new(Vec::new()),
@@ -198,7 +202,7 @@ impl ConnectionManager {
     }
 
     pub fn pcount(&self) -> usize {
-        self.0.peers.len()
+        self.0.peers.len() + self.0.virtual_peers.len()
     }
 
     /// Current connection lifecycle state.
@@ -209,6 +213,16 @@ impl ConnectionManager {
     /// Set connection state to reconnecting (for reconnect flows).
     pub fn set_state_reconnecting(&self, attempt: u32, max_attempts: u32) {
         self.0.state.set_reconnecting(attempt, max_attempts);
+    }
+
+    /// Whether SFU mode is enabled (star topology via server).
+    pub fn is_sfu(&self) -> bool {
+        self.0
+            .config
+            .lock()
+            .as_ref()
+            .map(|c| c.sfu_enabled)
+            .unwrap_or(false)
     }
 
     pub fn set_id(&self, pid: &str, hid: &str) {
@@ -351,10 +365,23 @@ impl ConnectionManager {
         let (mut write, mut read) = ws.split();
         self.0.state.set_handshaking();
 
+        let features = self
+            .0
+            .config
+            .lock()
+            .as_ref()
+            .map(|c| {
+                let mut feats = c.features.clone();
+                if c.sfu_enabled && !feats.contains(&"sfu".to_string()) {
+                    feats.push("sfu".to_string());
+                }
+                feats
+            })
+            .unwrap_or_default();
+
         let msg = serde_json::json!({
             "type": kind, "room": room, "password": password,
-            "username": self.uname(), "features": self.0.config.lock().as_ref()
-                .map(|c| c.features.clone()).unwrap_or_default(),
+            "username": self.uname(), "features": features,
         });
         write
             .send(Message::Text(msg.to_string().into()))
@@ -373,9 +400,17 @@ impl ConnectionManager {
             self.set_id(&pid, &hid);
             info!("{kind}: room={room} pid={pid} hid={hid}");
 
-            // If joining: connect to existing peers + fetch initial state
+            // If joining: connect to existing peers or SFU server
             if kind == "join" {
-                if let Some(peers) = resp["peers"].as_array() {
+                if self.is_sfu() {
+                    // SFU mode: single connection to server routes everything
+                    let cm = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = cm.dial("_server", "server").await {
+                            warn!("SFU dial failed: {e}");
+                        }
+                    });
+                } else if let Some(peers) = resp["peers"].as_array() {
                     for peer in peers {
                         let p = peer["peerId"].as_str().unwrap_or("");
                         let u = peer["username"].as_str().unwrap_or("unknown");
@@ -424,18 +459,28 @@ impl ConnectionManager {
                 let pid = msg["peerId"].as_str().unwrap_or("");
                 let uname = msg["username"].as_str().unwrap_or("");
                 info!("Peer joined: {uname} ({pid})");
-                let cm = self.clone();
-                let p = pid.to_string();
-                let u = uname.to_string();
-                tokio::spawn(async move {
-                    if let Err(e) = cm.dial(&p, &u).await {
-                        warn!("Dial {p} failed: {e}");
-                    }
-                });
-                self.fire_join(pid, uname);
+
+                if self.is_sfu() {
+                    // SFU mode: track virtual peer, don't dial
+                    self.0
+                        .virtual_peers
+                        .insert(pid.to_string(), uname.to_string());
+                    self.fire_join(pid, uname);
+                } else {
+                    let cm = self.clone();
+                    let p = pid.to_string();
+                    let u = uname.to_string();
+                    tokio::spawn(async move {
+                        if let Err(e) = cm.dial(&p, &u).await {
+                            warn!("Dial {p} failed: {e}");
+                        }
+                    });
+                    self.fire_join(pid, uname);
+                }
             }
             "peer_left" => {
                 let pid = msg["peerId"].as_str().unwrap_or("");
+                self.0.virtual_peers.remove(pid);
                 self._remove(pid, "left");
             }
             "host_changed" => {
@@ -933,7 +978,8 @@ impl ConnectionManager {
     }
 
     pub fn peer_stats(&self) -> Vec<(String, String, IceState, String)> {
-        self.0
+        let mut stats: Vec<_> = self
+            .0
             .peers
             .iter()
             .map(|e| {
@@ -945,7 +991,17 @@ impl ConnectionManager {
                     state.to_string(),
                 )
             })
-            .collect()
+            .collect();
+        // Include virtual peers (SFU mode) — shown as "connected" since server routes
+        for entry in self.0.virtual_peers.iter() {
+            stats.push((
+                entry.key().clone(),
+                entry.value().clone(),
+                IceState::Connected,
+                "connected".to_string(),
+            ));
+        }
+        stats
     }
 }
 

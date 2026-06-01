@@ -43,6 +43,10 @@ pub struct P2pConfig {
     #[serde(default)]
     pub voice_enabled: bool,
 
+    /// SFU mode — connect to server as single peer (star topology)
+    #[serde(default)]
+    pub sfu_enabled: bool,
+
     /// Directory for downloaded files (default: ~/Downloads/syncplay)
     #[serde(default = "default_download_dir")]
     pub download_dir: String,
@@ -182,6 +186,7 @@ impl Default for P2pConfig {
             sync: SyncConfig::default(),
             features: default_features(),
             voice_enabled: false,
+            sfu_enabled: false,
             download_dir: default_download_dir(),
         }
     }
@@ -221,6 +226,9 @@ impl P2pConfig {
         }
         if let Some(ref file) = overrides.file {
             self.player.file = Some(file.clone());
+        }
+        if let Some(sfu) = overrides.sfu {
+            self.sfu_enabled = sfu;
         }
     }
 
@@ -285,6 +293,7 @@ pub struct ConfigOverrides {
     pub signaling_url: Option<String>,
     pub player_path: Option<String>,
     pub file: Option<String>,
+    pub sfu: Option<bool>,
 }
 
 #[cfg(test)]
@@ -389,6 +398,7 @@ mod tests {
             signaling_url: Some("ws://example.com:8998".into()),
             player_path: Some("/usr/bin/mpv".into()),
             file: Some("test.mkv".into()),
+            sfu: None,
         };
         cfg.apply_overrides(&overrides);
         assert_eq!(cfg.username, "testuser");

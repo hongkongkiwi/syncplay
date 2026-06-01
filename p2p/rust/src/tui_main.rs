@@ -11,6 +11,7 @@
 //!   --config, -c PATH      Load config from JSON file
 //!   --file, -f FILE        Media file to open on start
 //!   --voice                Enable voice chat on start
+//!   --sfu                  SFU mode: connect through server (star topology)
 //!   --help, -h             Show this help
 //!   --version, -V          Show version
 //!
@@ -47,6 +48,7 @@ fn usage() -> ! {
     println!("  --config, -c PATH      Load config from JSON file");
     println!("  --file, -f FILE        Media file to open on start");
     println!("  --voice                Enable voice chat on start");
+    println!("  --sfu                  SFU mode: connect through server (star topology)");
     println!("  --help, -h             Show this help");
     println!("  --version, -V          Show version");
     std::process::exit(0);
@@ -99,6 +101,9 @@ async fn main() -> anyhow::Result<()> {
             }
             "--voice" => {
                 enable_voice = true;
+            }
+            "--sfu" => {
+                overrides.sfu = Some(true);
             }
             other => {
                 eprintln!("Unknown flag: {other}");
