@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'p2p/rust/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'p2p/rust/**'
+      - '.github/workflows/ci.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: Check & Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: p2p/rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: p2p/rust
+
+      - name: Format check
+        run: cargo fmt -- --check
+
+      - name: Type check (all targets)
+        run: cargo check --features tui --all-targets
+
+      - name: Clippy
+        run: cargo clippy --features tui --all-targets -- -D warnings
+
+      - name: Doc check
+        run: cargo doc --no-deps --features tui
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: p2p/rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: p2p/rust
+
+      - name: Unit tests
+        run: cargo test --lib
+
+      - name: Integration tests
+        run: cargo test --test e2e_integration
+
+  build:
+    name: Build (release)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: p2p/rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: p2p/rust
+
+      - name: Build signaling server
+        run: cargo build --release --bin syncplay-signaling
+
+      - name: Build TURN relay
+        run: cargo build --release --bin syncplay-turn
+
+      - name: Build TUI client
+        run: cargo build --release --features tui --bin syncplay-tui
+
+      - name: Show binary sizes
+        run: ls -lh target/release/syncplay-*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: syncplay-linux-x86_64
+          path: |
+            p2p/rust/target/release/syncplay-signaling
+            p2p/rust/target/release/syncplay-tui
+            p2p/rust/target/release/syncplay-turn

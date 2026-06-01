@@ -1,6 +1,6 @@
 [package]
 name = "syncplay-p2p"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 edition = "2021"
 description = "Syncplay P2P — WebRTC-based peer-to-peer media sync. Pure Rust signaling server and terminal client."
 license = "Apache-2.0"

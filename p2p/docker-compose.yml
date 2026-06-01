@@ -1,0 +1,26 @@
+# Syncplay P2P — local development stack
+#
+# Start:  docker compose -f p2p/docker-compose.yml up -d
+# Stop:   docker compose -f p2p/docker-compose.yml down
+# Logs:   docker compose -f p2p/docker-compose.yml logs -f
+
+services:
+  signaling:
+    build:
+      context: ..
+      dockerfile: p2p/Dockerfile
+    image: syncplay-p2p:latest
+    command: syncplay-signaling --bind 0.0.0.0 --port 8998
+    ports:
+      - "8998:8998"
+    restart: unless-stopped
+
+  turn:
+    build:
+      context: ..
+      dockerfile: p2p/Dockerfile
+    image: syncplay-p2p:latest
+    command: syncplay-turn --public-ip ${TURN_PUBLIC_IP:-127.0.0.1} --port 3478 --users ${TURN_USERS:-alice=changeme,bob=changeme} --realm syncplay
+    ports:
+      - "3478:3478/udp"
+    restart: unless-stopped

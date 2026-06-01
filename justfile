@@ -31,7 +31,7 @@ test-verbose:
 
 # Lint with clippy (treat warnings as errors)
 clippy:
-    cargo clippy --features tui --lib -- -D warnings
+    cargo clippy --features tui --all-targets -- -D warnings
 
 # Fix auto-fixable clippy warnings
 clippy-fix:
@@ -49,6 +49,14 @@ fmt-fix:
 all: fmt check test clippy
 
 # ── Run ────────────────────────────────────────────────────────────
+
+# Start the TURN relay server
+run-turn public_ip="127.0.0.1" port="3478" users="alice=test,bob=test" realm="syncplay":
+    cargo run --bin syncplay-turn -- \
+        --public-ip "{{public_ip}}" \
+        --port "{{port}}" \
+        --users "{{users}}" \
+        --realm "{{realm}}"
 
 # Start the signaling server (default port 8998)
 run-signaling:

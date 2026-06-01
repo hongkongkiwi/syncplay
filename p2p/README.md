@@ -2,7 +2,7 @@
 
 Pure Rust peer-to-peer media synchronization — WebRTC data channels,
 host-authoritative playstate sync, and a ratatui terminal UI.
-One crate compiles to two binaries: a signaling server and a TUI client.
+One crate compiles to three binaries: signaling server, TUI client, and TURN relay.
 
 ## Architecture
 
@@ -11,18 +11,20 @@ p2p/rust/                  ← single Rust crate (edition 2021)
   src/
     main.rs                → syncplay-signaling  (WebSocket relay)
     tui_main.rs            → syncplay-tui        (ratatui client, --features tui)
+    turn_main.rs           → syncplay-turn       (TURN relay for NAT traversal)
     messages.rs            — 20 message types (0x01–0x13) + payloads + builders
     wire.rs                — MessagePack framing (17 tests)
     connection.rs          — WebRTC ICE/STUN/TURN, signaling handshake, peer lifecycle
     sync.rs                — Host-authoritative state sync, controller gating
     signalling.rs          — WebSocket server: rooms, SDP/ICE relay, host migration
     file_transfer.rs       — Streaming chunked transfer (256KB), SHA-256, subtitles
-    voice_chat.rs          — Opus 48kHz, cpal mic capture, mute toggle
+    voice_chat.rs          — Opus 48kHz, cpal mic capture, decode + output playback
     player.rs              — Cross-platform detection (8 players)
     player_controller.rs   — mpv JSON IPC + VLC RC interface
     config.rs              — P2pConfig: STUN/TURN/download_dir/voice/player
     tui.rs                 — ratatui 6-panel adaptive layout, emoji, slash commands
     error.rs               — WireError, ConnectionError, SyncError (thiserror)
+    state.rs               — ConnectionStateMachine: lifecycle tracking
     lib.rs                 — Crate root, re-exports
   tests/
     e2e_integration.rs     — 10 integration tests (wire, config, signaling)
@@ -49,6 +51,18 @@ just release
 
 # Custom port / bind:
 ./target/release/syncplay-signaling --port 9000 --bind 0.0.0.0
+```
+
+### Run the TURN relay (for NAT traversal)
+
+```bash
+./target/release/syncplay-turn --public-ip 203.0.113.1 --users alice=secret,bob=secret
+# → TURN relay listening on 0.0.0.0:3478
+
+# Then connect peers through the relay:
+./target/release/syncplay-tui \
+    --room movie-night --username alice \
+    --turn turn:alice:secret@203.0.113.1:3478
 ```
 
 ### Run the TUI client
