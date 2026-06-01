@@ -54,6 +54,7 @@ whoami = "1"
 # ── Voice ──────────────────────────────────────────────────────
 cpal = { version = "0.15", features = ["asio"] }
 bytemuck = "1"
+opus = "0.3"
 
 # ── TUI (terminal UI) ──────────────────────────────────────────
 ratatui = { version = "0.28", optional = true }

@@ -1,19 +1,20 @@
 //! Voice chat over WebRTC audio tracks.
 //!
 //! Each peer creates one Opus audio track for their microphone.
-//! Incoming tracks from other peers are played through the default
-//! output device. Mute is per-user.
+//! Incoming tracks from other peers are decoded and played through
+//! a shared output mixer on the default output device.
 //!
 //! IMPORTANT: Use headphones to prevent movie audio echo.
 //! Voice is Opus-encoded at ~32kbps — negligible bandwidth overhead.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use log::{error, info};
+use log::{error, info, warn};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
@@ -45,7 +46,39 @@ pub enum VoiceEvent {
     Error(String),
 }
 
-/// Manages peer-to-peer voice chat over WebRTC audio tracks, including mic capture and remote playback.
+/// A lock-free-ish PCM ring buffer shared between decode tasks (producers)
+/// and the cpal output callback (consumer). Backed by a Mutex<VecDeque>.
+#[derive(Clone)]
+struct VoiceBuffer {
+    inner: Arc<Mutex<VecDeque<i16>>>,
+    max_samples: usize,
+}
+
+impl VoiceBuffer {
+    fn new(max_samples: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(VecDeque::with_capacity(max_samples))),
+            max_samples,
+        }
+    }
+
+    fn push_samples(&self, samples: &[i16]) {
+        let mut buf = self.inner.lock();
+        for &s in samples {
+            if buf.len() >= self.max_samples {
+                buf.pop_front();
+            }
+            buf.push_back(s);
+        }
+    }
+
+    fn pop_sample(&self) -> i16 {
+        self.inner.lock().pop_front().unwrap_or(0)
+    }
+}
+
+/// Manages peer-to-peer voice chat over WebRTC audio tracks,
+/// including mic capture and remote playback.
 pub struct VoiceChat {
     conn: ConnectionManager,
     muted: Arc<AtomicBool>,
@@ -54,6 +87,10 @@ pub struct VoiceChat {
     events_tx: Arc<Mutex<Option<mpsc::Sender<VoiceEvent>>>>,
     _capture_handle: Mutex<Option<cpal::Stream>>,
     _playback_streams: Mutex<HashMap<String, cpal::Stream>>,
+    /// Shared audio output buffer (decoders push, cpal callback pops)
+    output_buffer: VoiceBuffer,
+    /// The cpal output stream — kept alive here (must not be moved to another thread)
+    _output_stream: Mutex<Option<cpal::Stream>>,
 }
 
 impl VoiceChat {
@@ -66,6 +103,8 @@ impl VoiceChat {
             events_tx: Arc::new(Mutex::new(None)),
             _capture_handle: Mutex::new(None),
             _playback_streams: Mutex::new(HashMap::new()),
+            output_buffer: VoiceBuffer::new(96_000), // 2 seconds at 48kHz
+            _output_stream: Mutex::new(None),
         }
     }
 
@@ -98,6 +137,49 @@ impl VoiceChat {
             .iter()
             .map(|(id, v)| (id.clone(), v.muted))
             .collect()
+    }
+
+    /// Start the shared output stream on the default audio device.
+    /// Idempotent — safe to call multiple times.
+    fn ensure_output_started(&self) -> Result<()> {
+        let mut stream_guard = self._output_stream.lock();
+        if stream_guard.is_some() {
+            return Ok(());
+        }
+
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .context("No audio output device found")?;
+        info!(
+            "Voice output: {}",
+            device.name().unwrap_or_else(|_| "unknown".into())
+        );
+
+        let config = cpal::StreamConfig {
+            channels: 1,
+            sample_rate: cpal::SampleRate(48000),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        let buf = self.output_buffer.clone();
+        let stream = device.build_output_stream(
+            &config,
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                for sample in data.iter_mut() {
+                    *sample = buf.pop_sample() as f32 / 32768.0;
+                }
+            },
+            move |err| {
+                error!("Voice output error: {err}");
+            },
+            None,
+        )?;
+
+        stream.play()?;
+        *stream_guard = Some(stream);
+        info!("Voice output active (48kHz mono)");
+        Ok(())
     }
 
     /// Create a local audio track for sending voice to peers.
@@ -194,7 +276,6 @@ impl VoiceChat {
                     duration: std::time::Duration::from_millis(20),
                     ..Default::default()
                 };
-                // Non-async cpal callback — spawn onto tokio context
                 #[allow(clippy::let_underscore_future)]
                 {
                     let _ = track.write_sample(&sample);
@@ -214,11 +295,21 @@ impl VoiceChat {
     }
 
     /// Handle a remote audio track from a peer.
-    /// Handle a remote audio track from a peer.
-    /// TODO: Implement actual audio playback from remote tracks.
-    pub fn handle_remote_track(&self, peer_id: &str, _track: Arc<TrackRemote>) {
+    /// Decodes incoming Opus RTP packets and pushes PCM to the shared output mixer.
+    pub fn handle_remote_track(&self, peer_id: &str, track: Arc<TrackRemote>) {
         let pid = peer_id.to_string();
-        info!("Voice track received from {pid}");
+        info!("Voice track received from {pid} — starting decode + playback");
+
+        // Start output stream if this is the first remote track
+        if let Err(e) = self.ensure_output_started() {
+            error!("Failed to start voice output: {e}");
+            if let Some(tx) = self.events_tx.lock().as_ref() {
+                let _ = tx.try_send(VoiceEvent::Error(format!("Output init failed: {e}")));
+            }
+            return;
+        }
+
+        // Register peer voice metadata
         self.peer_voices
             .lock()
             .entry(pid.clone())
@@ -228,13 +319,91 @@ impl VoiceChat {
                 track_id: Some("remote".into()),
             });
         if let Some(tx) = self.events_tx.lock().as_ref() {
-            let _ = tx.try_send(VoiceEvent::TrackAdded { peer_id: pid });
+            let _ = tx.try_send(VoiceEvent::TrackAdded {
+                peer_id: pid.clone(),
+            });
         }
+
+        let voices = self.peer_voices.clone();
+        let ev_tx = self.events_tx.clone();
+        let pid2 = pid.clone();
+        let buf = self.output_buffer.clone();
+
+        // Spawn a task to read RTP, decode Opus → PCM, and push to the shared buffer.
+        // We only capture the VoiceBuffer (Send + Sync), not the cpal stream.
+        tokio::spawn(async move {
+            let mut decoder = match opus::Decoder::new(48000, opus::Channels::Mono) {
+                Ok(d) => d,
+                Err(e) => {
+                    error!("Failed to create Opus decoder for {pid2}: {e}");
+                    return;
+                }
+            };
+
+            // Decode buffer: Opus max frame size at 48kHz mono is 5760 samples
+            let mut pcm_buf = vec![0i16; 5760];
+
+            loop {
+                let (rtp_packet, _attrs) = match track.read_rtp().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!("Voice RTP read error from {pid2}: {e}");
+                        break;
+                    }
+                };
+
+                // Update speaking indicator
+                {
+                    let mut v = voices.lock();
+                    if let Some(pv) = v.get_mut(&pid2) {
+                        pv.speaking = true;
+                    }
+                }
+                if let Some(tx) = ev_tx.lock().as_ref() {
+                    let _ = tx.try_send(VoiceEvent::PeerSpeaking {
+                        peer_id: pid2.clone(),
+                        speaking: true,
+                    });
+                }
+
+                // Decode Opus → PCM. FEC enabled for packet loss resilience.
+                match decoder.decode(&rtp_packet.payload, &mut pcm_buf, true) {
+                    Ok(n_samples) => {
+                        if n_samples > 0 {
+                            buf.push_samples(&pcm_buf[..n_samples]);
+                        }
+                    }
+                    Err(ref e) if e.code() == opus::ErrorCode::BufferTooSmall => {
+                        warn!("Opus decode buffer too small for {pid2} — frame dropped");
+                    }
+                    Err(e) => {
+                        warn!("Opus decode error from {pid2}: {e} — frame dropped");
+                    }
+                }
+            }
+
+            // Track ended — mark peer as no longer speaking
+            {
+                let mut v = voices.lock();
+                if let Some(pv) = v.get_mut(&pid2) {
+                    pv.speaking = false;
+                }
+            }
+            if let Some(tx) = ev_tx.lock().as_ref() {
+                let _ = tx.try_send(VoiceEvent::PeerSpeaking {
+                    peer_id: pid2.clone(),
+                    speaking: false,
+                });
+            }
+            info!("Voice track ended for {pid2}");
+        });
     }
 
     pub fn stop(&self) {
         *self._capture_handle.lock() = None;
         self._playback_streams.lock().clear();
+        // Drop the output stream to stop playback
+        *self._output_stream.lock() = None;
         info!("Voice stopped");
     }
 }
