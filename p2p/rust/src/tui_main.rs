@@ -180,9 +180,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Launch player if we have one
     if !cfg.player.path.is_empty() {
-        let ptype = if cfg.player.path.contains("mpv") {
+        let path_lower = cfg.player.path.to_lowercase();
+        let ptype = if path_lower.contains("mpc-hc") || path_lower.contains("mpc-hc64") {
+            syncplay_p2p::player_controller::PlayerType::MpcHc
+        } else if path_lower.contains("mplayer") {
+            syncplay_p2p::player_controller::PlayerType::Mplayer
+        } else if path_lower.contains("mpv") {
             syncplay_p2p::player_controller::PlayerType::Mpv
-        } else if cfg.player.path.to_lowercase().contains("iina") {
+        } else if path_lower.contains("iina") {
             syncplay_p2p::player_controller::PlayerType::Iina
         } else {
             syncplay_p2p::player_controller::PlayerType::Vlc

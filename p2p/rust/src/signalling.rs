@@ -39,7 +39,7 @@ enum ClientMessage {
         #[serde(default)]
         username: String,
         #[serde(default)]
-        _persistent: bool,
+        persistent: bool,
         #[serde(default)]
         features: Vec<String>,
     },
@@ -136,6 +136,8 @@ struct Room {
     host_id: String,
     peers: HashMap<String, PeerInfo>,
     join_order: Vec<String>,
+    /// If true, room is not removed when empty (persistent rooms)
+    persistent: bool,
 }
 
 struct PeerInfo {
@@ -314,7 +316,7 @@ async fn handle_connection(
                         };
 
                         match msg {
-                            ClientMessage::Create { room, password, username, features, .. } => {
+                            ClientMessage::Create { room, password, username, features, persistent, .. } => {
                                 if !valid_name(&room, 1, 64) {
                                     send_json(&tx, &err("invalid_name", "Room name must be 1-64 printable chars"));
                                     continue;
@@ -339,6 +341,7 @@ async fn handle_connection(
                                     host_id: pid.clone(),
                                     peers: peers_map,
                                     join_order,
+                                    persistent,
                                 }));
 
                                 rooms.insert(room.clone(), room_obj);
@@ -588,9 +591,14 @@ async fn handle_connection(
             }
 
             if remaining == 0 {
+                let persistent = r.persistent;
                 drop(r);
-                rooms.remove(rname);
-                info!("[room] removed empty room: {rname}");
+                if !persistent {
+                    rooms.remove(rname);
+                    info!("[room] removed empty room: {rname}");
+                } else {
+                    info!("[room] kept persistent room: {rname} (empty)");
+                }
             }
         }
     }
