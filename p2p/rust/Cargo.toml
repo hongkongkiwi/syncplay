@@ -19,10 +19,16 @@ name = "syncplay-tui"
 path = "src/tui_main.rs"
 required-features = ["tui"]
 
+[[bin]]
+name = "syncplay-turn"
+path = "src/turn_main.rs"
+
 [dependencies]
 # ── WebRTC ─────────────────────────────────────────────────────
 webrtc = { version = "0.14" }
 interceptor = "0.14"
+turn = "0.11"
+webrtc-util = "0.12"
 
 # ── Async runtime ──────────────────────────────────────────────
 tokio = { version = "1", features = ["full"] }
