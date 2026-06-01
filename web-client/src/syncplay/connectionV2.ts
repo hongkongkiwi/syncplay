@@ -322,14 +322,12 @@ export class SyncplayP2PConnection {
   }
 
   sendPlaystate(position: number, paused: boolean, doSeek: boolean, speed = 1.0): void {
-    this.stateManager.updatePlaystate(position, paused);
-    if (speed !== 1.0) {
-      this.stateManager.requestSetSpeed(speed);
-    }
+    this.stateManager.updatePlaystate(position, paused, speed);
   }
 
   toggleReady(): boolean {
-    const current = this.stateManager.state.readyStates.get(this.username) ?? false;
+    const snap = this.stateManager.getSnapshot();
+    const current = snap.readyStates[this.username] ?? false;
     this.stateManager.setReady(!current);
     return !current;
   }

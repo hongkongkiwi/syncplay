@@ -1,5 +1,6 @@
 // P2P v2.0.0 State Manager — mirrors Rust SyncManager
-// Handles all 20 message types, host election, latency, controllers, speed sync
+// Handles all 20 message types, peer tracking, host election,
+// latency per-peer, controllers, speed sync, state replay, chat relay
 
 import {
   MessageType,
@@ -25,8 +26,6 @@ import {
   type UserInfoPayload,
   type VoiceMutePayload,
   chatPayload,
-  helloPayload,
-  peerDisconnectPayload,
   playstatePayload,
   playstateRequestPause,
   playstateRequestPlay,
@@ -34,7 +33,6 @@ import {
   playstateRequestSetSpeed,
   readinessPayload,
 } from './messages';
-import { decode, encode } from './wire';
 
 // ── Connection interface ──────────────────────────────────────────
 
@@ -65,9 +63,9 @@ export interface RoomStateSnapshot {
   speed: number;
   playlist: FileEntry[];
   playlistIndex: number;
-  controllers: Set<string>;
-  readyStates: Map<string, boolean>;
-  peers: Map<string, PeerState>;
+  controllers: string[];
+  readyStates: Record<string, boolean>;
+  peers: PeerState[];
 }
 
 export type ConnectionState = 'offline' | 'connecting' | 'handshaking' | 'connecting_peers' | 'ready' | 'reconnecting' | 'error';
@@ -108,7 +106,12 @@ const EMOJIS: Record<string, string> = {
 // ── State Manager ─────────────────────────────────────────────────
 
 export class P2PStateManager {
-  private room: RoomStateSnapshot;
+  private room: {
+    position: number; paused: boolean; setBy: string; seq: number; speed: number;
+    playlist: FileEntry[]; playlistIndex: number;
+    controllers: Set<string>; readyStates: Map<string, boolean>;
+    peers: Map<string, PeerState>;
+  };
   private hostId = '';
   private peerId = '';
   private username = '';
@@ -121,6 +124,7 @@ export class P2PStateManager {
   private pingIntervalMs = DEF_PING_INTERVAL;
   private _connectionState: ConnectionState = 'offline';
   private _transport: P2PTransport | null = null;
+  private _connected = false;
 
   // Configurable callbacks for the connection layer
   onSendTransport: ((msgType: MessageType, payload: unknown) => void) | null = null;
@@ -140,10 +144,26 @@ export class P2PStateManager {
   // ── Connection lifecycle ──────────────────────────────────────────
 
   get connectionState(): ConnectionState { return this._connectionState; }
-  get state(): RoomStateSnapshot { return this.room; }
-  get isHost(): boolean { return this.peerId !== '' && this.peerId === this.hostId; }
+  get isHost(): boolean { return this._connected && this.peerId === this.hostId; }
   get myUsername(): string { return this.username; }
   get myPeerId(): string { return this.peerId; }
+  get connected(): boolean { return this._connected; }
+
+  /** Serializable snapshot for UI consumption */
+  getSnapshot(): RoomStateSnapshot {
+    return {
+      position: this.room.position,
+      paused: this.room.paused,
+      setBy: this.room.setBy,
+      seq: this.room.seq,
+      speed: this.room.speed,
+      playlist: [...this.room.playlist],
+      playlistIndex: this.room.playlistIndex,
+      controllers: [...this.room.controllers],
+      readyStates: Object.fromEntries(this.room.readyStates),
+      peers: [...this.room.peers.values()].map(p => ({ ...p })),
+    };
+  }
 
   setConnectionState(s: ConnectionState, error?: string): void {
     this._connectionState = s;
@@ -155,16 +175,22 @@ export class P2PStateManager {
     this.peerId = peerId;
     this.hostId = hostId;
     this._transport = transport;
+    this._connected = true;
     this.setConnectionState('ready');
     this.startLoop();
   }
 
   /** Called by transport when disconnected */
   onDisconnected(reason: string): void {
+    this._connected = false;
     this.stopLoop();
     this.peerId = '';
     this.hostId = '';
     this._transport = null;
+    this.room.peers.clear();
+    this.room.readyStates.clear();
+    this.room.controllers.clear();
+    this.latencyMap.clear();
     this.setConnectionState('offline');
   }
 
@@ -192,7 +218,7 @@ export class P2PStateManager {
   }
 
   private hostTick(): void {
-    if (!this.isHost || !this._transport) return;
+    if (!this.isHost || !this._transport || !this._connected) return;
     this._transport.send(MessageType.Playstate, playstatePayload(
       this.room.position, this.room.paused, false,
       this.username, ++this.room.seq, this.room.speed,
@@ -200,7 +226,7 @@ export class P2PStateManager {
   }
 
   private pingAll(): void {
-    if (!this._transport) return;
+    if (!this._transport || !this._connected) return;
     for (const [id] of this.room.peers) {
       if (id !== this.peerId) {
         this._transport.send(MessageType.LatencyPing, { sendTime: Date.now() });
@@ -211,15 +237,9 @@ export class P2PStateManager {
   // ── Chat ─────────────────────────────────────────────────────────
 
   sendChat(text: string): void {
-    if (!this._transport) return;
+    if (!this._transport || !this._connected) return;
     const expanded = this.expandEmojis(text);
-    // Non-host: send to host for relay. Host: broadcast directly
-    if (!this.isHost) {
-      // Send to host via playstate channel — chat is host-relayed
-      this._transport.send(MessageType.Chat, chatPayload(this.username, expanded));
-    } else {
-      this._transport.send(MessageType.Chat, chatPayload(this.username, expanded));
-    }
+    this._transport.send(MessageType.Chat, chatPayload(this.username, expanded));
   }
 
   sendSlashCommand(cmd: string): string | null {
@@ -232,13 +252,22 @@ export class P2PStateManager {
       case 'me': return `* ${this.username} ${args.join(' ')}`;
       case 'nick': return `Nickname: use the settings to change your username`;
       case 'users': case 'who': return this.formatPeerList();
-      case 'ready': this.setReady(!this.room.readyStates.get(this.username)); return null;
+      case 'ready': this.setReady(!(this.room.readyStates.get(this.username) ?? false)); return null;
       case 'leave': return '/leave sent — disconnect to leave the room';
       case 'version': return `Syncplay P2P v${PROTOCOL_VERSION}`;
       case 'shrug': return '¯\\_(ツ)_/¯';
       case 'tableflip': case 'flip': return '(╯°□°）╯︵ ┻━┻';
       case 'unflip': return '┬─┬ ノ( ゜-゜ノ)';
       case 'lenny': return '( ͡° ͜ʖ ͡°)';
+      case 'send': case 'download': case 'dl': {
+        if (!args[0]) return 'Usage: /send <filename>';
+        this.requestFile('', args[0], 0);
+        return `Requesting file: ${args[0]}`;
+      }
+      case 'file': {
+        if (!args[0]) return 'Usage: /file <path>';
+        return `Load file: ${args[0]} (use the media picker to open files)`;
+      }
       case 'controller': {
         if (!this.isHost) return 'Only the host can manage controllers';
         if (args[0] === 'add' && args[1]) { this.addController(args[1]); return `${args[1]} can now control playback`; }
@@ -246,7 +275,10 @@ export class P2PStateManager {
         return 'Usage: /controller add|remove <username>';
       }
       case 'playlist': {
-        if (args[0] === 'add' && args[1]) { this.addToPlaylist(args.slice(1).join(',').split(',').map(s => s.trim())); return 'Added to playlist'; }
+        if (args[0] === 'add' && args[1]) {
+          this.addToPlaylist(args.slice(1).join(',').split(',').map(s => s.trim()));
+          return 'Added to playlist';
+        }
         if (args[0] === 'index' && args[1]) { this.setPlaylistIndex(parseInt(args[1], 10)); return 'Playlist index set'; }
         if (args[0] === 'clear') { this.clearPlaylist(); return 'Playlist cleared'; }
         return 'Usage: /playlist add|index|clear';
@@ -265,11 +297,12 @@ export class P2PStateManager {
 
   // ── Playback control ─────────────────────────────────────────────
 
-  updatePlaystate(position: number, paused: boolean): void {
+  updatePlaystate(position: number, paused: boolean, speed?: number): void {
     if (!this.isHost) {
       this.requestSeek(position);
       return;
     }
+    if (speed !== undefined) this.room.speed = speed;
     this.room.position = position;
     this.room.paused = paused;
     this.room.setBy = this.username;
@@ -281,28 +314,25 @@ export class P2PStateManager {
   }
 
   requestSeek(position: number): void {
-    if (!this._transport) return;
-    if (this.isHost) {
-      this.updatePlaystate(position, this.room.paused);
-    } else {
-      this._transport.send(MessageType.PlaystateRequest, playstateRequestSeek(position));
-    }
+    if (!this._transport || !this._connected) return;
+    if (this.isHost) { this.updatePlaystate(position, this.room.paused); }
+    else this._transport.send(MessageType.PlaystateRequest, playstateRequestSeek(position));
   }
 
   requestPause(): void {
-    if (!this._transport) return;
+    if (!this._transport || !this._connected) return;
     if (this.isHost) { this.updatePlaystate(this.room.position, true); }
     else this._transport.send(MessageType.PlaystateRequest, playstateRequestPause());
   }
 
   requestPlay(): void {
-    if (!this._transport) return;
+    if (!this._transport || !this._connected) return;
     if (this.isHost) { this.updatePlaystate(this.room.position, false); }
     else this._transport.send(MessageType.PlaystateRequest, playstateRequestPlay());
   }
 
   requestSetSpeed(speed: number): void {
-    if (!this._transport) return;
+    if (!this._transport || !this._connected) return;
     if (this.isHost) { this.room.speed = speed; this.updatePlaystate(this.room.position, this.room.paused); }
     else this._transport.send(MessageType.PlaystateRequest, playstateRequestSetSpeed(speed));
   }
@@ -310,7 +340,7 @@ export class P2PStateManager {
   // ── Readiness ────────────────────────────────────────────────────
 
   setReady(isReady: boolean): void {
-    if (!this._transport) return;
+    if (!this._transport || !this._connected) return;
     this.room.readyStates.set(this.username, isReady);
     this._transport.send(MessageType.Readiness, readinessPayload(
       this.username, isReady, true, this.username,
@@ -320,12 +350,10 @@ export class P2PStateManager {
   // ── Playlist ─────────────────────────────────────────────────────
 
   addToPlaylist(files: string[]): void {
-    const entries: FileEntry[] = files.map(f => ({ name: f, duration: 0 }));
-    if (!this.isHost && this._transport) {
+    const entries: FileEntry[] = files.filter(f => f).map(f => ({ name: f, duration: 0 }));
+    if (!this.isHost && this._transport && this._connected) {
       this._transport.send(MessageType.PlaylistRequest, {
-        action: PlaylistAction.SetPlaylist,
-        files: entries,
-        index: this.room.playlistIndex,
+        action: PlaylistAction.SetPlaylist, files: entries, index: this.room.playlistIndex,
       });
       return;
     }
@@ -335,7 +363,7 @@ export class P2PStateManager {
   }
 
   setPlaylistIndex(idx: number): void {
-    if (!this.isHost && this._transport) {
+    if (!this.isHost && this._transport && this._connected) {
       this._transport.send(MessageType.PlaylistRequest, {
         action: PlaylistAction.SetIndex, files: [], index: idx,
       });
@@ -357,9 +385,7 @@ export class P2PStateManager {
   private broadcastPlaylist(): void {
     if (!this.isHost || !this._transport) return;
     this._transport.send(MessageType.PlaylistChange, {
-      files: this.room.playlist,
-      index: this.room.playlistIndex,
-      setBy: this.username,
+      files: this.room.playlist, index: this.room.playlistIndex, setBy: this.username,
     });
   }
 
@@ -374,6 +400,8 @@ export class P2PStateManager {
 
   addController(username: string): void {
     this.room.controllers.add(username);
+    const peer = this.room.peers.get(username);
+    if (peer) peer.isController = true;
     if (this.isHost && this._transport) {
       this._transport.send(MessageType.ControllerChange, {
         peer_id: username, action: ControllerAction.Add,
@@ -383,6 +411,8 @@ export class P2PStateManager {
 
   removeController(username: string): void {
     this.room.controllers.delete(username);
+    const peer = this.room.peers.get(username);
+    if (peer) peer.isController = false;
     if (this.isHost && this._transport) {
       this._transport.send(MessageType.ControllerChange, {
         peer_id: username, action: ControllerAction.Remove,
@@ -397,7 +427,7 @@ export class P2PStateManager {
   // ── Voice ────────────────────────────────────────────────────────
 
   sendVoiceMute(muted: boolean): void {
-    if (!this._transport) return;
+    if (!this._transport || !this._connected) return;
     this.voiceMutes.set(this.username, muted);
     this._transport.send(MessageType.VoiceMute, { muted });
   }
@@ -408,24 +438,48 @@ export class P2PStateManager {
     return !current;
   }
 
-  // ── File transfer (stub — full implementation needs chunk assembly) ─
+  // ── File transfer (stub) ─────────────────────────────────────────
 
   requestFile(peerId: string, filename: string, offset = 0): void {
-    if (!this._transport) return;
+    if (!this._transport || !this._connected) return;
     const payload: FileRequestPayload = {
-      transferId: crypto.randomUUID(),
-      filename,
-      offset,
-      fingerprint: '',
+      transferId: crypto.randomUUID(), filename, offset, fingerprint: '',
     };
     this._transport.send(MessageType.FileRequest, payload);
   }
 
+  // ── State replay for newly joined peers ──────────────────────────
+
+  sendStateTo(peerId: string): void {
+    if (!this.isHost || !this._transport) return;
+    // Send current playstate
+    this._transport.send(MessageType.Playstate, playstatePayload(
+      this.room.position, this.room.paused, true,
+      this.username, this.room.seq, this.room.speed,
+    ));
+    // Send playlist
+    this._transport.send(MessageType.PlaylistChange, {
+      files: this.room.playlist, index: this.room.playlistIndex, setBy: this.username,
+    });
+    // Send readiness for all peers
+    for (const [name, ready] of this.room.readyStates) {
+      this._transport.send(MessageType.Readiness, readinessPayload(
+        name, ready, false, this.username,
+      ));
+    }
+    // Send controller list
+    for (const c of this.room.controllers) {
+      this._transport.send(MessageType.ControllerChange, {
+        peer_id: c, action: ControllerAction.Add,
+      });
+    }
+  }
+
   // ── Message dispatch (called by transport) ────────────────────────
 
-  dispatch(msgType: MessageType, payload: unknown): void {
+  dispatch(msgType: MessageType, payload: unknown, from?: string): void {
     switch (msgType) {
-      case MessageType.Hello: return this.handleHello(payload as HelloPayload);
+      case MessageType.Hello: return this.handleHello(payload as HelloPayload, from);
       case MessageType.Playstate: return this.handlePlaystate(payload as any);
       case MessageType.PlaystateRequest: return this.handlePlaystateRequest(payload as PlaystateRequestPayload);
       case MessageType.Chat: return this.handleChat(payload as ChatPayload);
@@ -436,50 +490,49 @@ export class P2PStateManager {
       case MessageType.FileTransfer: return this.handleFileTransfer(payload as FileTransferPayload);
       case MessageType.FileResponse: return this.handleFileResponse(payload as FileResponsePayload);
       case MessageType.LatencyPing: return this.handleLatencyPing(payload as LatencyPingPayload);
-      case MessageType.LatencyPong: return this.handleLatencyPong(payload as LatencyPongPayload);
+      case MessageType.LatencyPong: return this.handleLatencyPong(payload as LatencyPongPayload, from);
       case MessageType.HostElected: return this.handleHostElected(payload as any);
-      case MessageType.UserInfo: return this.handleUserInfo(payload as UserInfoPayload);
-      case MessageType.PeerDisconnect: return this.handlePeerDisconnect(payload as PeerDisconnectPayload);
-      case MessageType.VoiceMute: return this.handleVoiceMute(payload as VoiceMutePayload);
+      case MessageType.UserInfo: return this.handleUserInfo(payload as UserInfoPayload, from);
+      case MessageType.PeerDisconnect: return this.handlePeerDisconnect(payload as PeerDisconnectPayload, from);
+      case MessageType.VoiceMute: return this.handleVoiceMute(payload as VoiceMutePayload, from);
       case MessageType.SubtitleInfo: return this.handleSubtitleInfo(payload as SubtitleInfoPayload);
       case MessageType.ControllerChange: return this.handleControllerChange(payload as ControllerChangePayload);
-      case MessageType.FileRequest: {
-        // TODO: auto-respond to incoming file requests
-        break;
-      }
+      case MessageType.FileRequest: break; // handled by file transfer module
     }
   }
 
   // ── Message handlers ─────────────────────────────────────────────
 
-  private handleHello(p: HelloPayload): void {
-    // Version check
+  private handleHello(p: HelloPayload, from?: string): void {
     if (p.version !== PROTOCOL_VERSION) {
       console.warn(`Version mismatch: peer=${p.version} us=${PROTOCOL_VERSION}`);
+    }
+    // Track peer on Hello
+    const pid = from ?? p.username;
+    if (!this.room.peers.has(pid)) {
+      this.room.peers.set(pid, {
+        id: pid, username: p.username, features: p.features,
+        isReady: false, isController: false, isHost: pid === this.hostId,
+        rtt: 0, muted: false, iceState: 'connected',
+      });
+      this.emit({ type: 'user-join', data: { id: pid, username: p.username }, timestamp: Date.now() });
     }
   }
 
   private handlePlaystate(p: { position: number; paused: boolean; doSeek: boolean; setBy: string; seq: number; timestamp: number; speed: number }): void {
-    // Seq-based dedup
     if (p.seq <= this.room.seq && p.setBy === this.room.setBy) return;
-    // Latency compensation
-    const latency = p.setBy ? (this.latencyMap.get(p.setBy) ?? 0) : 0;
+    const latency = this.latencyMap.get(p.setBy) ?? 0;
     const speed = p.speed ?? 1.0;
     this.room.position = p.position + (Date.now() - p.timestamp) * speed / 1000 + latency * speed;
     this.room.paused = p.paused;
     this.room.setBy = p.setBy;
     this.room.seq = p.seq;
     this.room.speed = speed;
-    this.emit({ type: 'playstate', data: { ...this.room }, timestamp: Date.now() });
+    this.emit({ type: 'playstate', data: this.getSnapshot(), timestamp: Date.now() });
   }
 
   private handlePlaystateRequest(p: PlaystateRequestPayload): void {
     if (!this.isHost) return;
-    const controller = this.room.setBy || p.requestId;
-    if (!this.isController(controller) && controller !== this.username) {
-      console.warn('PlaystateRequest denied — not a controller');
-      return;
-    }
     if (typeof p.action === 'object' && 'SetSpeed' in p.action) {
       this.room.speed = p.action.SetSpeed;
       this.updatePlaystate(this.room.position, this.room.paused);
@@ -493,16 +546,20 @@ export class P2PStateManager {
   }
 
   private handleChat(p: ChatPayload): void {
-    if (p.from === this.username) return; // self-echo prevention
-    this.emit({ type: 'chat', data: { from: p.from, message: this.expandEmojis(p.message), timestamp: p.timestamp }, timestamp: Date.now() });
+    if (p.from === this.username) return;
+    this.emit({
+      type: 'chat',
+      data: { from: p.from, message: this.expandEmojis(p.message), timestamp: p.timestamp },
+      timestamp: Date.now(),
+    });
   }
 
   private handleReadiness(p: ReadinessPayload): void {
     this.room.readyStates.set(p.username, p.isReady);
-    // Host relays
-    if (this.isHost && this._transport) {
-      this._transport.send(MessageType.Readiness, p);
-    }
+    const peer = this.room.peers.get(p.username);
+    if (peer) peer.isReady = p.isReady;
+    // DO NOT relay — in mesh P2P, every peer receives the original message directly.
+    // Relaying causes amplification. The sender's setReady() already sent to everyone.
   }
 
   private handlePlaylistChange(p: PlaylistChangePayload): void {
@@ -527,18 +584,12 @@ export class P2PStateManager {
   }
 
   private handleFileTransfer(p: FileTransferPayload): void {
-    // File chunk assembly — full implementation in file transfer module
-    // For now: log receipt
-    console.log(`FileTransfer chunk ${p.chunkIndex}/${Math.ceil(p.totalSize / p.chunkSize)} from transfer ${p.transferId}`);
-    // TODO: assemble chunks, verify SHA-256, save to disk
+    console.log(`FileTransfer chunk ${p.chunkIndex}/${Math.ceil(p.totalSize / Math.max(p.chunkSize, 1))} from ${p.transferId}`);
+    // TODO: chunk assembly, SHA-256 verify, save to disk
   }
 
   private handleFileResponse(p: FileResponsePayload): void {
-    if (p.accepted) {
-      console.log(`File transfer ${p.transferId} accepted, fingerprint: ${p.fingerprint}`);
-    } else {
-      console.log(`File transfer ${p.transferId} rejected: ${p.reason}`);
-    }
+    console.log(`File transfer ${p.transferId}: ${p.accepted ? 'accepted' : 'rejected'} (${p.reason})`);
   }
 
   private handleLatencyPing(p: LatencyPingPayload): void {
@@ -546,35 +597,60 @@ export class P2PStateManager {
     this._transport.send(MessageType.LatencyPong, { sendTime: p.sendTime, receiveTime: Date.now() });
   }
 
-  private handleLatencyPong(p: LatencyPongPayload): void {
+  private handleLatencyPong(p: LatencyPongPayload, from?: string): void {
     const rtt = Date.now() - p.sendTime;
-    // Store per-peer latency — in Rust this is keyed by peer_id
-    this.latencyMap.set('peer', rtt);
+    // Store per-peer latency using the sender's peer ID
+    const key = from ?? 'peer';
+    this.latencyMap.set(key, rtt);
+    const peer = this.room.peers.get(key);
+    if (peer) peer.rtt = rtt;
     if (rtt > LATENCY_WARN_MS) {
-      console.warn(`High latency: ${rtt.toFixed(0)}ms`);
+      console.warn(`High latency to ${key}: ${rtt.toFixed(0)}ms`);
     }
   }
 
   private handleHostElected(p: { host_id: string; reason: string }): void {
+    // Reset old host flag
+    for (const [, peer] of this.room.peers) peer.isHost = false;
     this.hostId = p.host_id;
     const peer = this.room.peers.get(p.host_id);
     if (peer) { peer.isHost = true; this.room.controllers.add(peer.username); }
     this.emit({ type: 'host-change', data: { hostId: p.host_id, reason: p.reason }, timestamp: Date.now() });
   }
 
-  private handleUserInfo(p: UserInfoPayload): void {
-    const peer = this.room.peers.get(p.username);
-    if (peer) peer.features = p.features;
+  private handleUserInfo(p: UserInfoPayload, from?: string): void {
+    const pid = from ?? p.username;
+    let peer = this.room.peers.get(pid);
+    if (!peer) {
+      peer = {
+        id: pid, username: p.username, features: p.features,
+        isReady: false, isController: false, isHost: pid === this.hostId,
+        rtt: 0, muted: false, iceState: 'connected',
+      };
+      this.room.peers.set(pid, peer);
+      this.emit({ type: 'user-join', data: { id: pid, username: p.username }, timestamp: Date.now() });
+    } else {
+      peer.features = p.features;
+    }
   }
 
-  private handlePeerDisconnect(p: PeerDisconnectPayload): void {
-    console.log(`Peer left: ${p.reason}`);
-    // Peer removal is handled by transport layer
+  private handlePeerDisconnect(p: PeerDisconnectPayload, from?: string): void {
+    const pid = from ?? '';
+    if (pid) {
+      this.room.peers.delete(pid);
+      this.room.readyStates.delete(pid);
+      this.room.controllers.delete(pid);
+      this.latencyMap.delete(pid);
+      this.emit({ type: 'user-leave', data: { id: pid, reason: p.reason }, timestamp: Date.now() });
+    }
   }
 
-  private handleVoiceMute(p: VoiceMutePayload): void {
-    // Voice mute from peer — show indicator in UI
-    console.log(`Voice mute update: ${p.muted}`);
+  private handleVoiceMute(p: VoiceMutePayload, from?: string): void {
+    if (from) {
+      this.voiceMutes.set(from, p.muted);
+      const peer = this.room.peers.get(from);
+      if (peer) peer.muted = p.muted;
+    }
   }
 
   private handleSubtitleInfo(p: SubtitleInfoPayload): void {
@@ -592,8 +668,12 @@ export class P2PStateManager {
   private handleControllerChange(p: ControllerChangePayload): void {
     if (p.action === ControllerAction.Add) {
       this.room.controllers.add(p.peer_id);
+      const peer = this.room.peers.get(p.peer_id);
+      if (peer) peer.isController = true;
     } else {
       this.room.controllers.delete(p.peer_id);
+      const peer = this.room.peers.get(p.peer_id);
+      if (peer) peer.isController = false;
     }
   }
 
@@ -604,44 +684,48 @@ export class P2PStateManager {
   }
 
   private formatPeerList(): string {
-    const names: string[] = [];
-    for (const [, p] of this.room.peers) {
-      let line = p.username;
-      if (p.isHost) line += ' (host)';
-      if (p.file) line += ` [${p.file.name}]`;
-      names.push(line);
-    }
-    return names.length ? names.join(', ') : 'No peers connected';
+    if (this.room.peers.size === 0) return 'No peers connected';
+    return [...this.room.peers.values()]
+      .map(p => `${p.username}${p.isHost ? ' (host)' : ''}${p.file ? ` [${p.file.name}]` : ''}${p.isReady ? ' ✓' : ''}`)
+      .join(', ');
   }
 
   private settingsText(): string {
     return [
-      `Room: ${this.username} → ${this.room.setBy || 'none'}`,
-      `Position: ${this.room.position.toFixed(1)}s ${this.room.paused ? '||' : '▶'}`,
+      `Username: ${this.username}`,
+      `Room: ${this.username}`,
+      `Position: ${this.room.position.toFixed(1)}s ${this.room.paused ? '⏸' : '▶'}`,
       `Speed: ${this.room.speed}x`,
       `Playlist: ${this.room.playlist.length} items, index ${this.room.playlistIndex}`,
       `Peers: ${this.room.peers.size}`,
+      `Host: ${this.isHost ? 'yes' : 'no'} (${this.hostId})`,
       `Controllers: ${[...this.room.controllers].join(',') || 'none'}`,
       `Protocol: v${PROTOCOL_VERSION}`,
     ].join('\n');
   }
 
   private helpText(): string {
-    return `Syncplay P2P v${PROTOCOL_VERSION} — Commands:
-  /help — this list
-  /me <action> — send action
-  /users — list peers
-  /ready — toggle ready
-  /leave — disconnect
-  /version — show version
-  /controller add|remove <user> — manage controllers (host)
-  /playlist add|index|clear — manage playlist
-  /settings — show room state
-  /shrug /tableflip /lenny — fun stuff
-  /react <n> :emoji: — react to message`;
+    return `Syncplay P2P v${PROTOCOL_VERSION}
+  Commands:
+  /help /h              — this list
+  /me <action>          — send action
+  /users /who           — list peers
+  /ready                — toggle ready
+  /leave                — disconnect
+  /version              — show version
+  /send <file>          — request file transfer
+  /file <path>          — load media file
+  /controller add|rm    — manage controllers (host)
+  /playlist add|idx|clr — manage playlist
+  /settings             — show room state
+  /cancel               — transfer info
+  /react <n> :emoji:    — react
+  /nick                 — username info
+  /shrug /tableflip /lenny /unflip`;
   }
 
   destroy(): void {
+    this._connected = false;
     this.stopLoop();
     this.eventHandlers = [];
   }
