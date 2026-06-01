@@ -334,6 +334,24 @@ async fn handle_input(
                         sync.request_seek(pos).await;
                     }
                 }
+                KeyCode::Char('<') | KeyCode::Char(',') => {
+                    if s.connected {
+                        drop(s);
+                        sync.request_set_speed(0.5).await;
+                    }
+                }
+                KeyCode::Char('>') | KeyCode::Char('.') => {
+                    if s.connected {
+                        drop(s);
+                        sync.request_set_speed(2.0).await;
+                    }
+                }
+                KeyCode::Char('/') => {
+                    if s.connected {
+                        drop(s);
+                        sync.request_set_speed(1.0).await;
+                    }
+                }
                 KeyCode::Char('m') => {
                     s.voice_muted = !s.voice_muted;
                     if let Some(ref m) = mic_muted {
@@ -444,7 +462,7 @@ fn draw(f: &mut Frame, state: &UiState) {
         f.area(),
     );
     let area = f.area();
-    let help_h = if state.help_expanded { 8 } else { 1 };
+    let help_h = if state.help_expanded { 9 } else { 1 };
 
     // Adaptive: if terminal is very narrow (< 100 cols), stack instead of side-by-side
     let use_wide = area.width >= 100;
@@ -831,8 +849,8 @@ fn draw_help(f: &mut Frame, area: Rect, state: &UiState) {
             Line::from(vec![Span::styled(" s/a    ", Style::default().fg(theme::DIM)), Span::raw("seek ±10s           "), Span::styled(" m      ", Style::default().fg(theme::DIM)), Span::raw("mute mic")]),
             Line::from(vec![Span::styled(" ↑↓PgUp ", Style::default().fg(theme::DIM)), Span::raw("scroll chat         "), Span::styled(" j/k    ", Style::default().fg(theme::DIM)), Span::raw("scroll playlist")]),
             Line::from(vec![Span::styled(" Enter  ", Style::default().fg(theme::DIM)), Span::raw("send chat           "), Span::styled(" Tab    ", Style::default().fg(theme::DIM)), Span::raw("toggle voice")]),
-            Line::from(vec![Span::styled("COMMANDS", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))]),
-            Line::from(Span::styled(" /send <file>  /playlist add <file>  /playlist index <n>  /ready  /controller add/remove <name>", Style::default().fg(theme::DIM))),
+            Line::from(Span::styled("COMMANDS", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(" /send <file>  /playlist add/index/clear  /users  /nick <name>  /ready  /controller add/remove <name>  /cancel", Style::default().fg(theme::DIM))),
             Line::from(Span::styled(" /react <n> :emoji:  /shrug  /tableflip  /lenny  /file <path>  /help  /settings", Style::default().fg(theme::DIM))),
         ];
         f.render_widget(
@@ -845,7 +863,7 @@ fn draw_help(f: &mut Frame, area: Rect, state: &UiState) {
             area,
         );
     } else {
-        let help = Span::styled(" q:quit ?:help space:ready p:pause s:+10s a:-10s m:mute enter:chat  /help for commands", Style::default().fg(theme::DIM));
+        let help = Span::styled(" q:quit ?:help space:ready p:pause s:+10s a:-10s <:0.5x >:2x /:1x m:mute enter:chat  /help for commands", Style::default().fg(theme::DIM));
         f.render_widget(
             Paragraph::new(Line::from(help)).style(Style::default().bg(theme::SURFACE)),
             area,

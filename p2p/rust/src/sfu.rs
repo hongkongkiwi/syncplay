@@ -96,7 +96,7 @@ pub struct SfuRouter {
     rooms: Arc<DashMap<String, Arc<SfuRoom>>>,
     /// Channel to send server-level events (peer join/leave) to signaling layer.
     /// Events are informational — the signaling layer handles its own join/leave tracking.
-    events_tx: mpsc::UnboundedSender<SfuEvent>,
+    events_tx: mpsc::Sender<SfuEvent>,
 }
 
 /// Events emitted by the SFU router to the signaling layer.
@@ -159,7 +159,7 @@ impl SfuServer {
             ..Default::default()
         };
 
-        let (events_tx, _events_rx) = mpsc::unbounded_channel();
+        let (events_tx, _events_rx) = mpsc::channel(256);
 
         Ok(Self {
             router: SfuRouter {
@@ -289,11 +289,13 @@ impl SfuServer {
             }
 
             // Emit event
-            let _ = self.router.events_tx.send(SfuEvent::PeerLeft {
+            if let Err(e) = self.router.events_tx.try_send(SfuEvent::PeerLeft {
                 room: room.to_string(),
                 peer_id: peer_id.to_string(),
                 reason: "left".into(),
-            });
+            }) {
+                warn!("[sfu] Failed to emit PeerLeft event: {e}");
+            }
 
             info!("[sfu] {room}: {username} ({peer_id}) removed");
         }
@@ -435,12 +437,14 @@ impl SfuServer {
         ));
 
         // Emit join event
-        let _ = self.router.events_tx.send(SfuEvent::PeerJoined {
+        if let Err(e) = self.router.events_tx.try_send(SfuEvent::PeerJoined {
             room: room_name.clone(),
             peer_id: pid.clone(),
             username: username.clone(),
             features: vec!["sfu".into()],
-        });
+        }) {
+            warn!("[sfu] Failed to emit PeerJoined event: {e}");
+        }
 
         info!("[sfu] {room_name}: {username} ({pid}) connected");
 
