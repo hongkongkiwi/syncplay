@@ -51,6 +51,8 @@ import {
 
 import {
   P2PConnection,
+  AVATAR_PRESETS,
+  STATUS_PRESETS,
   type ConnectionState,
   type P2PConnectionConfig,
   type FileEntry,
@@ -309,6 +311,13 @@ function statusLabel(state: ConnectionState): string {
   }
 }
 
+// ── Avatar / Status helpers ────────────────────────────────────────────────
+
+function getAvatarEmoji(presetId: string | undefined): string | null {
+  if (!presetId) return null;
+  return AVATAR_PRESETS.find(preset => preset.id === presetId)?.emoji ?? null;
+}
+
 // ── App ────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -356,6 +365,8 @@ export default function App() {
   const [hideEmptyRooms, setHideEmptyRooms] = useState(false);
   const [darkMode, setDarkMode] = useState(true); // default dark
   const [showHelp, setShowHelp] = useState(false);
+  const [selectedAvatarId, setSelectedAvatarId] = useState<string | null>(null);
+  const [selectedStatusText, setSelectedStatusText] = useState<string | null>(null);
 
   // Refs
   const lastSentPositionRef = useRef(0);
@@ -1208,6 +1219,26 @@ export default function App() {
           onChangeText={value => updateForm('turnUrl', value)}
           autoCapitalize="none"
         />
+        <View style={styles.avatarSection}>
+          <Text style={styles.label}>Avatar</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.avatarRow}>
+            {AVATAR_PRESETS.map(preset => (
+              <Pressable
+                key={preset.id}
+                style={[
+                  styles.avatarButton,
+                  selectedAvatarId === preset.id && styles.avatarButtonSelected,
+                ]}
+                onPress={() => {
+                  setSelectedAvatarId(preset.id);
+                  if (connected) connection.setAvatar(preset.id, '', preset.accent);
+                }}
+              >
+                <Text style={styles.avatarEmoji}>{preset.emoji}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        </View>
         <View style={styles.buttonRow}>
           <ActionButton
             label={connected ? 'Disconnect' : 'Connect'}
@@ -1397,10 +1428,15 @@ export default function App() {
               item.iceState === 'checking' ? '#facc15' :
               item.iceState === 'failed' || item.iceState === 'disconnected' ? '#ef4444' :
               '#9ca3af';
+            const emoji = getAvatarEmoji(item.avatar?.presetId);
             return (
             <View style={styles.userRow}>
               <View style={styles.userAvatar}>
-                <Text style={styles.userInitial}>{item.username.slice(0, 1).toUpperCase()}</Text>
+                {emoji ? (
+                  <Text style={styles.avatarEmoji}>{emoji}</Text>
+                ) : (
+                  <Text style={styles.userInitial}>{item.username.slice(0, 1).toUpperCase()}</Text>
+                )}
               </View>
               <View style={styles.userMain}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -1413,6 +1449,11 @@ export default function App() {
                     {item.rtt > 0 ? ` (${item.rtt}ms)` : ''}
                   </Text>
                 </View>
+                {item.status?.text ? (
+                  <Text style={styles.peerStatusText} numberOfLines={1}>
+                    {item.status.text}
+                  </Text>
+                ) : null}
                 <Text style={styles.smallText} numberOfLines={1}>
                   {item.file?.name ?? 'No file'} {item.file ? `· ${formatBytes(item.file.size)}` : ''}
                 </Text>
@@ -1530,6 +1571,34 @@ export default function App() {
         <View style={styles.panelTitleRow}>
           <MessageCircle color="#7fd2ff" size={18} />
           <Text style={styles.panelTitle}>Chat</Text>
+        </View>
+        <View style={styles.statusSection}>
+          <Text style={styles.label}>Status</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.avatarRow}>
+            {STATUS_PRESETS.map(([_, text]) => (
+              <Pressable
+                key={text}
+                style={[
+                  styles.statusButton,
+                  selectedStatusText === text && styles.statusButtonSelected,
+                ]}
+                onPress={() => {
+                  setSelectedStatusText(text);
+                  if (connected) connection.setStatus(text);
+                }}
+              >
+                <Text
+                  style={[
+                    styles.statusBtnText,
+                    selectedStatusText === text && styles.statusBtnTextSelected,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {text}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
         </View>
         <FlatList
           data={messages}
@@ -2188,5 +2257,66 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
+  },
+  // Avatar picker
+  avatarSection: {
+    gap: 8,
+  },
+  avatarRow: {
+    gap: 10,
+    paddingVertical: 4,
+  },
+  avatarButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.panelSoft,
+    borderColor: colors.line,
+    borderWidth: 2,
+  },
+  avatarButtonSelected: {
+    borderColor: colors.accent,
+    backgroundColor: '#1a2e3a',
+  },
+  avatarEmoji: {
+    fontSize: 24,
+  },
+  avatarEmojiSmall: {
+    fontSize: 14,
+    marginLeft: 4,
+  },
+  // Status selector
+  statusSection: {
+    gap: 8,
+  },
+  statusButton: {
+    minHeight: 36,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    justifyContent: 'center',
+    backgroundColor: colors.panelSoft,
+    borderColor: colors.line,
+    borderWidth: 1,
+  },
+  statusButtonSelected: {
+    borderColor: colors.accent,
+    backgroundColor: '#1a2e3a',
+  },
+  statusBtnText: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  statusBtnTextSelected: {
+    color: colors.accent,
+  },
+  // Peer status in room list
+  peerStatusText: {
+    color: colors.accent,
+    fontSize: 11,
+    fontWeight: '700',
+    fontStyle: 'italic',
   },
 });

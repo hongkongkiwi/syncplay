@@ -1031,6 +1031,35 @@ async fn handle_command(input: &str, state: &Arc<Mutex<UiState>>, sync: &SyncMan
                 if state.lock().has_turn { "yes" } else { "no" },
                 "~/Downloads/syncplay")
         }
+        "/rooms" => {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let conn = sync.get_connection();
+            conn.set_room_list_tx(tx);
+            conn.sig(&serde_json::json!({"type": "list_rooms"}).to_string());
+            match tokio::time::timeout(std::time::Duration::from_secs(3), rx).await {
+                Ok(Ok(json)) => {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&json) {
+                        let mut lines = vec!["Available rooms:".to_string()];
+                        if let Some(rooms) = parsed["rooms"].as_array() {
+                            if rooms.is_empty() {
+                                lines.push("  (none)".to_string());
+                            } else {
+                                for r in rooms {
+                                    let name = r["room"].as_str().unwrap_or("?");
+                                    let peers = r["peers"].as_u64().unwrap_or(0);
+                                    let pw = if r["has_password"].as_bool().unwrap_or(false) { " [locked]" } else { "" };
+                                    lines.push(format!("  {name} ({peers} peers{pw})"));
+                                }
+                            }
+                        }
+                        lines.join("\n")
+                    } else {
+                        "Failed to parse room list response".to_string()
+                    }
+                }
+                _ => "Room list request timed out (signaling server may not support this)".to_string(),
+            }
+        }
         "/leave" => {
             sync.get_connection().disconnect().await;
             "Disconnected from room — restart to join another".to_string()

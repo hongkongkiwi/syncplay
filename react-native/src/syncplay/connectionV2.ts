@@ -613,6 +613,14 @@ export class P2PConnection implements P2PTransport {
     return this.stateManager.toggleMute();
   }
 
+  setAvatar(presetId: string, customUrl: string, accent: string): void {
+    this.stateManager.setAvatar(presetId, customUrl, accent);
+  }
+
+  setStatus(statusText: string): void {
+    this.stateManager.setStatus(statusText);
+  }
+
   // ── Peer stats ────────────────────────────────────────────────────────
 
   getPeerStats(): PeerState[] {

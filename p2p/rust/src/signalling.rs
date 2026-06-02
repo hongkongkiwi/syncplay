@@ -62,6 +62,8 @@ enum ClientMessage {
     Ping,
     #[serde(rename = "leave")]
     Leave,
+    #[serde(rename = "list_rooms")]
+    ListRooms,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -126,6 +128,8 @@ enum ServerMessage {
     },
     #[serde(rename = "pong")]
     Pong,
+    #[serde(rename = "room_list")]
+    RoomList { rooms: Vec<serde_json::Value> },
     #[serde(rename = "error")]
     Error { code: String, message: String },
 }
@@ -563,6 +567,20 @@ where
 
                             ClientMessage::Leave => {
                                 break;
+                            }
+
+                            ClientMessage::ListRooms => {
+                                let room_list: Vec<serde_json::Value> = rooms.iter().map(|entry| {
+                                    let room_name = entry.key().clone();
+                                    let room = entry.value().lock();
+                                    serde_json::json!({
+                                        "room": room_name,
+                                        "peers": room.peers.len(),
+                                        "has_password": room.password.is_some(),
+                                    })
+                                }).collect();
+                                send_json(&tx, &ServerMessage::RoomList { rooms: room_list });
+                                continue;
                             }
                         }
                     }

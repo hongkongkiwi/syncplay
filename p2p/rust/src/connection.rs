@@ -139,6 +139,8 @@ struct Inner {
     on_pc: Mutex<Vec<PcFn>>,
     on_disconnect: Mutex<Vec<DisconnectFn>>,
     signal_tx: Mutex<Option<mpsc::Sender<String>>>,
+    /// Oneshot channel for room list responses (set by /rooms command)
+    room_list_tx: Mutex<Option<tokio::sync::oneshot::Sender<String>>>,
     /// Connection lifecycle state machine
     state: SharedStateMachine,
 }
@@ -168,6 +170,7 @@ impl ConnectionManager {
             on_pc: Mutex::new(Vec::new()),
             on_disconnect: Mutex::new(Vec::new()),
             signal_tx: Mutex::new(None),
+            room_list_tx: Mutex::new(None),
             state: Arc::new(ConnectionStateMachine::new()),
         }))
     }
@@ -188,6 +191,7 @@ impl ConnectionManager {
             on_pc: Mutex::new(Vec::new()),
             on_disconnect: Mutex::new(Vec::new()),
             signal_tx: Mutex::new(None),
+            room_list_tx: Mutex::new(None),
             state: Arc::new(ConnectionStateMachine::new()),
         }))
     }
@@ -256,6 +260,16 @@ impl ConnectionManager {
         } else {
             warn!("No signal channel set");
         }
+    }
+
+    /// Set the oneshot sender that will receive the room_list response.
+    pub fn set_room_list_tx(&self, tx: tokio::sync::oneshot::Sender<String>) {
+        *self.0.room_list_tx.lock() = Some(tx);
+    }
+
+    /// Take the oneshot sender (consume it) so it fires exactly once.
+    pub fn take_room_list_tx(&self) -> Option<tokio::sync::oneshot::Sender<String>> {
+        self.0.room_list_tx.lock().take()
     }
 
     pub fn set_host(&self, new_id: &str, reason: &str) {
@@ -549,6 +563,11 @@ impl ConnectionManager {
                 };
                 if let Err(e) = result {
                     warn!("Signal {kind} from {from} failed: {e}");
+                }
+            }
+            "room_list" => {
+                if let Some(tx) = self.0.room_list_tx.lock().take() {
+                    let _ = tx.send(text.to_string());
                 }
             }
             unknown => {
