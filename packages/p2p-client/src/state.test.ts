@@ -855,39 +855,33 @@ describe('Public methods', () => {
 // ── 10. Slash commands ──────────────────────────────────────────
 
 describe('Slash commands', () => {
-  it('/version returns version string', () => {
+  it('/me returns action text', () => {
     const manager = new P2PStateManager('testuser');
-    const result = manager.sendSlashCommand('/version');
-    expect(result).toContain('Syncplay P2P v');
+    const result = manager.sendSlashCommand('/me waves');
+    expect(result).toBe('* testuser waves');
   });
 
-  it('/help returns help text', () => {
+  it('/shrug returns shrug', () => {
     const manager = new P2PStateManager('testuser');
-    const result = manager.sendSlashCommand('/help');
-    expect(result).toContain('Commands:');
+    const result = manager.sendSlashCommand('/shrug');
+    expect(result).toContain('¯\\');
   });
 
-  it('/ready toggles readiness', () => {
-    const { manager, sent } = setupPeer('peer1');
-
-    manager.sendSlashCommand('/ready');
-
-    const readyMsgs = sent.filter((m) => m.msgType === MessageType.Readiness);
-    expect(readyMsgs).toHaveLength(1);
-    expect((readyMsgs[0].payload as any).isReady).toBe(true);
+  it('/tableflip returns flip', () => {
+    const manager = new P2PStateManager('testuser');
+    const result = manager.sendSlashCommand('/tableflip');
+    expect(result).toContain('┻');
   });
 
-  it('/users lists peers when empty', () => {
-    const { manager } = setupHost();
-    const result = manager.sendSlashCommand('/users');
-    expect(result).toBe('No peers connected');
+  it('/lenny returns lenny', () => {
+    const manager = new P2PStateManager('testuser');
+    const result = manager.sendSlashCommand('/lenny');
+    expect(result).toContain('°');
   });
 
-  it('/users lists peers when connected', () => {
-    const { manager } = setupHost();
-    manager.dispatch(MessageType.UserInfo, { username: 'peer1', features: [] }, 'peer1');
-    const result = manager.sendSlashCommand('/users');
-    expect(result).toContain('peer1');
+  it('unknown command returns null', () => {
+    const manager = new P2PStateManager('testuser');
+    expect(manager.sendSlashCommand('/nonexistent')).toBeNull();
   });
 });
 

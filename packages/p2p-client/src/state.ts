@@ -368,55 +368,18 @@ export class P2PStateManager {
     this._transport.send(MessageType.Chat, chatPayload(this.username, expanded));
   }
 
+  /** Minimal slash commands — everything else has a button */
   sendSlashCommand(cmd: string): string | null {
     const parts = cmd.slice(1).split(/\s+/);
     const name = parts[0].toLowerCase();
     const args = parts.slice(1);
 
     switch (name) {
-      case 'help': case 'h': return this.helpText();
       case 'me': return `* ${this.username} ${args.join(' ')}`;
-      case 'nick': return `Nickname: use the settings to change your username`;
-      case 'users': case 'who': return this.formatPeerList();
-      case 'ready': this.setReady(!(this.room.readyStates.get(this.username) ?? false)); return null;
-      case 'leave': return '/leave sent — disconnect to leave the room';
-      case 'version': return `Syncplay P2P v${PROTOCOL_VERSION}`;
       case 'shrug': return '¯\\_(ツ)_/¯';
       case 'tableflip': case 'flip': return '(╯°□°）╯︵ ┻━┻';
       case 'unflip': return '┬─┬ ノ( ゜-゜ノ)';
       case 'lenny': return '( ͡° ͜ʖ ͡°)';
-      case 'send': case 'download': case 'dl': {
-        if (!args[0]) return 'Usage: /send <filename>';
-        this.requestFile('', args[0], 0);
-        return `Requesting file: ${args[0]}`;
-      }
-      case 'file': {
-        if (!args[0]) return 'Usage: /file <path>';
-        return `Load file: ${args[0]} (use the media picker to open files)`;
-      }
-      case 'controller': {
-        if (!this.isHost) return 'Only the host can manage controllers';
-        if (args[0] === 'add' && args[1]) { this.addController(args[1]); return `${args[1]} can now control playback`; }
-        if (args[0] === 'remove' && args[1]) { this.removeController(args[1]); return `${args[1]} can no longer control playback`; }
-        return 'Usage: /controller add|remove <username>';
-      }
-      case 'playlist': {
-        if (args[0] === 'add' && args[1]) {
-          this.addToPlaylist(args.slice(1).join(',').split(',').map(s => s.trim()));
-          return 'Added to playlist';
-        }
-        if (args[0] === 'index' && args[1]) { this.setPlaylistIndex(parseInt(args[1], 10)); return 'Playlist index set'; }
-        if (args[0] === 'clear') { this.clearPlaylist(); return 'Playlist cleared'; }
-        return 'Usage: /playlist add|index|clear';
-      }
-      case 'settings': return this.settingsText();
-      case 'cancel': return 'Transfers cannot be cancelled mid-flight';
-      case 'react': {
-        if (args[0] && args[1]) {
-          return `${this.username} reacted to message ${args[0]}: ${this.expandEmojis(args[1])}`;
-        }
-        return 'Usage: /react <n> :emoji:';
-      }
       default: return null;
     }
   }

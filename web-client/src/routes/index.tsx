@@ -1164,16 +1164,12 @@ function WebClient() {
                 </ul>
               </div>
               <div className="help-section">
-                <h3>Chat Commands</h3>
+                <h3>Chat</h3>
                 <ul>
-                  <li><kbd>/help</kbd> Show commands</li>
-                  <li><kbd>/nick &lt;name&gt;</kbd> Change name</li>
-                  <li><kbd>/ready</kbd> Toggle ready</li>
-                  <li><kbd>/play</kbd> Request play</li>
-                  <li><kbd>/pause</kbd> Request pause</li>
-                  <li><kbd>/seek &lt;time&gt;</kbd> Request seek</li>
-                  <li><kbd>/speed &lt;rate&gt;</kbd> Set speed</li>
-                  <li><kbd>/controller add|remove &lt;name&gt;</kbd></li>
+                  <li><kbd>/me &lt;action&gt;</kbd> Send action</li>
+                  <li><kbd>/shrug</kbd> ¯\_(ツ)_/¯</li>
+                  <li><kbd>/tableflip</kbd> (╯°□°）╯︵ ┻━┻</li>
+                  <li><kbd>/lenny</kbd> ( ͡° ͜ʖ ͡°)</li>
                 </ul>
               </div>
               <div className="help-section">
@@ -1181,6 +1177,7 @@ function WebClient() {
                 <ul>
                   <li><kbd>?</kbd> Toggle this help</li>
                   <li><kbd>Escape</kbd> Close help</li>
+                  <li>Use buttons for speed, playlist, ready, controllers</li>
                 </ul>
               </div>
             </div>
