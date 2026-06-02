@@ -432,6 +432,11 @@ export class P2PStateManager {
   private _connectionState: ConnectionState = 'offline';
   private _transport: P2PTransport | null = null;
   private _connected = false;
+  private _reconnectAttempts = 0;
+  private _lastConfig: { host: string; username: string; room: string } | null = null;
+
+  /** Called by transport when reconnection succeeds */
+  onReconnectSuccess: (() => void) | null = null;
 
   constructor(
     username: string,
@@ -1134,6 +1139,64 @@ export class P2PStateManager {
     }
   }
 
+  /** Update ICE connection state for a specific peer */
+  updateIceState(peerId: string, state: PeerState['iceState']): void {
+    const peer = this._room.peers.get(peerId);
+    if (peer) peer.iceState = state;
+  }
+
+  /** Return stats for all known peers */
+  getPeerStats(): PeerState[] {
+    return [...this._room.peers.values()];
+  }
+
+  /** Attempt reconnection with exponential backoff */
+  reconnect(connectFn: () => Promise<void>, reason?: string): void {
+    if (this._reconnectAttempts >= 5) {
+      this.setConnectionState('error', 'Max reconnect attempts reached');
+      return;
+    }
+    this._reconnectAttempts++;
+    this.setConnectionState('reconnecting');
+    const delay = Math.min(1000 * Math.pow(2, this._reconnectAttempts - 1), 30000);
+    console.log(`[P2P] Reconnecting in ${delay}ms (attempt ${this._reconnectAttempts}/5): ${reason ?? 'unknown'}`);
+    setTimeout(async () => {
+      try {
+        await connectFn();
+        this._reconnectAttempts = 0;
+        if (this.onReconnectSuccess) this.onReconnectSuccess();
+      } catch {
+        // connect() will call setConnectionState('error') on failure
+      }
+    }, delay);
+  }
+
+  /** Store last config for reconnect */
+  setLastConfig(host: string, username: string, room: string): void {
+    this._lastConfig = { host, username, room };
+  }
+
+  /** Persist config to storage (in-memory fallback for RN) */
+  saveConfig(key: string): void {
+    this._lastConfig = this._lastConfig ?? { host: '', username: '', room: '' };
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(key, JSON.stringify(this._lastConfig));
+      }
+    } catch { /* storage unavailable */ }
+  }
+
+  /** Load persisted config (in-memory fallback for RN) */
+  static loadConfig(key: string): { host: string; username: string; room: string } {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const raw = localStorage.getItem(key);
+        if (raw) return JSON.parse(raw) as { host: string; username: string; room: string };
+      }
+    } catch { /* storage unavailable */ }
+    return { host: '', username: '', room: '' };
+  }
+
   destroy(): void {
     this.stopLoop();
     this.eventHandlers = [];
@@ -1141,7 +1204,59 @@ export class P2PStateManager {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 4. P2PConnection — WebSocket signaling → RTCPeerConnection + DataChannel
+// 4. Error UX
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** Machine-readable error codes for connection failures. */
+export enum ErrorCode {
+  SignalingUnreachable = 'SIGNALING_UNREACHABLE',
+  ServerRejected = 'SERVER_REJECTED',
+  DataChannelClosed = 'DATA_CHANNEL_CLOSED',
+  InternalError = 'INTERNAL_ERROR',
+  Unknown = 'UNKNOWN',
+}
+
+/**
+ * Map a raw error message to a user-friendly message and ErrorCode.
+ * All connection error handlers should pass raw errors through this function
+ * before displaying to the user.
+ */
+export function humanReadableError(raw: string): { code: ErrorCode; message: string } {
+  const lowered = raw.toLowerCase();
+
+  if (lowered.includes('signaling server unreachable') || lowered.includes('unreachable')) {
+    return {
+      code: ErrorCode.SignalingUnreachable,
+      message: 'Cannot reach the signaling server. Check the host address.',
+    };
+  }
+
+  if (lowered.includes('server rejected connection') || lowered.includes('rejected')) {
+    return {
+      code: ErrorCode.ServerRejected,
+      message: 'Connection rejected. Check room name and password.',
+    };
+  }
+
+  if (lowered.includes('data channel closed unexpectedly') || lowered.includes('unexpected')) {
+    return {
+      code: ErrorCode.DataChannelClosed,
+      message: 'Connection lost. Attempting to reconnect...',
+    };
+  }
+
+  if (lowered.includes('websocket was null') || lowered.includes('internal')) {
+    return {
+      code: ErrorCode.InternalError,
+      message: 'Internal error. Please try again.',
+    };
+  }
+
+  return { code: ErrorCode.Unknown, message: raw };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 5. P2PConnection — WebSocket signaling → RTCPeerConnection + DataChannel
 // ══════════════════════════════════════════════════════════════════════════════
 
 // Use react-native-webrtc in RN, built-in WebRTC otherwise
@@ -1182,6 +1297,10 @@ export class P2PConnection implements P2PTransport {
   private hostId = '';
   private _connectionState: ConnectionState = 'offline';
   private username = '';
+  private _intentionalDisconnect = false;
+  private _sfuMode = false;
+  private _webrtcTimeout: ReturnType<typeof setTimeout> | null = null;
+  private lastConfig: P2PConnectionConfig | null = null;
 
   /** The state manager that processes all decoded messages */
   readonly stateManager: P2PStateManager;
@@ -1200,17 +1319,24 @@ export class P2PConnection implements P2PTransport {
 
   async connect(config: P2PConnectionConfig): Promise<void> {
     this.disconnect();
+    this._intentionalDisconnect = false;
     this.username = config.username;
+    this.lastConfig = config;
+    this._sfuMode = config.sfu ?? false;
 
     this._connectionState = 'connecting';
     this.stateManager.setConnectionState('connecting');
+    this.stateManager.setLastConfig(config.signalingUrl, config.username, config.room);
+    this.stateManager.onReconnectSuccess = () => {
+      this._intentionalDisconnect = false;
+    };
 
     try {
       // 1. WebSocket signaling
       this.ws = new WebSocket(config.signalingUrl);
       await new Promise<void>((resolve, reject) => {
         this.ws!.onopen = () => resolve();
-        this.ws!.onerror = () => reject(new Error('Signaling connection failed'));
+        this.ws!.onerror = () => reject(new Error('Signaling server unreachable'));
       });
 
       // 2. Create room / join via signaling
@@ -1262,18 +1388,56 @@ export class P2PConnection implements P2PTransport {
         iceServers,
       });
 
+      // ── ICE connection state tracking ──────────────────────────
+      let iceWarningTimeout: ReturnType<typeof setTimeout> | null = null;
+
+      this.pc.oniceconnectionstatechange = () => {
+        if (!this.pc) return;
+        const rawState = (this.pc as any).iceConnectionState as string;
+        // Map RTCIceConnectionState to PeerState.iceState values
+        const mapped = rawState as PeerState['iceState'];
+        // Update all known peers' ICE state
+        for (const stat of this.stateManager.getPeerStats()) {
+          this.stateManager.updateIceState(stat.id, mapped);
+        }
+
+        // ICE connection timeout warning (30s in checking/new)
+        if (rawState === 'checking' || rawState === 'new') {
+          if (!iceWarningTimeout) {
+            iceWarningTimeout = setTimeout(() => {
+              console.warn('[P2P] ICE connection still in ' + rawState + ' after 30s');
+            }, 30000);
+          }
+        } else {
+          if (iceWarningTimeout) {
+            clearTimeout(iceWarningTimeout);
+            iceWarningTimeout = null;
+          }
+        }
+      };
+
+      // ── WebRTC connection timeout (30s) ────────────────────────
+      this._webrtcTimeout = setTimeout(() => {
+        if (this.dc?.readyState !== 'open') {
+          const msg = 'ICE connection timed out';
+          this.stateManager.setConnectionState('error', msg);
+          this._connectionState = 'error';
+        }
+      }, 30000);
+
       this.pc.onicecandidate = (e: RTCPeerConnectionIceEvent) => {
         if (e.candidate) {
-          this.ws?.send(JSON.stringify({
+          const signal: Record<string, unknown> = {
             type: 'signal',
-            target: config.sfu ? '_server' : '',
             payload: {
               kind: 'ice-candidate',
               candidate: e.candidate.candidate,
               sdpMid: e.candidate.sdpMid,
               sdpMLineIndex: e.candidate.sdpMLineIndex,
             },
-          }));
+          };
+          if (this._sfuMode) signal.target = '_server';
+          this.ws?.send(JSON.stringify(signal));
         }
       };
 
@@ -1307,9 +1471,16 @@ export class P2PConnection implements P2PTransport {
       // 4. Mark ready
       this._connectionState = 'ready';
       this.stateManager.onConnected(this.peerId, this.hostId, this);
+      this.stateManager.saveConfig('syncplay-p2p-config');
     } catch (e) {
+      // Clear WebRTC timeout
+      if (this._webrtcTimeout) {
+        clearTimeout(this._webrtcTimeout);
+        this._webrtcTimeout = null;
+      }
+      const { message } = humanReadableError(String(e));
       this._connectionState = 'error';
-      this.stateManager.setConnectionState('error', (e as Error).message);
+      this.stateManager.setConnectionState('error', message);
       throw e;
     }
   }
@@ -1318,6 +1489,31 @@ export class P2PConnection implements P2PTransport {
 
   private setupDC(): void {
     if (!this.dc) return;
+
+    const onOpen = () => {
+      // Clear the WebRTC connection timeout
+      if (this._webrtcTimeout) {
+        clearTimeout(this._webrtcTimeout);
+        this._webrtcTimeout = null;
+      }
+    };
+
+    const onClose = () => {
+      if (this._intentionalDisconnect) {
+        this.stateManager.onDisconnected('Data channel closed');
+      } else {
+        // Unexpected close — attempt reconnection
+        this._handleUnexpectedDisconnect('Data channel closed unexpectedly');
+      }
+    };
+
+    this.dc.onopen = onOpen;
+
+    // If already open (e.g. when receiving an incoming channel), fire immediately
+    if (this.dc.readyState === 'open') {
+      onOpen();
+    }
+
     this.dc.onmessage = (e: MessageEvent) => {
       if (e.data instanceof ArrayBuffer) {
         try {
@@ -1328,6 +1524,8 @@ export class P2PConnection implements P2PTransport {
         }
       }
     };
+
+    this.dc.onclose = onClose;
   }
 
   // ── Signaling handler ─────────────────────────────────────────────────────
@@ -1434,9 +1632,51 @@ export class P2PConnection implements P2PTransport {
     return this.stateManager.toggleMute();
   }
 
+  // ── Peer stats ────────────────────────────────────────────────────────
+
+  getPeerStats(): PeerState[] {
+    return this.stateManager.getPeerStats();
+  }
+
+  // ── Reconnection ──────────────────────────────────────────────────────
+
+  private _handleUnexpectedDisconnect(reason: string): void {
+    if (!this.lastConfig) {
+      this.stateManager.onDisconnected(reason);
+      return;
+    }
+
+    // Clean up transport-level resources but keep config
+    this.dc?.close();
+    this.pc?.close();
+    this.ws?.close();
+    this.dc = null;
+    this.pc = null;
+    this.ws = null;
+    this.peerId = '';
+    this.hostId = '';
+
+    // Use StateManager's reconnect with backoff
+    this.stateManager.reconnect(async () => {
+      await this.connect(this.lastConfig!);
+      // connect() swallows errors — check state to detect failure
+      if (this.stateManager.connectionState === 'error') {
+        throw new Error('Reconnect attempt failed');
+      }
+    }, reason);
+  }
+
   // ── Disconnect ────────────────────────────────────────────────────────────
 
   disconnect(): void {
+    this._intentionalDisconnect = true;
+
+    // Clear WebRTC timeout
+    if (this._webrtcTimeout) {
+      clearTimeout(this._webrtcTimeout);
+      this._webrtcTimeout = null;
+    }
+
     if (this.dc?.readyState === 'open') {
       this.send(MessageType.PeerDisconnect, peerDisconnectPayload('user quit'));
     }
