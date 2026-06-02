@@ -49,6 +49,9 @@ impl_payload!(PeerDisconnectPayload, PeerDisconnect);
 impl_payload!(VoiceMutePayload, VoiceMute);
 impl_payload!(SubtitleInfoPayload, SubtitleInfo);
 impl_payload!(ControllerChangePayload, ControllerChange);
+impl_payload!(AvatarSetPayload, AvatarSet);
+impl_payload!(StatusUpdatePayload, StatusUpdate);
+impl_payload!(VoiceFramePayload, VoiceFrame);
 
 /// Encode any payload into a wire frame.
 pub fn encode<T: MessagePayload>(payload: &T) -> Result<Bytes, WireError> {
@@ -103,6 +106,9 @@ pub fn decode_header(buf: &[u8]) -> Result<(MessageType, usize), WireError> {
         0x11 => MessageType::VoiceMute,
         0x12 => MessageType::SubtitleInfo,
         0x13 => MessageType::ControllerChange,
+        0x14 => MessageType::AvatarSet,
+        0x15 => MessageType::StatusUpdate,
+        0x16 => MessageType::VoiceFrame,
         unknown => {
             warn!("Unknown message type: 0x{unknown:02x}");
             return Err(WireError::UnknownType { type_byte: unknown });
@@ -210,6 +216,15 @@ pub fn encode_subtitle_info(p: &SubtitleInfoPayload) -> Result<Bytes, WireError>
     encode(p)
 }
 pub fn encode_controller_change(p: &ControllerChangePayload) -> Result<Bytes, WireError> {
+    encode(p)
+}
+pub fn encode_avatar_set(p: &AvatarSetPayload) -> Result<Bytes, WireError> {
+    encode(p)
+}
+pub fn encode_status_update(p: &StatusUpdatePayload) -> Result<Bytes, WireError> {
+    encode(p)
+}
+pub fn encode_voice_frame(p: &VoiceFramePayload) -> Result<Bytes, WireError> {
     encode(p)
 }
 

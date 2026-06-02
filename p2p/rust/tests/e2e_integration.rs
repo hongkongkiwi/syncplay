@@ -503,6 +503,43 @@ fn e2e_all_20_message_types_roundtrip() {
             .unwrap()
             .to_vec(),
         ),
+        // 0x14 AvatarSet
+        (
+            MessageType::AvatarSet,
+            wire::encode(&AvatarSetPayload {
+                username: "alice".into(),
+                preset_id: "cool-cat".into(),
+                custom_url: String::new(),
+                accent: "#FF6B6B".into(),
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+        // 0x15 StatusUpdate
+        (
+            MessageType::StatusUpdate,
+            wire::encode(&StatusUpdatePayload {
+                username: "bob".into(),
+                status_text: "watching intently".into(),
+                timestamp: 1717000000000,
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+        // 0x16 VoiceFrame
+        (
+            MessageType::VoiceFrame,
+            wire::encode(&VoiceFramePayload {
+                from: "alice".into(),
+                data: vec![0u8; 32],
+                sample_rate: 16000,
+                channels: 1,
+                timestamp: 1717000000000,
+                seq: 1,
+            })
+            .unwrap()
+            .to_vec(),
+        ),
     ];
 
     for (expected_type, bytes) in &tests {
