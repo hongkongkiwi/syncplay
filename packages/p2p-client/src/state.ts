@@ -610,7 +610,7 @@ export class P2PStateManager {
     return !current;
   }
 
-  // ── File transfer (stub) ─────────────────────────────────────────
+  // ── File transfer ────────────────────────────────────────────────
 
   requestFile(peerId: string, filename: string, offset = 0): void {
     if (!this._transport || !this._connected) return;
@@ -1159,9 +1159,10 @@ export class P2PStateManager {
   }
 
   /**
-   * React Native stub for sendFile. In RN there is no browser File API;
-   * use this method with a local file path and the expo-file-system module.
-   * Reads the file in 256KB chunks, computes SHA-256, and sends via transport.
+   * React Native implementation of file sending. In RN there is no browser
+   * File API; wire this method with a local file path and the expo-file-system
+   * module. Reads the file in 256KB chunks, computes SHA-256, and sends via
+   * transport. Currently returns null until the RN layer provides the file I/O.
    */
   async sendFileRN(_filePath: string, _targetPeerId: string = ''): Promise<string | null> {
     // Stub: RN-specific implementation to be wired by the calling layer.

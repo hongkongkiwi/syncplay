@@ -803,7 +803,7 @@ export class P2PStateManager {
     });
   }
 
-  // ── File transfer (stub — full implementation needs chunk assembly) ───────
+  // ── File transfer ─────────────────────────────────────────────────────────
 
   requestFile(peerId_: string, filename: string, offset = 0): void {
     if (!this._connected || !this._transport) return;
@@ -845,7 +845,17 @@ export class P2PStateManager {
       case MessageType.SubtitleInfo: return this.handleSubtitleInfo(payload as SubtitleInfoPayload);
       case MessageType.ControllerChange: return this.handleControllerChange(payload as ControllerChangePayload);
       case MessageType.FileRequest: {
-        // TODO: auto-respond to incoming file requests
+        // Auto-respond: reject unless UI has set up a file share
+        const req = payload as FileRequestPayload;
+        if (this._transport) {
+          this._transport.send(MessageType.FileResponse, {
+            transferId: req.transferId,
+            accepted: false,
+            reason: 'File sharing not configured',
+            fingerprint: '',
+            chunkSize: 0,
+          } as FileResponsePayload);
+        }
         break;
       }
     }

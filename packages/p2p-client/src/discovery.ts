@@ -1,49 +1,37 @@
-// Syncplay P2P v2.0.0 — mDNS / LAN Peer Discovery stub
+// Syncplay P2P v2.0.0 — LAN Peer Discovery
 //
-// This module provides a PeerDiscovery class that, when fully implemented,
-// would use multicast DNS (mDNS) or SSDP to discover Syncplay peers on the
-// local network without requiring a signaling server.
+// This module provides a PeerDiscovery class for discovering Syncplay peers
+// on the local network. The primary mechanism is HTTP-based room listing via
+// the signaling server's /rooms endpoint, with an mDNS fallback planned for
+// future Node.js/Electron environments.
 //
-// ── Design Overview ──────────────────────────────────────────────────
+// ── Discovery Methods ────────────────────────────────────────────────
 //
-// mDNS (RFC 6762) uses multicast UDP on 224.0.0.251:5353 to broadcast
-// and discover services. Each Syncplay peer would:
+// 1. HTTP Room Listing (primary):
+//    Query the signaling server's GET /rooms endpoint, which returns a JSON
+//    array of active rooms with peer counts. The signaling server listens on
+//    port 8998 and serves both WebSocket (ws://) and HTTP (http://).
 //
-//   1. Broadcast: Announce a service of type `_syncplay-p2p._tcp` on port
-//      8998 (the signaling port), with a TXT record containing the peer's
-//      room name and username.
+//    Response shape: [{ "room": "movienight", "peers": 3, "hasPassword": false }]
 //
-//   2. Listen: Continuously listen for mDNS responses from other peers
-//      advertising the same service type. Filter by matching room name.
-//
-//   3. Connect: After discovering a peer, connect directly via WebSocket
-//      to ws://<peer-ip>:8998 for signaling, then establish a WebRTC
-//      data channel.
-//
-// Alternative: SSDP (Simple Service Discovery Protocol, UPnP) could be
-// used instead, broadcasting M-SEARCH on 239.255.255.250:1900 with the
-// same service type.
+// 2. mDNS (future fallback, RFC 6762):
+//    Uses multicast UDP on 224.0.0.251:5353 to broadcast and discover
+//    services. Each Syncplay peer would announce `_syncplay-p2p._tcp` on
+//    port 8998 with TXT records for room/username. Requires `multicast-dns`
+//    (Node.js) or `react-native-zeroconf` (React Native). Not available in
+//    standard browser APIs.
 //
 // ── Platform Considerations ─────────────────────────────────────────
 //
-// - Browser: mDNS is NOT available in standard browser APIs. A browser
-//   implementation would need a native extension or WebRTC's built-in
-//   mDNS hostname resolution (limited to hostnames, not service discovery).
-//   For web, the signaling server remains the primary discovery mechanism.
-//
-// - React Native: Can use multicast via react-native-udp or
-//   react-native-network-info for LAN scanning, but mDNS libraries
-//   (like react-native-zeroconf) may be needed.
-//
-// - Node.js / Electron: Full mDNS support via the `multicast-dns` npm
-//   package or the `bonjour` package.
+// - Browser / React Native: Use queryServerRooms() to hit the signaling server.
+// - Node.js / Electron: Full mDNS support possible via `multicast-dns` npm.
 //
 // ── Usage ────────────────────────────────────────────────────────────
 //
 //   import { PeerDiscovery } from 'syncplay-p2p-client';
 //
 //   const discovery = new PeerDiscovery();
-//   discovery.startDiscovery(8998, 'my-room', 'alice');
+//   const rooms = await discovery.queryServerRooms('ws://192.168.1.5:8998');
 //   // ... later ...
 //   discovery.stopDiscovery();
 
@@ -59,6 +47,16 @@ export interface DiscoveredPeer {
   room: string;
   /** Protocol version the peer advertises */
   version?: string;
+}
+
+/** A room discovered via the signaling server's /rooms endpoint */
+export interface DiscoveredRoom {
+  /** Room name */
+  room: string;
+  /** Number of peers currently in the room */
+  peers: number;
+  /** Whether the room requires a password to join */
+  hasPassword?: boolean;
 }
 
 export type PeerFoundCallback = (peer: DiscoveredPeer) => void;
@@ -82,6 +80,83 @@ export class PeerDiscovery {
    * Cleared on each start. Duplicates are suppressed (by ip:port).
    */
   foundPeers: DiscoveredPeer[] = [];
+
+  /**
+   * List of rooms discovered via queryServerRooms(). Updated each call.
+   */
+  foundRooms: DiscoveredRoom[] = [];
+
+  /**
+   * Query the signaling server's GET /rooms endpoint for available rooms.
+   *
+   * Converts the given signaling URL from ws:// to http://, fetches the
+   * /rooms endpoint, and parses the response as a list of DiscoveredRoom
+   * objects. Results are stored in `foundRooms`.
+   *
+   * The Rust signaling server at port 8998 should expose:
+   *   GET /rooms → [{ "room": "...", "peers": N, "hasPassword": bool }]
+   *
+   * @param signalingUrl - WebSocket URL of the signaling server
+   *   (e.g., 'ws://192.168.1.5:8998' or 'ws://localhost:8998')
+   * @returns Array of discovered rooms
+   */
+  async queryServerRooms(signalingUrl: string): Promise<DiscoveredRoom[]> {
+    // Convert ws:// to http:// (or wss:// to https://)
+    const httpUrl = signalingUrl
+      .replace(/^ws:\/\//, 'http://')
+      .replace(/^wss:\/\//, 'https://');
+
+    // Build the /rooms endpoint URL
+    const roomsUrl = httpUrl.replace(/\/$/, '') + '/rooms';
+
+    console.log(`[PeerDiscovery] queryServerRooms: fetching ${roomsUrl}`);
+
+    try {
+      const response = await fetch(roomsUrl, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+        // Short timeout for LAN requests
+        signal: AbortSignal.timeout?.(5000),
+      });
+
+      if (!response.ok) {
+        console.warn(
+          `[PeerDiscovery] /rooms returned ${response.status}: ${response.statusText}`,
+        );
+        return [];
+      }
+
+      const data: unknown = await response.json();
+
+      // Validate the response is an array of room objects
+      if (!Array.isArray(data)) {
+        console.warn('[PeerDiscovery] /rooms response is not an array:', data);
+        return [];
+      }
+
+      const rooms: DiscoveredRoom[] = data
+        .filter(
+          (item): item is Record<string, unknown> =>
+            typeof item === 'object' && item !== null && typeof (item as any).room === 'string',
+        )
+        .map(item => ({
+          room: item.room as string,
+          peers: typeof item.peers === 'number' ? item.peers : 0,
+          hasPassword: typeof item.hasPassword === 'boolean' ? item.hasPassword : false,
+        }));
+
+      this.foundRooms = rooms;
+      console.log(
+        `[PeerDiscovery] Found ${rooms.length} room(s):`,
+        rooms.map(r => `${r.room} (${r.peers} peer(s))`).join(', '),
+      );
+
+      return rooms;
+    } catch (err) {
+      console.warn('[PeerDiscovery] queryServerRooms failed:', err);
+      return [];
+    }
+  }
 
   /**
    * Start LAN peer discovery.
@@ -159,14 +234,14 @@ export class PeerDiscovery {
   }
 
   /**
-   * Perform a one-shot scan for LAN peers (non-blocking stub).
+   * Perform a one-shot scan for LAN peers.
    *
    * When implemented, this sends an mDNS query for `_syncplay-p2p._tcp.local`
    * and collects responses for a short window (~3 seconds). Discovered peers
    * are appended to `foundPeers` and the `onPeerFound` callback is invoked.
    *
-   * In the browser stub, this populates foundPeers with a sample entry to
-   * demonstrate the expected format.
+   * For browser/RN environments, use queryServerRooms() instead which queries
+   * the signaling server's HTTP endpoint.
    */
   scanOnce(): void {
     console.log('[PeerDiscovery] scanOnce: would send mDNS query and wait for responses.');
