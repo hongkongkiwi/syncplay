@@ -371,7 +371,7 @@ export class P2PConnection implements P2PTransport {
 
       this.pc.oniceconnectionstatechange = () => {
         if (!this.pc) return;
-        const rawState = (this.pc as any).iceConnectionState as string;
+        const rawState = this.pc.iceConnectionState;
         // Map RTCIceConnectionState to PeerState.iceState values
         const mapped = rawState as PeerState['iceState'];
         // Update all known peers' ICE state
@@ -555,7 +555,7 @@ export class P2PConnection implements P2PTransport {
     if (!this.stateManager.connected) return;
     if (!this.dc || this.dc.readyState !== 'open') return;
     try {
-      this.dc.send(encode(msgType, payload) as unknown as Uint8Array<ArrayBuffer>);
+      this.dc.send(encode(msgType, payload));
     } catch (err) {
       console.warn('[P2P] send error:', err);
     }

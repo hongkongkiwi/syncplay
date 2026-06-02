@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use log::{debug, error, info, warn};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tokio::time;
 
@@ -82,7 +82,7 @@ pub struct SyncManager {
     /// Max playlist items from config (default 250)
     max_pl_items: usize,
     /// Features advertised to peers (from config)
-    features: Vec<String>,
+    features: Arc<RwLock<Vec<String>>>,
     /// Prevents double-spawn of the host sync loop
     host_loop_running: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -112,7 +112,7 @@ impl SyncManager {
         let ping_interval_ms = config.sync.ping_interval_ms;
         let max_chat = config.sync.max_chat_length;
         let max_pl_items = config.sync.max_playlist_items;
-        let features = config.features.clone();
+        let features = Arc::new(RwLock::new(config.features.clone()));
 
         let mgr = Self {
             conn: conn.clone(),
@@ -577,9 +577,9 @@ impl SyncManager {
         let room = self.room.clone();
         let lm = self.latency_map.clone();
 
-        // Hello — version check (uses features from config)
+        // Hello — version check (uses features from config, read at response time)
         let c0 = conn.clone();
-        let feats = self.features.clone();
+        let feats = self.features.clone(); // Arc<RwLock<Vec<String>>>
         self.conn.on_msg(
             MessageType::Hello,
             move |_: MessageType, data: &[u8], from: String| {
@@ -595,10 +595,10 @@ impl SyncManager {
                                 hello.version
                             );
                         }
-                        // Respond with our own Hello
+                        // Respond with our own Hello — read current features at response time
                         let c = c0.clone();
                         let f = from.clone();
-                        let f2 = feats.clone();
+                        let f2 = feats.read().clone();
                         tokio::spawn(async move {
                             let p = HelloPayload::new(&c.uname(), PROTOCOL_VERSION, "", f2);
                             if let Ok(data) = wire::encode(&p) {
@@ -1071,7 +1071,13 @@ async fn ping_loop(conn: ConnectionManager, shutdown: Arc<Notify>, interval_ms: 
             }
             _ = time::sleep(Duration::from_millis(interval_ms)) => {
                 match wire::encode(&LatencyPingPayload { send_time: now_ms() }) {
-                    Ok(frame) => conn.send_all(&frame, None).await,
+                    Ok(frame) => {
+                        for pid in conn.peers() {
+                            if let Err(e) = conn.send_one(&pid, &frame).await {
+                                warn!("Ping to {pid} failed: {e}");
+                            }
+                        }
+                    }
                     Err(e) => error!("encode ping: {e}"),
                 }
             }

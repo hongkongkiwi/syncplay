@@ -2,15 +2,15 @@ name: Rust CI
 
 on:
   push:
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
-      - '.github/ISSUE_TEMPLATE/**'
+    branches: [master]
+    paths:
+      - 'p2p/rust/**'
+      - '.github/workflows/build.yml'
   pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
-      - '.github/ISSUE_TEMPLATE/**'
+    branches: [master]
+    paths:
+      - 'p2p/rust/**'
+      - '.github/workflows/build.yml'
 
 concurrency:
   group: rust-ci-${{ github.ref }}
@@ -25,51 +25,99 @@ env:
 
 jobs:
   check:
-    name: cargo check + test + clippy
+    name: Check & Lint
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
       run:
         working-directory: p2p/rust
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: rustfmt, clippy
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            p2p/rust/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('p2p/rust/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          workspaces: p2p/rust
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
-      - name: Check (lib)
-        run: cargo check --features tui
+      - name: Format check
+        run: cargo fmt -- --check
 
-      - name: Check (binaries)
-        run: |
-          cargo check --bin syncplay-signaling
-          cargo check --bin syncplay-tui --features tui
-
-      - name: Test
-        run: cargo test --lib
+      - name: Type check (all targets)
+        run: cargo check --features tui --all-targets
 
       - name: Clippy
-        run: cargo clippy --features tui --lib -- -D warnings
+        run: cargo clippy --features tui --all-targets -- -D warnings
 
-      - name: Format check
-        run: cargo fmt --check
+      - name: Doc check
+        run: cargo doc --no-deps --features tui
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: p2p/rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: p2p/rust
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - name: Unit tests
+        run: cargo test --lib
+
+      - name: Integration tests
+        run: cargo test --test e2e_integration
+
+  build:
+    name: Build (release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: p2p/rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: p2p/rust
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - name: Build signaling server
+        run: cargo build --release --bin syncplay-signaling
+
+      - name: Build TURN relay
+        run: cargo build --release --bin syncplay-turn
+
+      - name: Build TUI client
+        run: cargo build --release --features tui --bin syncplay-tui
+
+      - name: Show binary sizes
+        run: ls -lh target/release/syncplay-*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: syncplay-linux-x86_64
+          path: |
+            p2p/rust/target/release/syncplay-signaling
+            p2p/rust/target/release/syncplay-tui
+            p2p/rust/target/release/syncplay-turn
 
   release:
     name: Build release artifacts

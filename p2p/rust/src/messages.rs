@@ -705,6 +705,7 @@ mod tests {
             PlaystateAction::Seek,
             PlaystateAction::Pause,
             PlaystateAction::Play,
+            PlaystateAction::SetSpeed(1.0),
         ] {
             let encoded = rmp_serde::to_vec(&action).unwrap();
             let decoded: PlaystateAction = rmp_serde::from_slice(&encoded).unwrap();

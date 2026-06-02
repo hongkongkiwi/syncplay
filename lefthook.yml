@@ -22,6 +22,12 @@ pre-commit:
       run: cargo check --manifest-path p2p/rust/Cargo.toml --features tui
       fail_text: "cargo check failed — fix the type errors before committing"
 
+    # ── JS/TS type check (p2p-client) ──
+    js-typecheck:
+      glob: "packages/p2p-client/src/**/*.ts"
+      run: cd packages/p2p-client && pnpm run typecheck
+      fail_text: "p2p-client typecheck failed — fix before committing"
+
     # ── Markdown lint (optional, non-blocking) ──
     # markdownlint:
     #   glob: "*.md"

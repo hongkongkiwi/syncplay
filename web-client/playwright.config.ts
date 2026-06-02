@@ -8,6 +8,11 @@ export default defineConfig({
   expect: {
     timeout: 5_000
   },
+  webServer: {
+    command: 'npm run dev',
+    port: 4173,
+    reuseExistingServer: true,
+  },
   use: {
     baseURL: `http://127.0.0.1:${port}`,
     trace: 'on-first-retry'

@@ -415,7 +415,7 @@ describe('Message handlers', () => {
     }, 'newhost');
 
     manager.dispatch(MessageType.HostElected, {
-      host_id: 'newhost',
+      hostId: 'newhost',
       reason: 'election',
     });
 
@@ -570,7 +570,7 @@ describe('Playback control', () => {
     const reqMsgs = sent.filter((m) => m.msgType === MessageType.PlaystateRequest);
     expect(reqMsgs).toHaveLength(1);
     const payload = reqMsgs[0].payload as any;
-    expect(payload.action).toEqual({ set_speed: 1.75 });
+    expect(payload.action).toEqual({ setspeed: 1.75 });
   });
 
   it('requestSeek as host: calls updatePlaystate directly', () => {

@@ -47,7 +47,7 @@ function attachProxy(httpServer: UpgradeServer | null): void {
   }
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD });
-  const connectionsPerIp = new Map<string, number>();
+  const connectionsPerIp = new Map<string, number[]>();
 
   httpServer.on('upgrade', (request, socket, head) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
@@ -69,23 +69,29 @@ function attachProxy(httpServer: UpgradeServer | null): void {
       return;
     }
 
-    // Rate limit: max connections per IP
+    // Rate limit: max connections per IP (timestamp-based, decaying window)
     const clientIp = request.socket.remoteAddress ?? 'unknown';
-    const count = (connectionsPerIp.get(clientIp) ?? 0) + 1;
-    if (count > MAX_CONNECTIONS_PER_IP) {
+    const now = Date.now();
+    let timestamps = connectionsPerIp.get(clientIp) ?? [];
+    // Prune entries older than 60 seconds
+    timestamps = timestamps.filter(ts => now - ts < 60_000);
+    if (timestamps.length >= MAX_CONNECTIONS_PER_IP) {
       socket.write('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\nToo many connections.');
       socket.destroy();
       return;
     }
-    connectionsPerIp.set(clientIp, count);
+    timestamps.push(now);
+    connectionsPerIp.set(clientIp, timestamps);
 
     wss.handleUpgrade(request, socket, head, ws => {
       ws.on('close', () => {
-        const current = connectionsPerIp.get(clientIp) ?? 1;
-        if (current <= 1) {
+        const timestamps = connectionsPerIp.get(clientIp);
+        if (!timestamps) return;
+        const pruned = timestamps.filter(ts => Date.now() - ts < 60_000);
+        if (pruned.length === 0) {
           connectionsPerIp.delete(clientIp);
         } else {
-          connectionsPerIp.set(clientIp, current - 1);
+          connectionsPerIp.set(clientIp, pruned);
         }
       });
       bridgeSyncplay(ws, target.value, request);
@@ -110,12 +116,36 @@ type ParseResult = { ok: true; value: ProxyTarget } | { ok: false; error: string
 
 type ValidationResult = { ok: true } | { ok: false; error: string };
 
+/**
+ * Validates the Origin header of an incoming WebSocket upgrade request.
+ *
+ * ## Trust Model
+ *
+ * This proxy sits between the browser and upstream Syncplay servers. It acts
+ * as a same-origin gateway (typically deployed on the same domain as the
+ * web frontend) and enforces two layers of protection:
+ *
+ * 1. **Origin validation (this function):** Prevents other websites from
+ *    connecting their visitors' browsers to this proxy via cross-origin
+ *    WebSocket requests. Browsers always send the `Origin` header on
+ *    cross-origin WebSocket upgrades, so this is a browser-enforced boundary.
+ *
+ * 2. **Host allowlist (`parseTarget` / `isAllowedHost`):** Prevents the proxy
+ *    from being abused to relay connections to arbitrary internal hosts (SSRF).
+ *    Even if origin validation is bypassed (e.g., `curl` without an Origin
+ *    header), the target host must still be in `SYNCPLAY_WEB_ALLOWED_HOSTS`.
+ *
+ * **Why no-Origin requests are allowed in dev / without allowlist:**
+ * Non-browser clients (`curl`, scripts, native apps) do not send `Origin`.
+ * Blocking them unconditionally would break legitimate use. The host allowlist
+ * (`SYNCPLAY_WEB_ALLOWED_HOSTS`) provides the SSRF guardrail. In production
+ * with `SYNCPLAY_WEB_ALLOWED_ORIGINS` set, the Origin header is required
+ * (browsers always send it, so this only blocks non-browser callers that
+ * could be cross-origin SSRF).
+ */
 function validateOrigin(request: IncomingMessage): ValidationResult {
   const origin = request.headers.origin;
 
-  // In production with an origin allowlist, require the Origin header.
-  // Browsers always send Origin for WebSocket upgrades; non-browser clients
-  // (curl, scripts, SSRF) can omit it, bypassing the allowlist.
   const hasAllowlist = !!(process.env.SYNCPLAY_WEB_ALLOWED_ORIGINS ?? '').trim();
   if (!origin) {
     if (
@@ -123,6 +153,21 @@ function validateOrigin(request: IncomingMessage): ValidationResult {
       hasAllowlist
     ) {
       return { ok: false, error: 'WebSocket origin is required.' };
+    }
+    // In production without an origin allowlist, browsers still enforce
+    // same-origin by default since they always send Origin on cross-origin
+    // WebSocket upgrades. Non-browser clients without Origin are allowed;
+    // the host allowlist prevents SSRF abuse.
+    if (
+      process.env.NODE_ENV === 'production' &&
+      !hasAllowlist
+    ) {
+      console.warn(
+        '[syncplay-web-proxy] SYNCPLAY_WEB_ALLOWED_ORIGINS is not set. ' +
+          'The proxy allows WebSocket upgrades without an Origin header ' +
+          '(non-browser clients). In production deployments, set ' +
+          'SYNCPLAY_WEB_ALLOWED_ORIGINS to restrict cross-origin access.'
+      );
     }
     return { ok: true };
   }

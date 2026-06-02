@@ -15,22 +15,26 @@ import {
   type ChatPayload,
   type ControllerChangePayload,
   type FileEntry,
+  type FileInfoPayload,
   type FileMetadata,
   type FileRequestPayload,
   type FileResponsePayload,
   type FileTransferPayload,
   type HelloPayload,
+  type HostElectedPayload,
   type LatencyPingPayload,
   type LatencyPongPayload,
   type PeerDisconnectPayload,
   type PlaylistChangePayload,
   type PlaylistRequestPayload,
+  type PlaystatePayload,
   type PlaystateRequestPayload,
   type ReadinessPayload,
   type StatusUpdatePayload,
   type SubtitleInfoPayload,
   type SubtitleTrack,
   type UserInfoPayload,
+  type VoiceFramePayload,
   type VoiceMutePayload,
   avatarSetPayload,
   chatPayload,
@@ -696,27 +700,29 @@ export class P2PStateManager {
   dispatch(msgType: MessageType, payload: unknown, from?: string): void {
     switch (msgType) {
       case MessageType.Hello: return this.handleHello(payload as HelloPayload, from);
-      case MessageType.Playstate: return this.handlePlaystate(payload as any);
+      case MessageType.Playstate: return this.handlePlaystate(payload as PlaystatePayload);
       case MessageType.PlaystateRequest: return this.handlePlaystateRequest(payload as PlaystateRequestPayload, from);
       case MessageType.Chat: return this.handleChat(payload as ChatPayload);
       case MessageType.Readiness: return this.handleReadiness(payload as ReadinessPayload);
       case MessageType.PlaylistChange: return this.handlePlaylistChange(payload as PlaylistChangePayload);
       case MessageType.PlaylistRequest: return this.handlePlaylistRequest(payload as PlaylistRequestPayload);
-      case MessageType.FileInfo: return this.handleFileInfo(payload as any);
+      case MessageType.FileInfo: return this.handleFileInfo(payload as FileInfoPayload);
       case MessageType.FileTransfer: return this.handleFileTransfer(payload as FileTransferPayload);
       case MessageType.FileResponse: return this.handleFileResponse(payload as FileResponsePayload);
       case MessageType.LatencyPing: return this.handleLatencyPing(payload as LatencyPingPayload);
       case MessageType.LatencyPong: return this.handleLatencyPong(payload as LatencyPongPayload, from);
-      case MessageType.HostElected: return this.handleHostElected(payload as any);
+      case MessageType.HostElected: return this.handleHostElected(payload as HostElectedPayload);
       case MessageType.UserInfo: return this.handleUserInfo(payload as UserInfoPayload, from);
       case MessageType.PeerDisconnect: return this.handlePeerDisconnect(payload as PeerDisconnectPayload, from);
       case MessageType.VoiceMute: return this.handleVoiceMute(payload as VoiceMutePayload, from);
       case MessageType.SubtitleInfo: return this.handleSubtitleInfo(payload as SubtitleInfoPayload);
       case MessageType.ControllerChange: return this.handleControllerChange(payload as ControllerChangePayload);
-      case MessageType.AvatarSet: return this.handleAvatarSet(payload as any);
-      case MessageType.StatusUpdate: return this.handleStatusUpdate(payload as any);
-      case MessageType.VoiceFrame: return this.handleVoiceFrame(payload as any, from);
-      case MessageType.FileRequest: break; // handled by file transfer module
+      case MessageType.AvatarSet: return this.handleAvatarSet(payload as AvatarSetPayload);
+      case MessageType.StatusUpdate: return this.handleStatusUpdate(payload as StatusUpdatePayload);
+      case MessageType.VoiceFrame: return this.handleVoiceFrame(payload as VoiceFramePayload, from);
+      case MessageType.FileRequest:
+        this.emit({ type: 'file-request', data: payload, timestamp: Date.now() });
+        break;
     }
   }
 
@@ -760,8 +766,8 @@ export class P2PStateManager {
       console.warn(`[P2PState] PlaystateRequest denied — ${requester} is not a controller`);
       return;
     }
-    if (typeof p.action === 'object' && 'set_speed' in p.action) {
-      this.room.speed = p.action.set_speed;
+    if (typeof p.action === 'object' && 'setspeed' in p.action) {
+      this.room.speed = (p.action as { setspeed: number }).setspeed;
       this.updatePlaystate(this.room.position, this.room.paused);
     } else {
       switch (p.action) {
@@ -1441,13 +1447,13 @@ export class P2PStateManager {
     }
   }
 
-  private handleHostElected(p: { host_id: string; reason: string }): void {
+  private handleHostElected(p: HostElectedPayload): void {
     // Reset old host flag
     for (const [, peer] of this.room.peers) peer.isHost = false;
-    this.hostId = p.host_id;
-    const peer = this.room.peers.get(p.host_id);
+    this.hostId = p.hostId;
+    const peer = this.room.peers.get(p.hostId);
     if (peer) { peer.isHost = true; this.room.controllers.add(peer.username); }
-    this.emit({ type: 'host-change', data: { hostId: p.host_id, reason: p.reason }, timestamp: Date.now() });
+    this.emit({ type: 'host-change', data: { hostId: p.hostId, reason: p.reason }, timestamp: Date.now() });
   }
 
   private handleUserInfo(p: UserInfoPayload, from?: string): void {

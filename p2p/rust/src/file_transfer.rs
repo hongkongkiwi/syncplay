@@ -24,6 +24,7 @@ use crate::wire;
 
 const DEFAULT_CHUNK_SIZE: u32 = 262_144; // 256KB
 const MAX_TRANSFER_SIZE: u64 = 100 * 1024 * 1024; // 100 MB cap for incoming transfers
+const MAX_CONCURRENT_TRANSFERS: usize = 3;
 
 /// Subtitle extensions to scan for. Ordered by preference.
 const SUBTITLE_EXTENSIONS: &[&str] = &["srt", "ass", "ssa", "vtt", "sub", "idx", "txt"];
@@ -122,6 +123,8 @@ struct IncomingTransfer {
     expected_chunks: u64,
     /// Expected SHA-256 fingerprint (empty = skip verification)
     expected_fingerprint: String,
+    /// Last time a chunk was received (for stale transfer eviction)
+    last_activity: std::time::Instant,
 }
 
 /// Handles peer-to-peer file transfers with SHA-256 integrity checking and chunked streaming delivery.
@@ -134,9 +137,33 @@ pub struct FileTransfer {
 
 impl FileTransfer {
     pub fn new(conn: ConnectionManager) -> Self {
+        let transfers = Arc::new(Mutex::new(HashMap::new()));
+
+        // Spawn stale transfer eviction: remove transfers inactive for > 5 minutes.
+        // Only spawn if we're inside a Tokio runtime (tests may not have one).
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let transfers_cleanup = transfers.clone();
+            handle.spawn(async move {
+                loop {
+                    time::sleep(Duration::from_secs(60)).await;
+                    let now = std::time::Instant::now();
+                    transfers_cleanup
+                        .lock()
+                        .retain(|tid, entry: &mut IncomingTransfer| {
+                            let keep =
+                                now.duration_since(entry.last_activity) < Duration::from_secs(300);
+                            if !keep {
+                                info!("Evicting stale transfer: {tid} (inactive > 5 min)");
+                            }
+                            keep
+                        });
+                }
+            });
+        }
+
         Self {
             conn,
-            transfers: Arc::new(Mutex::new(HashMap::new())),
+            transfers,
             throttle_bytes_per_sec: 0,
         }
     }
@@ -316,6 +343,17 @@ impl FileTransfer {
         }
 
         let mut transfers = self.transfers.lock();
+        // Enforce concurrent transfer cap
+        if transfers.len() >= MAX_CONCURRENT_TRANSFERS && !transfers.contains_key(&msg.transfer_id)
+        {
+            warn!(
+                "Too many concurrent transfers ({} >= {}), rejecting {}",
+                transfers.len(),
+                MAX_CONCURRENT_TRANSFERS,
+                msg.transfer_id
+            );
+            return Ok(None);
+        }
         // Reject chunk_size=0 to prevent division by zero
         if msg.chunk_size == 0 {
             warn!(
@@ -336,9 +374,11 @@ impl FileTransfer {
                 chunks: HashMap::new(),
                 expected_chunks: msg.total_size.div_ceil(msg.chunk_size as u64),
                 expected_fingerprint: String::new(), // set from FileResponse
+                last_activity: std::time::Instant::now(),
             });
 
         entry.chunks.insert(msg.chunk_index, msg.data.clone());
+        entry.last_activity = std::time::Instant::now();
         debug!(
             "Received chunk {}/{}",
             msg.chunk_index + 1,
@@ -660,6 +700,7 @@ mod tests {
             chunks: HashMap::new(),
             expected_chunks: (1024u64 * 1024).div_ceil(256u64 * 1024), // = 4
             expected_fingerprint: String::new(),
+            last_activity: std::time::Instant::now(),
         };
         assert_eq!(entry.expected_chunks, 4);
     }
@@ -673,6 +714,7 @@ mod tests {
             chunks: HashMap::new(),
             expected_chunks: (1024u64 * 1024 + 1).div_ceil(256u64 * 1024), // = 5
             expected_fingerprint: String::new(),
+            last_activity: std::time::Instant::now(),
         };
         assert_eq!(entry.expected_chunks, 5);
     }
@@ -686,6 +728,7 @@ mod tests {
             chunks: HashMap::new(),
             expected_chunks: 100u64.div_ceil(256u64 * 1024), // = 1
             expected_fingerprint: String::new(),
+            last_activity: std::time::Instant::now(),
         };
         assert_eq!(entry.expected_chunks, 1);
     }

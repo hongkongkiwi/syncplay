@@ -10,13 +10,14 @@
 
 import { Audio } from 'expo-av';
 import { File, Paths } from 'expo-file-system';
+import type { P2PStateManager } from 'syncplay-p2p-client';
 
 // ── VoiceChat ────────────────────────────────────────────────────────────────
 
 export class VoiceChat {
   private recording: Audio.Recording | null = null;
   private sound: Audio.Sound | null = null;
-  private stateManager: any; // P2PStateManager
+  private stateManager: P2PStateManager;
   private _muted = false;
   private _capturing = false;
   private _permission = false;
@@ -226,9 +227,6 @@ export class VoiceChat {
    * Converts Uint8Array to base64 and queues for playback.
    */
   handleIncomingFrame(data: Uint8Array, from: string): void {
-    // Don't play incoming audio when muted
-    if (this._muted) return;
-
     // Convert Uint8Array → base64
     const binary = String.fromCharCode(...data);
     const base64 = this._btoa(binary);
@@ -273,18 +271,13 @@ export class VoiceChat {
     const uri = await this._stopCurrentRecording();
     if (uri) {
       try {
-        // Read file as base64 using new expo-file-system API (SDK 56+)
+        // Read file as ArrayBuffer directly (avoids base64 → binary string → byte loop)
         const file = new File(uri);
-        const base64 = await file.base64();
+        const buf = await file.arrayBuffer();
 
-        // Send via state manager (converted back to Uint8Array for wire protocol)
+        // Send via state manager
         if (this.stateManager?.sendVoiceFrame) {
-          const binary = this._atob(base64);
-          const bytes = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i);
-          }
-          this.stateManager.sendVoiceFrame(bytes, this._seq++);
+          this.stateManager.sendVoiceFrame(new Uint8Array(buf), this._seq++);
         }
 
         // Clean up temp file

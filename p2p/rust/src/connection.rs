@@ -212,8 +212,10 @@ impl ConnectionManager {
         self.0.host_id.lock().clone()
     }
     pub fn is_host(&self) -> bool {
-        let pid = self.pid();
-        !pid.is_empty() && pid == self.hid()
+        // Hold both locks simultaneously to avoid TOCTOU between reads
+        let pid = self.0.peer_id.lock().clone();
+        let hid = self.0.host_id.lock().clone();
+        !pid.is_empty() && pid == hid
     }
     pub fn uname(&self) -> String {
         self.0.username.clone()
@@ -316,19 +318,10 @@ impl ConnectionManager {
     }
 
     fn fire_join(&self, pid: &str, uname: &str) {
-        // Clone callback list to avoid deadlock if callback re-registers
-        let callbacks: Vec<_> = self
-            .0
-            .on_join
-            .lock()
-            .iter()
-            .map(|_| ()) // we can't clone Box<dyn Fn>, so iterate in-place
-            .collect();
-        drop(callbacks);
         // Iterate while holding lock — callers must not re-enter on_join
-        for f in self.0.on_join.lock().iter() {
+        self.0.on_join.lock().iter().for_each(|f| {
             f(pid.to_string(), uname.to_string());
-        }
+        });
     }
     fn fire_leave(&self, pid: &str, reason: &str) {
         for f in self.0.on_leave.lock().iter() {
@@ -647,7 +640,13 @@ impl ConnectionManager {
             features,
         };
         match wire::encode(&p) {
-            Ok(data) => self.send_all(&data, None).await,
+            Ok(data) => {
+                for entry in self.0.peers.iter() {
+                    if let Err(e) = entry.send(&data).await {
+                        warn!("UserInfo to {} failed: {e}", entry.key());
+                    }
+                }
+            }
             Err(e) => error!("Failed to encode UserInfo: {e}"),
         }
     }
@@ -1010,14 +1009,6 @@ impl ConnectionManager {
             .get(pid)
             .map(|p| p.username.clone())
             .unwrap_or_else(|| "unknown".to_string());
-
-        // Fire on_disconnect callbacks before removing the stale peer
-        {
-            let on_disconnect = self.0.on_disconnect.lock();
-            for f in on_disconnect.iter() {
-                f(pid.to_string(), uname.clone());
-            }
-        }
 
         // Remove the stale peer (but don't fire leave yet)
         if let Some((_, p)) = self.0.peers.remove(pid) {
