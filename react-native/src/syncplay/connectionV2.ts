@@ -1282,16 +1282,24 @@ export class P2PConnection implements P2PTransport {
         this.setupDC();
       };
 
-      this.dc = this.pc.createDataChannel('syncplay-v2');
-      this.setupDC();
-
+      // 3. Create and send offer
       const offer = await this.pc.createOffer();
       await this.pc.setLocalDescription(offer);
 
       if (config.sfu) {
+        // SFU mode: let server create the data channel, just send offer
         this.ws.send(JSON.stringify({
           type: 'signal',
           target: '_server',
+          payload: { kind: 'offer', sdp: offer.sdp },
+        }));
+      } else {
+        // P2P mode: create data channel and send offer
+        this.dc = this.pc.createDataChannel('syncplay-v2');
+        this.setupDC();
+
+        this.ws.send(JSON.stringify({
+          type: 'signal',
           payload: { kind: 'offer', sdp: offer.sdp },
         }));
       }

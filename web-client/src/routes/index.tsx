@@ -8,6 +8,7 @@ import {
   MessageSquare,
   Mic,
   MicOff,
+  Moon,
   Pause,
   Play,
   PlaySquare,
@@ -16,6 +17,7 @@ import {
   Radio,
   Send,
   Shuffle,
+  Sun,
   Trash2,
   Unplug,
   Upload,
@@ -39,6 +41,7 @@ type ConnectForm = {
   room: string;
   password: string;
   turnUrl: string;
+  sfu: boolean;
 };
 
 type ChatMessage = {
@@ -74,6 +77,7 @@ const defaultForm: ConnectForm = {
   room: 'default',
   password: '',
   turnUrl: '',
+  sfu: false,
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -136,6 +140,22 @@ function WebClient() {
     index: number;
     updatedBy: string;
   }>({ files: [], index: 0, updatedBy: '' });
+
+  // Dark mode
+  const [darkMode, setDarkMode] = useState(() => {
+    // Default dark; check localStorage override
+    const saved = localStorage.getItem('syncplay-web-theme');
+    return saved !== null ? saved !== 'light' : true;
+  });
+
+  useEffect(() => {
+    if (darkMode) {
+      document.documentElement.classList.remove('light-mode');
+    } else {
+      document.documentElement.classList.add('light-mode');
+    }
+    localStorage.setItem('syncplay-web-theme', darkMode ? 'dark' : 'light');
+  }, [darkMode]);
 
   // Form & UI
   const [form, setForm] = useState(loadForm);
@@ -483,7 +503,7 @@ function WebClient() {
 
   // ── Actions ──────────────────────────────────────────────────────────
 
-  const updateForm = (field: keyof ConnectForm, value: string) => {
+  const updateForm = (field: keyof ConnectForm, value: string | boolean) => {
     setForm(current => {
       const next = { ...current, [field]: value };
       saveForm(next);
@@ -505,6 +525,7 @@ function WebClient() {
       room: roomName,
       password: form.password || roomPass || undefined,
       turnUrl: form.turnUrl.trim() || undefined,
+      sfu: form.sfu,
     };
 
     manualDisconnectRef.current = false;
@@ -651,7 +672,18 @@ function WebClient() {
             <h1>Join a watch room from the browser.</h1>
           </div>
           <div className="brand-right">
-            <StatusPill status={connectionStatus} />
+            <div className="brand-actions">
+              <button
+                type="button"
+                className="theme-toggle"
+                onClick={() => setDarkMode(v => !v)}
+                title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+                aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+              >
+                {darkMode ? <Sun size={16} /> : <Moon size={16} />}
+              </button>
+              <StatusPill status={connectionStatus} />
+            </div>
           </div>
         </div>
 
@@ -789,6 +821,14 @@ function WebClient() {
               placeholder="turn:user:pass@host:3478"
               onChange={event => updateForm('turnUrl', event.target.value)}
             />
+          </label>
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={form.sfu}
+              onChange={event => updateForm('sfu', event.target.checked)}
+            />
+            <span>SFU Mode (server-relayed)</span>
           </label>
           <div className="button-row">
             <button type="submit" disabled={connecting}>

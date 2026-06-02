@@ -236,6 +236,13 @@ export default function App() {
     };
   }, [connection]);
 
+  // Auto-start voice capture when connected and not muted
+  useEffect(() => {
+    if (connectionState === 'ready' && !voiceMuted) {
+      voiceChatRef.current?.startCapture().catch(() => {});
+    }
+  }, [connectionState, voiceMuted]);
+
   // ── SyncEvent handler ───────────────────────────────────────────────────
 
   function handleSyncEvent(event: SyncEvent, conn: P2PConnection) {

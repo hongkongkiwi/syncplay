@@ -1,0 +1,59 @@
+name: JS Clients CI
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'web-client/**'
+      - 'react-native/**'
+      - 'packages/p2p-client/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/js-ci.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'web-client/**'
+      - 'react-native/**'
+      - 'packages/p2p-client/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/js-ci.yml'
+
+jobs:
+  web-typecheck:
+    name: Web Client — Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Type check (web-client)
+        run: cd web-client && npx tsc --noEmit
+
+  rn-test:
+    name: React Native — Jest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies (RN — independent node_modules)
+        run: cd react-native && npm install
+
+      - name: Run Jest
+        run: cd react-native && npx jest

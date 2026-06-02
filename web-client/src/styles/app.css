@@ -120,6 +120,33 @@ label {
   gap: 0.3rem;
 }
 
+.brand-actions {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.theme-toggle {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  color: #bcb8ad;
+  cursor: pointer;
+  display: inline-flex;
+  height: 2rem;
+  justify-content: center;
+  min-height: 0;
+  padding: 0;
+  transition: all 0.2s;
+  width: 2rem;
+}
+
+.theme-toggle:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #d8ff62;
+}
+
 .eyebrow {
   color: #8fe5d0;
   font-size: 0.75rem;
@@ -722,4 +749,178 @@ h2 {
   .field-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* ── Light mode overrides ───────────────────────────────────── */
+
+html.light-mode {
+  color-scheme: light;
+}
+
+html.light-mode body {
+  background:
+    radial-gradient(circle at top left, rgba(120, 200, 180, 0.18), transparent 34rem),
+    linear-gradient(135deg, #f5f4f0 0%, #e8e7e1 52%, #ebf0f2 100%);
+  color: #1a1a18;
+}
+
+html.light-mode .stage-panel,
+html.light-mode .connect-card,
+html.light-mode .room-card,
+html.light-mode .chat-card,
+html.light-mode .managed-room-card,
+html.light-mode .playlist-card {
+  background: rgba(255, 255, 255, 0.78);
+  border-color: rgba(0, 0, 0, 0.08);
+  box-shadow: 0 1.5rem 5rem rgba(0, 0, 0, 0.06);
+}
+
+html.light-mode button {
+  background: #2a2a24;
+  border-color: rgba(42, 42, 36, 0.5);
+  color: #f5f0e8;
+}
+
+html.light-mode button.active,
+html.light-mode button.ready {
+  background: #1e7a5e;
+  border-color: rgba(30, 122, 94, 0.6);
+}
+
+html.light-mode button:disabled {
+  filter: grayscale(0.6);
+}
+
+html.light-mode input {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.12);
+  color: #1a1a18;
+}
+
+html.light-mode input:focus {
+  border-color: #2a7a5e;
+  box-shadow: 0 0 0 3px rgba(42, 122, 94, 0.18);
+}
+
+html.light-mode label {
+  color: #66645a;
+}
+
+html.light-mode .eyebrow {
+  color: #1e7a5e;
+}
+
+html.light-mode .status-pill {
+  border-color: rgba(0, 0, 0, 0.08);
+  color: #444038;
+}
+
+html.light-mode .status-pill span {
+  background: #99958a;
+}
+
+html.light-mode .version-label {
+  color: #888478;
+}
+
+html.light-mode .video-frame {
+  background:
+    linear-gradient(90deg, rgba(0, 0, 0, 0.04) 1px, transparent 1px),
+    linear-gradient(rgba(0, 0, 0, 0.04) 1px, transparent 1px),
+    #f8f8f6;
+}
+
+html.light-mode .empty-video {
+  color: #1a1a18;
+}
+
+html.light-mode .file-button {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.1);
+  color: #1a1a18;
+}
+
+html.light-mode .error-line {
+  color: #c0392b;
+}
+
+html.light-mode .user-row {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.06);
+}
+
+html.light-mode .user-row span {
+  color: #66645a;
+}
+
+html.light-mode .muted {
+  color: #888478;
+}
+
+html.light-mode .user-count-badge {
+  background: rgba(30, 122, 94, 0.12);
+  border-color: rgba(30, 122, 94, 0.3);
+  color: #1e7a5e;
+}
+
+html.light-mode .playlist-item {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.06);
+}
+
+html.light-mode .playlist-item:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+html.light-mode .playlist-item.active {
+  background: rgba(30, 122, 94, 0.12);
+  border-color: rgba(30, 122, 94, 0.3);
+}
+
+html.light-mode .playlist-name {
+  color: #1a1a18;
+}
+
+html.light-mode .message span {
+  color: #1a1a18;
+}
+
+html.light-mode .message strong {
+  color: #1e7a5e;
+}
+
+html.light-mode .help-panel {
+  background: #f5f4f0;
+  border-color: rgba(0, 0, 0, 0.1);
+}
+
+html.light-mode .help-section h3 {
+  color: #1e7a5e;
+}
+
+html.light-mode .help-section li {
+  color: #555048;
+}
+
+html.light-mode .help-section kbd {
+  background: rgba(0, 0, 0, 0.06);
+  border-color: rgba(0, 0, 0, 0.12);
+  color: #1e7a5e;
+}
+
+html.light-mode .theme-toggle {
+  background: rgba(0, 0, 0, 0.06);
+  border-color: rgba(0, 0, 0, 0.1);
+  color: #66645a;
+}
+
+html.light-mode .theme-toggle:hover {
+  background: rgba(0, 0, 0, 0.1);
+  color: #1e7a5e;
+}
+
+html.light-mode .speed-display {
+  background: rgba(30, 122, 94, 0.1);
+  border-color: rgba(30, 122, 94, 0.25);
+  color: #1e7a5e;
 }

@@ -24,7 +24,58 @@ export type ConnectionConfig = {
   room: string;
   password?: string;
   turnUrl?: string;
+  sfu?: boolean;
 };
+
+// ── Error UX ────────────────────────────────────────────────────────
+
+/** Machine-readable error codes for connection failures. */
+export enum ErrorCode {
+  SignalingUnreachable = 'SIGNALING_UNREACHABLE',
+  ServerRejected = 'SERVER_REJECTED',
+  DataChannelClosed = 'DATA_CHANNEL_CLOSED',
+  InternalError = 'INTERNAL_ERROR',
+  Unknown = 'UNKNOWN',
+}
+
+/**
+ * Map a raw error message to a user-friendly message and ErrorCode.
+ * All onStatus callbacks should pass raw errors through this function
+ * before displaying to the user.
+ */
+export function humanReadableError(raw: string): { code: ErrorCode; message: string } {
+  const lowered = raw.toLowerCase();
+
+  if (lowered.includes('signaling server unreachable') || lowered.includes('unreachable')) {
+    return {
+      code: ErrorCode.SignalingUnreachable,
+      message: 'Cannot reach the signaling server. Check the host address.',
+    };
+  }
+
+  if (lowered.includes('server rejected connection') || lowered.includes('rejected')) {
+    return {
+      code: ErrorCode.ServerRejected,
+      message: 'Connection rejected. Check room name and password.',
+    };
+  }
+
+  if (lowered.includes('data channel closed unexpectedly') || lowered.includes('unexpected')) {
+    return {
+      code: ErrorCode.DataChannelClosed,
+      message: 'Connection lost. Attempting to reconnect...',
+    };
+  }
+
+  if (lowered.includes('websocket was null') || lowered.includes('internal')) {
+    return {
+      code: ErrorCode.InternalError,
+      message: 'Internal error. Please try again.',
+    };
+  }
+
+  return { code: ErrorCode.Unknown, message: raw };
+}
 
 // ── Signaling message shapes ──────────────────────────────────────
 
@@ -67,6 +118,7 @@ export class SyncplayP2PConnection {
   private _transport: P2PTransport | null = null;
   private lastConfig: ConnectionConfig | null = null;
   private _intentionalDisconnect = false;
+  private _sfuMode = false;
 
   constructor(
     private readonly onStatus: (status: ConnectionStatus, error?: string | null) => void,
@@ -118,6 +170,7 @@ export class SyncplayP2PConnection {
     this.stateManager.setLastConfig(config.host, config.username, config.room);
     this.stateManager.transit('connecting');
     this.onStatus('connecting');
+    this._sfuMode = config.sfu ?? false;
 
     try {
       // 1. Connect WebSocket to signaling server
@@ -201,7 +254,7 @@ export class SyncplayP2PConnection {
       // ICE candidate → signaling server
       this.pc.addEventListener('icecandidate', (e) => {
         if (e.candidate && this.ws) {
-          this.ws.send(JSON.stringify({
+          const signal: any = {
             type: 'signal',
             payload: {
               kind: 'ice-candidate',
@@ -209,33 +262,47 @@ export class SyncplayP2PConnection {
               sdpMid: e.candidate.sdpMid,
               sdpMLineIndex: e.candidate.sdpMLineIndex,
             },
-          } satisfies SignalingMessage));
+          };
+          if (this._sfuMode) signal.target = '_server';
+          this.ws.send(JSON.stringify(signal));
         }
       });
 
-      // Incoming data channel
+      // Incoming data channel (receiving side or SFU server-created)
       this.pc.addEventListener('datachannel', (e) => {
         this.dc = e.channel;
         this.setupDC();
       });
 
-      // Create data channel (initiator side)
-      this.dc = this.pc.createDataChannel('syncplay-v2');
-      this.setupDC();
-
       // 6. Create and send offer
-      const offer = await this.pc.createOffer();
-      await this.pc.setLocalDescription(offer);
-      this.ws.send(JSON.stringify({
-        type: 'signal',
-        payload: { kind: 'offer', sdp: offer.sdp },
-      } satisfies SignalingMessage));
+      if (this._sfuMode) {
+        // SFU mode: let server create the data channel, we just send offer
+        const offer = await this.pc.createOffer();
+        await this.pc.setLocalDescription(offer);
+        this.ws.send(JSON.stringify({
+          type: 'signal',
+          target: '_server',
+          payload: { kind: 'offer', sdp: offer.sdp },
+        }));
+      } else {
+        // P2P mode: create data channel and send offer
+        this.dc = this.pc.createDataChannel('syncplay-v2');
+        this.setupDC();
+
+        const offer = await this.pc.createOffer();
+        await this.pc.setLocalDescription(offer);
+        this.ws.send(JSON.stringify({
+          type: 'signal',
+          payload: { kind: 'offer', sdp: offer.sdp },
+        } satisfies SignalingMessage));
+      }
 
       this.stateManager.transit('handshaking');
 
     } catch (e) {
-      this.stateManager.transit('error', String(e));
-      this.onStatus('error', String(e));
+      const { message } = humanReadableError(String(e));
+      this.stateManager.transit('error', message);
+      this.onStatus('error', message);
     }
   }
 

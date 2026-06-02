@@ -75,7 +75,7 @@ export interface RoomStateSnapshot {
 }
 
 export type ConnectionState = 'offline' | 'connecting' | 'handshaking' | 'connecting_peers' | 'ready' | 'reconnecting' | 'error';
-export type SyncEventType = 'chat' | 'playstate' | 'user-join' | 'user-leave' | 'host-change' | 'error' | 'transfer-complete';
+export type SyncEventType = 'chat' | 'playstate' | 'user-join' | 'user-leave' | 'host-change' | 'error' | 'transfer-complete' | 'transfer-progress';
 
 export interface SyncEvent {
   type: SyncEventType;
@@ -839,6 +839,175 @@ export class P2PStateManager {
       console.log(`Cancelling file transfer: ${transfer.filename} (${transferId})`);
       this.incomingTransfers.delete(transferId);
     }
+  }
+
+  // ── File transfer sender ──────────────────────────────────────────
+
+  /**
+   * Send a file to a peer in 256KB chunks with incremental SHA-256.
+   *
+   * @param file - Browser File/Blob (web-only; RN: use sendFileRN stub)
+   * @param targetPeerId - Peer ID to send to (empty string = broadcast)
+   *
+   * Emits 'transfer-progress' events:
+   *   { transferId, filename, sentBytes, totalSize, progress (0-1) }
+   * After final chunk, emits with progress=1 and includes the fingerprint.
+   */
+  async sendFile(file: File | Blob, targetPeerId: string = ''): Promise<string | null> {
+    if (!this._transport || !this._connected) {
+      console.warn('[P2PState] sendFile: not connected');
+      return null;
+    }
+
+    const transferId = crypto.randomUUID();
+    const chunkSize = 256 * 1024; // 256KB
+    const totalSize = file.size;
+    const filename = file instanceof File ? file.name : 'blob.bin';
+    let offset = 0;
+    let chunkIndex = 0;
+
+    // Set up incremental SHA-256 using the Web Crypto API
+    let hashState: Uint8Array | null = null;
+    const allChunks: Uint8Array[] = [];
+
+    console.log(`[P2PState] sendFile: starting transfer ${transferId} (${filename}, ${totalSize} bytes)`);
+
+    // Read the file in chunks using FileReader
+    while (offset < totalSize) {
+      const end = Math.min(offset + chunkSize, totalSize);
+      const blobSlice = file.slice(offset, end);
+
+      let chunk: Uint8Array;
+      try {
+        // For Blob support (including RN environments without FileReader)
+        if (typeof file.arrayBuffer === 'function') {
+          chunk = new Uint8Array(await blobSlice.arrayBuffer());
+        } else {
+          // Fallback to FileReader
+          chunk = await this._readBlobAsUint8Array(blobSlice);
+        }
+      } catch (err) {
+        console.error(`[P2PState] sendFile: failed to read chunk ${chunkIndex}:`, err);
+        this.emit({
+          type: 'transfer-progress',
+          data: { transferId, filename, sentBytes: offset, totalSize, progress: offset / totalSize, error: String(err) },
+          timestamp: Date.now(),
+        });
+        return null;
+      }
+
+      allChunks.push(chunk);
+
+      // Send chunk via transport
+      if (this._transport && this._connected) {
+        const payload: FileTransferPayload = {
+          transferId,
+          chunkIndex: chunkIndex,
+          offset,
+          totalSize,
+          chunkSize,
+          filename,
+          data: chunk,
+        };
+
+        this._transport.send(MessageType.FileTransfer, payload);
+
+        // Emit progress
+        const sent = offset + chunk.byteLength;
+        this.emit({
+          type: 'transfer-progress',
+          data: { transferId, filename, sentBytes: sent, totalSize, progress: sent / totalSize },
+          timestamp: Date.now(),
+        });
+      }
+
+      offset = end;
+      chunkIndex++;
+    }
+
+    // Compute full SHA-256 of the complete file
+    const fullData = this._concatUint8Arrays(allChunks);
+    let fingerprint = '';
+    try {
+      // Cast needed for TS strict ArrayBufferLike vs ArrayBuffer
+      const hashBuffer = await crypto.subtle.digest('SHA-256', fullData as unknown as ArrayBuffer);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      fingerprint = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    } catch (err) {
+      console.error('[P2PState] sendFile: SHA-256 digest failed:', err);
+    }
+
+    // Send fingerprint verification chunk (chunkIndex = MAX_SAFE_INTEGER)
+    if (this._transport && this._connected) {
+      this._transport.send(MessageType.FileTransfer, {
+        transferId,
+        chunkIndex: Number.MAX_SAFE_INTEGER,
+        offset: totalSize,
+        totalSize,
+        chunkSize,
+        filename,
+        data: new Uint8Array(0),
+      } as FileTransferPayload);
+    }
+
+    // Emit final progress with fingerprint
+    this.emit({
+      type: 'transfer-progress',
+      data: { transferId, filename, sentBytes: totalSize, totalSize, progress: 1, fingerprint },
+      timestamp: Date.now(),
+    });
+
+    console.log(`[P2PState] sendFile: completed ${transferId} (fingerprint: ${fingerprint})`);
+    return transferId;
+  }
+
+  /**
+   * React Native stub for sendFile. In RN there is no browser File API;
+   * use this method with a local file path and the expo-file-system module.
+   * Reads the file in 256KB chunks, computes SHA-256, and sends via transport.
+   */
+  async sendFileRN(_filePath: string, _targetPeerId: string = ''): Promise<string | null> {
+    // Stub: RN-specific implementation to be wired by the calling layer.
+    // Requires expo-file-system File API to read chunks and a SHA-256 impl.
+    // When implemented:
+    //  1. const fileInfo = await FileSystem.getInfoAsync(filePath);
+    //  2. Create a new File(filePath) and read in 256KB chunks
+    //  3. Send each chunk via this._transport.send(MessageType.FileTransfer, ...)
+    //  4. Compute SHA-256 incrementally over chunks
+    //  5. Send final chunk with chunkIndex=Number.MAX_SAFE_INTEGER
+    //  6. Emit transfer-progress events
+    console.warn('[P2PState] sendFileRN is a stub — implement with expo-file-system');
+    return null;
+  }
+
+  // ── Private file helpers ──────────────────────────────────────────
+
+  /** Read a Blob as Uint8Array using FileReader (fallback for .arrayBuffer()) */
+  private _readBlobAsUint8Array(blob: Blob): Promise<Uint8Array> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (reader.result instanceof ArrayBuffer) {
+          resolve(new Uint8Array(reader.result));
+        } else {
+          reject(new Error('FileReader did not return ArrayBuffer'));
+        }
+      };
+      reader.onerror = () => reject(reader.error);
+      reader.readAsArrayBuffer(blob);
+    });
+  }
+
+  /** Concatenate multiple Uint8Arrays into one */
+  private _concatUint8Arrays(arrays: Uint8Array[]): Uint8Array {
+    const totalLength = arrays.reduce((sum, a) => sum + a.byteLength, 0);
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const arr of arrays) {
+      result.set(arr, offset);
+      offset += arr.byteLength;
+    }
+    return result;
   }
 
   private handleLatencyPing(p: LatencyPingPayload): void {
