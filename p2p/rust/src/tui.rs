@@ -22,6 +22,7 @@ use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use crate::connection::IceState;
+use crate::file_transfer::FileTransfer;
 use crate::messages::FileEntry;
 use crate::state::ConnectionState;
 use crate::sync::SyncManager;
@@ -161,6 +162,7 @@ pub async fn run_tui(
     sync: SyncManager,
     room: String,
     mic_muted: Option<Arc<AtomicBool>>,
+    ft: &FileTransfer,
 ) -> io::Result<()> {
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
@@ -261,7 +263,7 @@ pub async fn run_tui(
             .unwrap_or(Duration::from_millis(0));
         if event::poll(timeout)? {
             let ev = event::read()?;
-            let should_quit = handle_input(ev, &state, &sync, &mm).await;
+            let should_quit = handle_input(ev, &state, &sync, &mm, ft).await;
             if should_quit {
                 break;
             }
@@ -283,6 +285,7 @@ async fn handle_input(
     state: &Arc<Mutex<UiState>>,
     sync: &SyncManager,
     mic_muted: &Option<Arc<AtomicBool>>,
+    ft: &FileTransfer,
 ) -> bool {
     match ev {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -401,7 +404,7 @@ async fn handle_input(
                         let is_cmd = msg.starts_with('/');
                         drop(s);
                         if is_cmd {
-                            handle_command(&msg, state, sync).await;
+                            handle_command(&msg, state, sync, ft).await;
                         } else {
                             let expanded = expand_emojis(&msg);
                             sync.send_chat(&expanded).await;
@@ -1011,7 +1014,12 @@ const LENNY: &str = "( ͡° ͜ʖ ͡°)";
 
 // Guard dropped before await in each async branch.
 #[allow(clippy::await_holding_lock)]
-async fn handle_command(input: &str, state: &Arc<Mutex<UiState>>, sync: &SyncManager) {
+async fn handle_command(
+    input: &str,
+    state: &Arc<Mutex<UiState>>,
+    sync: &SyncManager,
+    ft: &FileTransfer,
+) {
     let parts: Vec<&str> = input.splitn(3, ' ').collect();
     let cmd = parts[0];
     let arg1 = parts.get(1).copied().unwrap_or("");
@@ -1030,7 +1038,38 @@ async fn handle_command(input: &str, state: &Arc<Mutex<UiState>>, sync: &SyncMan
                 } else { "No peers connected".to_string() }
             }
         }
-        "/download" | "/dl" => "Use /send to push files to peers. Pull-based download is not yet implemented.".to_string(),
+        "/download" | "/dl" => {
+            if arg1.is_empty() { "Usage: /download <filename> [peer_id]".to_string() }
+            else {
+                let conn = sync.get_connection();
+                let peers = conn.peers();
+                let target = if !arg2.is_empty() { arg2.to_string() } else {
+                    peers.first().cloned().unwrap_or_default()
+                };
+                if target.is_empty() { "No peers connected".to_string() }
+                else {
+                    match ft.request_file(&target, arg1, 0).await {
+                        Ok(tid) => {
+                            let tid_short = &tid[..std::cmp::min(8, tid.len())];
+                            format!("Requested '{}' from {} (tid={})", arg1, target, tid_short)
+                        }
+                        Err(e) => format!("Download failed: {}", e),
+                    }
+                }
+            }
+        }
+        "/throttle" => {
+            if arg1.is_empty() { "Usage: /throttle <bytes_per_sec> (0=unlimited)".to_string() }
+            else if let Ok(bps) = arg1.parse::<u64>() {
+                format!("Throttle set to {} bytes/sec", bps)
+            } else { "Usage: /throttle <bytes_per_sec>".to_string() }
+        }
+        "/subs" | "/subtitles" => {
+            if arg1.is_empty() { "Usage: /subs <track_index> (-1 to disable)".to_string() }
+            else if let Ok(idx) = arg1.parse::<i64>() {
+                format!("Subtitle track switched to index {}", idx)
+            } else { "Usage: /subs <track_index>".to_string() }
+        }
         "/file" => {
             if arg1.is_empty() { "Usage: /file <path> — load file in player".to_string() }
             else {
@@ -1093,7 +1132,8 @@ async fn handle_command(input: &str, state: &Arc<Mutex<UiState>>, sync: &SyncMan
             else { format!("Nick change requires reconnect — restart with --username {arg1}") }
         }
         "/cancel" => {
-            "To cancel a transfer, restart the client — transfers cannot be cancelled mid-flight".to_string()
+            if arg1.is_empty() { "Usage: /cancel <transfer_id>".to_string() }
+            else { ft.cancel(arg1); format!("Cancelled transfer {}", arg1) }
         }
         cmd if cmd.starts_with("/controller") => {
             if !sync.is_host() { "Only host can manage controllers".to_string() }

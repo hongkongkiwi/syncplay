@@ -305,10 +305,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── File transfer ──────────────────────────────────────────
-    let ft = FileTransfer::new(conn.clone());
+    let ft = std::sync::Arc::new(FileTransfer::new(conn.clone()));
     ft.register_handlers();
     let ft_state = state.clone();
     let ft_dir = download_dir.clone();
+    let ft_chunks = ft.clone();
     conn.on_msg(
         syncplay_p2p::messages::MessageType::FileTransfer,
         move |_: syncplay_p2p::messages::MessageType, data: &[u8], _from: String| {
@@ -327,7 +328,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 drop(s);
                 // Save to disk when complete
-                if let Ok(Some(path)) = ft.handle_chunk(&chunk, &ft_dir) {
+                if let Ok(Some(path)) = ft_chunks.handle_chunk(&chunk, &ft_dir) {
                     let mut s2 = ft_state.lock();
                     s2.chat.push(format!("--- Download complete: {}", path));
                     if s2.chat.len() > 500 {
@@ -543,7 +544,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let room = cfg.room.clone();
-    run_tui(state, sync, room, mic_muted).await?;
+    run_tui(state, sync, room, mic_muted, &ft).await?;
 
     println!("Goodbye!");
     Ok(())
