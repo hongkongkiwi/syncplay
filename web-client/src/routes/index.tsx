@@ -36,6 +36,7 @@ type ConnectForm = {
   username: string;
   room: string;
   password: string;
+  turnUrl: string;
 };
 
 type ChatMessage = {
@@ -70,6 +71,7 @@ const defaultForm: ConnectForm = {
   username: 'WebGuest',
   room: 'default',
   password: '',
+  turnUrl: '',
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -142,6 +144,8 @@ function WebClient() {
   const [newPlaylistUrl, setNewPlaylistUrl] = useState('');
   const [showPlaylistPanel, setShowPlaylistPanel] = useState(false);
   const [unreadChat, setUnreadChat] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const [showHelp, setShowHelp] = useState(false);
 
   // Refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -361,6 +365,78 @@ function WebClient() {
     }, 250);
   }, [mediaUrl, playstate, currentUsername, syncPaused]);
 
+  // ── Keyboard shortcuts ────────────────────────────────────────────────
+
+  useEffect(() => {
+    const applySpeed = (speed: number) => {
+      const video = videoRef.current;
+      if (!video) return;
+      video.playbackRate = speed;
+      setPlaybackSpeed(speed);
+      connection.requestSetSpeed(speed);
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Don't capture when typing in inputs
+      if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
+      // Don't capture when help is open (Escape handles it)
+      if (showHelp && e.key !== 'Escape') return;
+
+      switch (e.key) {
+        case ' ':
+          e.preventDefault();
+          connection.toggleReady();
+          break;
+        case 'p':
+        case 'P':
+          e.preventDefault();
+          setSyncPaused(v => !v);
+          break;
+        case 's':
+        case 'S':
+          e.preventDefault();
+          if (videoRef.current) {
+            videoRef.current.currentTime += 10;
+          }
+          break;
+        case 'a':
+        case 'A':
+          e.preventDefault();
+          if (videoRef.current) {
+            videoRef.current.currentTime -= 10;
+          }
+          break;
+        case '<':
+        case ',':
+          e.preventDefault();
+          applySpeed(0.5);
+          break;
+        case '>':
+        case '.':
+          e.preventDefault();
+          applySpeed(2);
+          break;
+        case '/':
+          e.preventDefault();
+          applySpeed(1);
+          break;
+        case '?':
+          e.preventDefault();
+          setShowHelp(v => !v);
+          break;
+        case 'Escape':
+          if (showHelp) {
+            e.preventDefault();
+            setShowHelp(false);
+          }
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [connection, connected, showHelp]);
+
   // ── Auto-reconnect ───────────────────────────────────────────────────
 
   useEffect(() => {
@@ -425,6 +501,7 @@ function WebClient() {
       username: form.username.trim() || defaultForm.username,
       room: roomName,
       password: form.password || roomPass || undefined,
+      turnUrl: form.turnUrl.trim() || undefined,
     };
 
     manualDisconnectRef.current = false;
@@ -637,6 +714,9 @@ function WebClient() {
             {syncPaused ? <Pause size={18} /> : <Play size={18} />}
             {syncPaused ? 'Sync paused' : 'Sync active'}
           </button>
+          <span className="speed-display" title="Current playback speed">
+            {playbackSpeed}x
+          </span>
           <button type="button" onClick={toggleReady} disabled={!connected} className={isReady ? 'ready' : ''}>
             <Check size={18} />
             {isReady ? 'Ready' : 'Not ready'}
@@ -687,6 +767,14 @@ function WebClient() {
               type="password"
               autoComplete="current-password"
               onChange={event => updateForm('password', event.target.value)}
+            />
+          </label>
+          <label>
+            TURN Server (optional)
+            <input
+              value={form.turnUrl}
+              placeholder="turn:user:pass@host:3478"
+              onChange={event => updateForm('turnUrl', event.target.value)}
             />
           </label>
           <div className="button-row">
@@ -863,6 +951,59 @@ function WebClient() {
           </form>
         </section>
       </aside>
+
+      {/* Help overlay */}
+      {showHelp ? (
+        <div className="help-overlay" onClick={() => setShowHelp(false)}>
+          <div className="help-panel" onClick={e => e.stopPropagation()}>
+            <div className="card-title">
+              <h2>Keyboard Shortcuts</h2>
+              <button type="button" onClick={() => setShowHelp(false)} className="help-close">
+                &times;
+              </button>
+            </div>
+            <div className="help-grid">
+              <div className="help-section">
+                <h3>Playback</h3>
+                <ul>
+                  <li><kbd>Space</kbd> Toggle ready</li>
+                  <li><kbd>p</kbd> Toggle pause/play</li>
+                  <li><kbd>s</kbd> Seek +10s</li>
+                  <li><kbd>a</kbd> Seek -10s</li>
+                </ul>
+              </div>
+              <div className="help-section">
+                <h3>Speed</h3>
+                <ul>
+                  <li><kbd>&lt;</kbd> / <kbd>,</kbd> Set 0.5x</li>
+                  <li><kbd>&gt;</kbd> / <kbd>.</kbd> Set 2x</li>
+                  <li><kbd>/</kbd> Reset to 1x</li>
+                </ul>
+              </div>
+              <div className="help-section">
+                <h3>Chat Commands</h3>
+                <ul>
+                  <li><kbd>/help</kbd> Show commands</li>
+                  <li><kbd>/nick &lt;name&gt;</kbd> Change name</li>
+                  <li><kbd>/ready</kbd> Toggle ready</li>
+                  <li><kbd>/play</kbd> Request play</li>
+                  <li><kbd>/pause</kbd> Request pause</li>
+                  <li><kbd>/seek &lt;time&gt;</kbd> Request seek</li>
+                  <li><kbd>/speed &lt;rate&gt;</kbd> Set speed</li>
+                  <li><kbd>/controller add|remove &lt;name&gt;</kbd></li>
+                </ul>
+              </div>
+              <div className="help-section">
+                <h3>Other</h3>
+                <ul>
+                  <li><kbd>?</kbd> Toggle this help</li>
+                  <li><kbd>Escape</kbd> Close help</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }

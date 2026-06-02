@@ -69,7 +69,7 @@ export interface RoomStateSnapshot {
 }
 
 export type ConnectionState = 'offline' | 'connecting' | 'handshaking' | 'connecting_peers' | 'ready' | 'reconnecting' | 'error';
-export type SyncEventType = 'chat' | 'playstate' | 'user-join' | 'user-leave' | 'host-change' | 'error';
+export type SyncEventType = 'chat' | 'playstate' | 'user-join' | 'user-leave' | 'host-change' | 'error' | 'transfer-complete';
 
 export interface SyncEvent {
   type: SyncEventType;
@@ -78,6 +78,19 @@ export interface SyncEvent {
 }
 
 type EventHandler = (event: SyncEvent) => void;
+
+// ── File transfer ──────────────────────────────────────────────────
+
+export interface IncomingTransfer {
+  transferId: string;
+  filename: string;
+  totalSize: number;
+  chunkSize: number;
+  chunks: Map<number, Uint8Array>;
+  expectedChunks: number;
+  expectedFingerprint: string;
+  receivedBytes: number;
+}
 
 // ── Defaults ──────────────────────────────────────────────────────
 
@@ -117,6 +130,7 @@ export class P2PStateManager {
   private username = '';
   private latencyMap = new Map<string, number>();
   private voiceMutes = new Map<string, boolean>();
+  private incomingTransfers = new Map<string, IncomingTransfer>();
   private eventHandlers: EventHandler[] = [];
   private syncIntervalId: ReturnType<typeof setInterval> | null = null;
   private pingIntervalId: ReturnType<typeof setInterval> | null = null;
@@ -126,8 +140,18 @@ export class P2PStateManager {
   private _transport: P2PTransport | null = null;
   private _connected = false;
 
+  // ── State machine fields ────────────────────────────────────────
+  reconnectAttempt = 0;
+  maxReconnectAttempts = 5;
+  peerCount = 0;
+  transitionTimestamp = 0;
+  lastTransitionMessage = '';
+  private _lastConfig: { host: string; username: string; room: string } | null = null;
+  private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
   // Configurable callbacks for the connection layer
   onSendTransport: ((msgType: MessageType, payload: unknown) => void) | null = null;
+  onReconnectSuccess: (() => void) | null = null;
 
   constructor(
     username: string,
@@ -170,9 +194,47 @@ export class P2PStateManager {
     };
   }
 
-  setConnectionState(s: ConnectionState, error?: string): void {
-    this._connectionState = s;
-    if (s === 'error') this.emit({ type: 'error', data: error ?? 'Connection error', timestamp: Date.now() });
+  /**
+   * Validated state transition.  Logs a warning for illegal transitions
+   * and returns without changing state.  "error" and "offline" are always allowed.
+   */
+  transit(newState: ConnectionState, error?: string): void {
+    const prev = this._connectionState;
+    if (prev === newState) return;
+
+    const allowed = this._isValidTransition(prev, newState);
+    if (!allowed) {
+      console.warn(`[P2PState] Illegal transition: ${prev} → ${newState} (ignored)`);
+      return;
+    }
+
+    this._connectionState = newState;
+    this.transitionTimestamp = Date.now();
+    this.lastTransitionMessage = `${prev} → ${newState}${error ? ` (${error})` : ''}`;
+
+    if (newState === 'error') {
+      this.emit({ type: 'error', data: error ?? 'Connection error', timestamp: Date.now() });
+    }
+
+    if (newState === 'offline') {
+      this.cancelReconnect();
+    }
+  }
+
+  private _isValidTransition(from: ConnectionState, to: ConnectionState): boolean {
+    // Always-allowed transitions
+    if (to === 'error' || to === 'offline') return true;
+
+    const allowed: Partial<Record<ConnectionState, ConnectionState[]>> = {
+      offline: ['connecting'],
+      connecting: ['handshaking'],
+      handshaking: ['ready', 'connecting_peers'],
+      connecting_peers: ['ready'],
+      ready: ['reconnecting'],
+      reconnecting: ['ready', 'offline'],
+    };
+
+    return allowed[from]?.includes(to) ?? false;
   }
 
   /** Called by transport when signaling handshake completes */
@@ -181,7 +243,7 @@ export class P2PStateManager {
     this.hostId = hostId;
     this._transport = transport;
     this._connected = true;
-    this.setConnectionState('ready');
+    this.transit('ready');
     this.startLoop();
   }
 
@@ -196,7 +258,8 @@ export class P2PStateManager {
     this.room.readyStates.clear();
     this.room.controllers.clear();
     this.latencyMap.clear();
-    this.setConnectionState('offline');
+    this.peerCount = 0;
+    this.transit('offline');
   }
 
   // ── Event system ─────────────────────────────────────────────────
@@ -622,12 +685,132 @@ export class P2PStateManager {
   }
 
   private handleFileTransfer(p: FileTransferPayload): void {
-    console.log(`FileTransfer chunk ${p.chunkIndex}/${Math.ceil(p.totalSize / Math.max(p.chunkSize, 1))} from ${p.transferId}`);
-    // TODO: chunk assembly, SHA-256 verify, save to disk
+    // Guard: division by zero check
+    if (p.chunkSize === 0) {
+      console.error(`FileTransfer rejected: chunkSize is 0 for transfer ${p.transferId}`);
+      return;
+    }
+
+    // Get or create IncomingTransfer entry
+    let transfer = this.incomingTransfers.get(p.transferId);
+    if (!transfer) {
+      const expectedChunks = Math.ceil(p.totalSize / p.chunkSize);
+      transfer = {
+        transferId: p.transferId,
+        filename: p.filename,
+        totalSize: p.totalSize,
+        chunkSize: p.chunkSize,
+        chunks: new Map(),
+        expectedChunks,
+        expectedFingerprint: '',
+        receivedBytes: 0,
+      };
+      this.incomingTransfers.set(p.transferId, transfer);
+    }
+
+    // Store chunk
+    transfer.chunks.set(p.chunkIndex, p.data);
+    transfer.receivedBytes += p.data.byteLength;
+
+    // Check if transfer is complete
+    if (transfer.receivedBytes >= transfer.totalSize) {
+      this.assembleTransfer(transfer);
+    }
+  }
+
+  private async assembleTransfer(transfer: IncomingTransfer): Promise<void> {
+    // Concatenate all chunks in order
+    const ordered = new Uint8Array(transfer.totalSize);
+    let offset = 0;
+    for (let i = 0; i < transfer.expectedChunks; i++) {
+      const chunk = transfer.chunks.get(i);
+      if (chunk) {
+        ordered.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+    }
+
+    // Compute SHA-256 hash
+    let hashHex = '';
+    try {
+      const hashBuffer = await crypto.subtle.digest('SHA-256', ordered);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    } catch (err) {
+      console.error('SHA-256 digest failed:', err);
+    }
+
+    // Verify fingerprint if set
+    if (transfer.expectedFingerprint && hashHex !== transfer.expectedFingerprint) {
+      console.error(
+        `Fingerprint mismatch for ${transfer.filename}: expected ${transfer.expectedFingerprint}, got ${hashHex}`
+      );
+      this.incomingTransfers.delete(transfer.transferId);
+      return;
+    }
+
+    // Emit transfer-complete event
+    this.emit({
+      type: 'transfer-complete',
+      data: {
+        transferId: transfer.transferId,
+        filename: transfer.filename,
+        data: ordered,
+        size: transfer.totalSize,
+        fingerprint: hashHex,
+      },
+      timestamp: Date.now(),
+    });
+
+    // Download to disk via Blob
+    try {
+      const blob = new Blob([ordered], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = transfer.filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('File download failed:', err);
+    }
+
+    // Clean up
+    this.incomingTransfers.delete(transfer.transferId);
   }
 
   private handleFileResponse(p: FileResponsePayload): void {
-    console.log(`File transfer ${p.transferId}: ${p.accepted ? 'accepted' : 'rejected'} (${p.reason})`);
+    const transfer = this.incomingTransfers.get(p.transferId);
+    if (!transfer) {
+      console.warn(`FileResponse for unknown transfer ${p.transferId}`);
+      return;
+    }
+
+    if (!p.accepted) {
+      console.warn(`File transfer ${p.transferId} rejected: ${p.reason}`);
+      this.incomingTransfers.delete(p.transferId);
+      return;
+    }
+
+    // Store expected fingerprint and chunk size for later verification
+    if (p.fingerprint) {
+      transfer.expectedFingerprint = p.fingerprint;
+    }
+    if (p.chunkSize > 0) {
+      transfer.chunkSize = p.chunkSize;
+      transfer.expectedChunks = Math.ceil(transfer.totalSize / p.chunkSize);
+    }
+  }
+
+  /** Cancel an in-progress file transfer and free resources */
+  cancelTransfer(transferId: string): void {
+    const transfer = this.incomingTransfers.get(transferId);
+    if (transfer) {
+      console.log(`Cancelling file transfer: ${transfer.filename} (${transferId})`);
+      this.incomingTransfers.delete(transferId);
+    }
   }
 
   private handleLatencyPing(p: LatencyPingPayload): void {
@@ -762,7 +945,88 @@ export class P2PStateManager {
   /shrug /tableflip /lenny /unflip`;
   }
 
+  // ── Config persistence ──────────────────────────────────────────
+
+  /**
+   * Persist the current connection config (host + username + room) to localStorage.
+   * Call this after a successful connection.
+   */
+  saveConfig(key = 'syncplay-p2p-config'): void {
+    if (!this._lastConfig) return;
+    try {
+      localStorage.setItem(key, JSON.stringify(this._lastConfig));
+    } catch (err) {
+      console.warn('[P2PState] Failed to save config:', err);
+    }
+  }
+
+  /**
+   * Load saved connection config from localStorage.
+   * Returns defaults if nothing is saved.
+   */
+  static loadConfig(key = 'syncplay-p2p-config'): { host: string; username: string; room: string } {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.host === 'string' && typeof parsed.username === 'string' && typeof parsed.room === 'string') {
+          return parsed;
+        }
+      }
+    } catch { /* ignore */ }
+    return { host: 'localhost', username: '', room: '' };
+  }
+
+  /** Store config for later persistence — call before or during connect */
+  setLastConfig(host: string, username: string, room: string): void {
+    this._lastConfig = { host, username, room };
+  }
+
+  // ── Reconnection ─────────────────────────────────────────────────
+
+  /**
+   * Begin reconnection attempts with exponential backoff.
+   * Transit to 'reconnecting', then attempt reconnect.
+   * After maxReconnectAttempts, transit to 'error'.
+   */
+  reconnect(connectFn: () => Promise<void>, reason?: string): void {
+    this.cancelReconnect();
+
+    if (this.reconnectAttempt >= this.maxReconnectAttempts) {
+      this.transit('error', `Max reconnect attempts (${this.maxReconnectAttempts}) reached`);
+      return;
+    }
+
+    this.transit('reconnecting', reason);
+
+    // Exponential backoff: 2s, 4s, 8s, 16s, 32s
+    const delay = Math.min(2000 * Math.pow(2, this.reconnectAttempt), 32000);
+    this.reconnectAttempt++;
+
+    this._reconnectTimer = setTimeout(async () => {
+      this._reconnectTimer = null;
+      try {
+        await connectFn();
+        this.reconnectAttempt = 0;
+        this.onReconnectSuccess?.();
+      } catch (err) {
+        // connectFn will have already set error state, but we retry
+        this.reconnect(connectFn, String(err));
+      }
+    }, delay);
+  }
+
+  /** Cancel any in-progress reconnection */
+  cancelReconnect(): void {
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    this.reconnectAttempt = 0;
+  }
+
   destroy(): void {
+    this.cancelReconnect();
     this._connected = false;
     this.stopLoop();
     this.eventHandlers = [];

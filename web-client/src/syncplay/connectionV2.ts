@@ -23,6 +23,7 @@ export type ConnectionConfig = {
   username: string;
   room: string;
   password?: string;
+  turnUrl?: string;
 };
 
 // ── Signaling message shapes ──────────────────────────────────────
@@ -64,6 +65,8 @@ export class SyncplayP2PConnection {
   private room = '';
   private features: string[];
   private _transport: P2PTransport | null = null;
+  private lastConfig: ConnectionConfig | null = null;
+  private _intentionalDisconnect = false;
 
   constructor(
     private readonly onStatus: (status: ConnectionStatus, error?: string | null) => void,
@@ -95,6 +98,7 @@ export class SyncplayP2PConnection {
 
   async connect(config: ConnectionConfig): Promise<void> {
     this.disconnect();
+    this.lastConfig = config;
     this.username = config.username;
     this.room = config.room;
     this.features = ['chat', 'readiness', 'playlist'];
@@ -107,8 +111,12 @@ export class SyncplayP2PConnection {
     this.stateManager.onSendTransport = (msgType, payload) => {
       this.sendRaw(encode(msgType, payload as any));
     };
+    this.stateManager.onReconnectSuccess = () => {
+      this._intentionalDisconnect = false;
+    };
 
-    this.stateManager.setConnectionState('connecting');
+    this.stateManager.setLastConfig(config.host, config.username, config.room);
+    this.stateManager.transit('connecting');
     this.onStatus('connecting');
 
     try {
@@ -167,8 +175,27 @@ export class SyncplayP2PConnection {
       });
 
       // 5. Set up WebRTC
+      const iceServers: RTCIceServer[] = [
+        { urls: 'stun:stun.l.google.com:19302' },
+      ];
+      if (config.turnUrl) {
+        // Parse turn URL: turn:user:pass@host:port or turns:user:pass@host:port
+        const turnMatch = config.turnUrl.match(
+          /^(turns?):([^:@]+):([^@]+)@([^:]+)(?::(\d+))?$/,
+        );
+        if (turnMatch) {
+          iceServers.push({
+            urls: `${turnMatch[1]}:${turnMatch[4]}:${turnMatch[5] ?? '3478'}`,
+            username: turnMatch[2],
+            credential: turnMatch[3],
+          });
+        } else {
+          // Assume bare URL
+          iceServers.push({ urls: config.turnUrl });
+        }
+      }
       this.pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        iceServers,
       });
 
       // ICE candidate → signaling server
@@ -204,10 +231,10 @@ export class SyncplayP2PConnection {
         payload: { kind: 'offer', sdp: offer.sdp },
       } satisfies SignalingMessage));
 
-      this.stateManager.setConnectionState('handshaking');
+      this.stateManager.transit('handshaking');
 
     } catch (e) {
-      this.stateManager.setConnectionState('error', String(e));
+      this.stateManager.transit('error', String(e));
       this.onStatus('error', String(e));
     }
   }
@@ -229,6 +256,7 @@ export class SyncplayP2PConnection {
 
       // Notify StateManager we're connected
       this.stateManager.onConnected(this.peerId, this.hostId, this._transport);
+      this.saveConfig();
       this.onStatus('connected');
 
       // Send Hello via StateManager's transport
@@ -252,7 +280,12 @@ export class SyncplayP2PConnection {
     };
 
     const onClose = () => {
-      this.stateManager.onDisconnected('Data channel closed');
+      if (this._intentionalDisconnect) {
+        this.stateManager.onDisconnected('Data channel closed');
+      } else {
+        // Unexpected close — attempt reconnection
+        this._handleUnexpectedDisconnect('Data channel closed unexpectedly');
+      }
     };
 
     // Bind when open
@@ -403,9 +436,50 @@ export class SyncplayP2PConnection {
     this.stateManager.requestFile(peerId, filename, offset);
   }
 
+  // ── Config persistence ────────────────────────────────────────────
+
+  saveConfig(): void {
+    this.stateManager.saveConfig('syncplay-p2p-config');
+  }
+
+  static loadConfig(): { host: string; username: string; room: string } {
+    return P2PStateManager.loadConfig('syncplay-p2p-config');
+  }
+
+  // ── Reconnection ──────────────────────────────────────────────────
+
+  private _handleUnexpectedDisconnect(reason: string): void {
+    if (!this.lastConfig) {
+      this.stateManager.onDisconnected(reason);
+      return;
+    }
+
+    // Clean up transport-level resources but keep config
+    this.dc?.close();
+    this.pc?.close();
+    this.ws?.close();
+    this.dc = null;
+    this.pc = null;
+    this.ws = null;
+    this._transport = null;
+    this.peerId = '';
+    this.hostId = '';
+
+    // Use StateManager's reconnect with backoff
+    this.stateManager.reconnect(async () => {
+      await this.connect(this.lastConfig!);
+      // connect() swallows errors — check state to detect failure
+      if (this.stateManager.connectionState === 'error') {
+        throw new Error('Reconnect attempt failed');
+      }
+    }, reason);
+  }
+
   // ── Disconnect ────────────────────────────────────────────────────
 
   disconnect(): void {
+    this._intentionalDisconnect = true;
+
     // Send PeerDisconnect if data channel is open
     if (this.dc?.readyState === 'open') {
       try {
@@ -433,6 +507,9 @@ export class SyncplayP2PConnection {
     });
     this.stateManager.onSendTransport = (msgType, payload) => {
       this.sendRaw(encode(msgType, payload as any));
+    };
+    this.stateManager.onReconnectSuccess = () => {
+      this._intentionalDisconnect = false;
     };
 
     this.onStatus('disconnected');
