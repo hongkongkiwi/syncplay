@@ -33,7 +33,7 @@ export enum MessageType {
   VoiceMute = 0x11,
   SubtitleInfo = 0x12,
   ControllerChange = 0x13,
-  VoiceFrame = 0x14,
+  VoiceFrame = 0x16,
 }
 
 // ── Payload interfaces ──────────────────────────────────────────────────────
@@ -63,7 +63,7 @@ export enum PlaystateAction {
 }
 
 export interface PlaystateRequestPayload {
-  action: PlaystateAction | { SetSpeed: number };
+  action: PlaystateAction | { set_speed: number };
   position: number;
   requestId: string;
 }
@@ -255,7 +255,7 @@ export function playstateRequestPlay(): PlaystateRequestPayload {
 
 export function playstateRequestSetSpeed(speed: number): PlaystateRequestPayload {
   return {
-    action: { SetSpeed: speed },
+    action: { set_speed: speed },
     position: 0,
     requestId: uuidv4(),
   };
@@ -504,6 +504,17 @@ export class P2PStateManager {
     this._transport = transport;
     this._connected = true;
     this.setConnectionState('ready');
+    // Restore voice mute preference from localStorage on reconnect
+    try {
+      const saved = localStorage.getItem('syncplay-voice-mute');
+      if (saved !== null) {
+        const muted = JSON.parse(saved) as boolean;
+        this.voiceMutes.set(this.username, muted);
+        if (muted) {
+          this._transport.send(MessageType.VoiceMute, { muted: true });
+        }
+      }
+    } catch { /* storage unavailable */ }
     this.startLoop();
   }
 
@@ -784,6 +795,8 @@ export class P2PStateManager {
   sendVoiceMute(muted: boolean): void {
     if (!this._connected || !this._transport) return;
     this.voiceMutes.set(this.username, muted);
+    // Persist mute preference to localStorage for reconnection
+    try { localStorage.setItem('syncplay-voice-mute', JSON.stringify(muted)); } catch { /* storage unavailable */ }
     this._transport.send(MessageType.VoiceMute, { muted } as VoiceMutePayload);
   }
 
@@ -911,8 +924,8 @@ export class P2PStateManager {
       console.warn('[P2P] PlaystateRequest denied — not a controller');
       return;
     }
-    if (typeof p.action === 'object' && 'SetSpeed' in p.action) {
-      this._room.speed = p.action.SetSpeed;
+    if (typeof p.action === 'object' && 'set_speed' in p.action) {
+      this._room.speed = p.action.set_speed;
       this.updatePlaystate(this._room.position, this._room.paused);
     } else {
       switch (p.action) {
@@ -1177,7 +1190,7 @@ export class P2PStateManager {
     }
     this._reconnectAttempts++;
     this.setConnectionState('reconnecting');
-    const delay = Math.min(1000 * Math.pow(2, this._reconnectAttempts - 1), 30000);
+    const delay = Math.min(2500 * Math.pow(2, this._reconnectAttempts - 1), 30000);
     console.log(`[P2P] Reconnecting in ${delay}ms (attempt ${this._reconnectAttempts}/5): ${reason ?? 'unknown'}`);
     setTimeout(async () => {
       try {
@@ -1502,25 +1515,40 @@ export class P2PConnection implements P2PTransport {
         this.ws!.onerror = () => reject(new Error('Signaling server unreachable'));
       });
 
-      // 2. Create room / join via signaling
-      this.ws.send(JSON.stringify({
-        type: 'create',
-        room: config.room,
-        password: config.password ?? '',
-        username: config.username,
-        features: ['chat', 'readiness', 'playlist'],
-      }));
+      // 2. Create room / join via signaling — try 'create' first, fall back to 'join' if room exists
+      let joinType: 'create' | 'join' = 'create';
+      let resp: Record<string, unknown>;
 
-      const resp = await new Promise<Record<string, unknown>>((resolve) => {
-        this.ws!.onmessage = (e) => resolve(JSON.parse(e.data as string));
-      });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        this.ws.send(JSON.stringify({
+          type: joinType,
+          room: config.room,
+          password: config.password ?? '',
+          username: config.username,
+          features: ['chat', 'readiness', 'playlist'],
+        }));
 
-      if (resp.type === 'error') {
-        throw new Error(`${resp.code ?? 'unknown'}: ${resp.message ?? 'Signaling error'}`);
+        resp = await new Promise<Record<string, unknown>>((resolve) => {
+          this.ws!.onmessage = (e) => resolve(JSON.parse(e.data as string));
+        });
+
+        // If 'create' failed because room already exists, retry with 'join'
+        if (resp.type === 'error' && joinType === 'create') {
+          const code = resp.code as string | undefined;
+          if (code === 'room_exists' || (resp.message as string ?? '').toLowerCase().includes('already exists')) {
+            joinType = 'join';
+            continue; // retry
+          }
+        }
+        break; // success or non-retryable error
       }
 
-      this.peerId = (resp.peerId as string) ?? '';
-      this.hostId = (resp.hostId as string) ?? '';
+      if (resp!.type === 'error') {
+        throw new Error(`${resp!.code ?? 'unknown'}: ${resp!.message ?? 'Signaling error'}`);
+      }
+
+      this.peerId = (resp!.peerId as string) ?? '';
+      this.hostId = (resp!.hostId as string) ?? '';
 
       // Now handle further signaling messages
       this.ws.onmessage = (e: MessageEvent) => this.handleSignal(JSON.parse(e.data as string));

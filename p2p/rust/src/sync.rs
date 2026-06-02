@@ -208,21 +208,22 @@ impl SyncManager {
     /// Broadcast current room state to a specific peer (for new joiners).
     pub async fn send_state_to(&self, target: &str) {
         // Read all state in one lock acquisition for consistency
-        let (pos, paused, sb, seq, files, idx, ready_states, controllers) = {
+        let (pos, paused, sb, seq, speed, files, idx, ready_states, controllers) = {
             let r = self.room.lock();
             (
                 r.position,
                 r.paused,
                 r.set_by.clone(),
                 r.seq,
+                r.speed,
                 r.playlist.clone(),
                 r.playlist_index,
                 r.ready_states.clone(),
                 r.controllers.iter().cloned().collect::<Vec<_>>(),
             )
         };
-        // Send playstate
-        let ps = PlaystatePayload::new(pos, paused, true, &sb, seq);
+        // Send playstate with speed
+        let ps = PlaystatePayload::with_speed(pos, paused, true, &sb, seq, speed);
         if let Ok(data) = wire::encode(&ps) {
             if let Err(e) = self.conn.send_one(target, &data).await {
                 warn!("send_state_to: playstate to {target}: {e}");

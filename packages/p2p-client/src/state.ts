@@ -299,6 +299,17 @@ export class P2PStateManager {
     } else {
       console.warn(`[P2PState] onConnected called in unexpected state: ${this._connectionState}`);
     }
+    // Restore voice mute preference from localStorage on reconnect
+    try {
+      const saved = localStorage.getItem('syncplay-voice-mute');
+      if (saved !== null) {
+        const muted = JSON.parse(saved) as boolean;
+        this.voiceMutes.set(this.username, muted);
+        if (muted) {
+          this._transport.send(MessageType.VoiceMute, { muted: true });
+        }
+      }
+    } catch { /* storage unavailable */ }
     this.startLoop();
   }
 
@@ -586,6 +597,8 @@ export class P2PStateManager {
   sendVoiceMute(muted: boolean): void {
     if (!this._transport || !this._connected) return;
     this.voiceMutes.set(this.username, muted);
+    // Persist mute preference to localStorage for reconnection
+    try { localStorage.setItem('syncplay-voice-mute', JSON.stringify(muted)); } catch { /* storage unavailable */ }
     this._transport.send(MessageType.VoiceMute, { muted });
   }
 
@@ -725,8 +738,8 @@ export class P2PStateManager {
 
   private handlePlaystateRequest(p: PlaystateRequestPayload): void {
     if (!this.isHost) return;
-    if (typeof p.action === 'object' && 'SetSpeed' in p.action) {
-      this.room.speed = p.action.SetSpeed;
+    if (typeof p.action === 'object' && 'set_speed' in p.action) {
+      this.room.speed = p.action.set_speed;
       this.updatePlaystate(this.room.position, this.room.paused);
     } else {
       switch (p.action) {
@@ -1427,8 +1440,8 @@ export class P2PStateManager {
 
     this.transit('reconnecting', reason);
 
-    // Exponential backoff: 2s, 4s, 8s, 16s, 32s
-    const delay = Math.min(2000 * Math.pow(2, this.reconnectAttempt), 32000);
+    // Exponential backoff: 2.5s, 5s, 10s, 20s, 30s
+    const delay = Math.min(2500 * Math.pow(2, this.reconnectAttempt), 30000);
     this.reconnectAttempt++;
 
     this._reconnectTimer = setTimeout(async () => {

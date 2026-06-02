@@ -29,6 +29,9 @@ pub enum MessageType {
     VoiceMute = 0x11,        // peer muted/unmuted voice
     SubtitleInfo = 0x12,     // available subtitle tracks for a file
     ControllerChange = 0x13, // host adds/removes playback controller
+    AvatarSet = 0x14,        // peer sets their avatar/preset
+    StatusUpdate = 0x15,     // peer updates their status text
+    VoiceFrame = 0x16,       // voice audio frame (Opus/PCM)
 }
 
 // ── Payload types ────────────────────────────────────────────────────
@@ -244,6 +247,35 @@ pub struct ControllerChangePayload {
     pub action: ControllerAction,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AvatarSetPayload {
+    pub username: String,
+    #[serde(rename = "preset_id")]
+    pub preset_id: String,
+    #[serde(rename = "custom_url")]
+    pub custom_url: String,
+    pub accent: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatusUpdatePayload {
+    pub username: String,
+    #[serde(rename = "status_text")]
+    pub status_text: String,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VoiceFramePayload {
+    pub from: String,
+    pub data: Vec<u8>,
+    #[serde(rename = "sampleRate")]
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub timestamp: u64,
+    pub seq: u64,
+}
+
 impl SubtitleInfoPayload {
     pub fn new(subtitles: Vec<SubtitleTrack>) -> Self {
         Self { subtitles }
@@ -422,6 +454,9 @@ mod tests {
         assert_eq!(MessageType::VoiceMute as u8, 0x11);
         assert_eq!(MessageType::SubtitleInfo as u8, 0x12);
         assert_eq!(MessageType::ControllerChange as u8, 0x13);
+        assert_eq!(MessageType::AvatarSet as u8, 0x14);
+        assert_eq!(MessageType::StatusUpdate as u8, 0x15);
+        assert_eq!(MessageType::VoiceFrame as u8, 0x16);
     }
 
     #[test]

@@ -53,7 +53,7 @@ export enum PlaystateAction {
 }
 
 export interface PlaystateRequestPayload {
-  action: PlaystateAction | { SetSpeed: number };
+  action: PlaystateAction | { set_speed: number };
   position: number;
   requestId: string;
 }
@@ -325,7 +325,7 @@ export function playstateRequestSetSpeed(
   speed: number,
 ): PlaystateRequestPayload {
   return {
-    action: { SetSpeed: speed },
+    action: { set_speed: speed },
     position: 0,
     requestId: crypto.randomUUID(),
   };

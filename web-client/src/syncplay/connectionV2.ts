@@ -196,36 +196,52 @@ export class SyncplayP2PConnection {
         this.ws!.addEventListener('error', onError);
       });
 
-      // 2. Send create/join message
-      this.ws.send(JSON.stringify({
-        type: 'create',
-        room: config.room,
-        password: config.password ?? '',
-        username: config.username,
-        features: this.features,
-      } satisfies SignalingMessage));
+      // 2. Send create/join message — try 'create' first, fall back to 'join' if room exists
+      let joinType: 'create' | 'join' = 'create';
+      let parsed: SignalingMessage;
 
-      // 3. Wait for welcome response
-      const rawResp = await new Promise<string>((resolve, reject) => {
-        if (!this.ws) return reject(new Error('WebSocket was null'));
-        const onMsg = (e: MessageEvent) => {
-          this.ws!.removeEventListener('error', onErr);
-          resolve(e.data as string);
-        };
-        const onErr = () => {
-          this.ws!.removeEventListener('message', onMsg);
-          reject(new Error('Signaling handshake failed'));
-        };
-        this.ws!.addEventListener('message', onMsg, { once: true });
-        this.ws!.addEventListener('error', onErr, { once: true });
-      });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        this.ws.send(JSON.stringify({
+          type: joinType,
+          room: config.room,
+          password: config.password ?? '',
+          username: config.username,
+          features: this.features,
+        } satisfies SignalingMessage));
 
-      const parsed = JSON.parse(rawResp) as SignalingMessage;
-      if (parsed.type === 'error') {
-        throw new Error(parsed.message ?? 'Server rejected connection');
+        // 3. Wait for welcome response
+        const rawResp = await new Promise<string>((resolve, reject) => {
+          if (!this.ws) return reject(new Error('WebSocket was null'));
+          const onMsg = (e: MessageEvent) => {
+            this.ws!.removeEventListener('error', onErr);
+            resolve(e.data as string);
+          };
+          const onErr = () => {
+            this.ws!.removeEventListener('message', onMsg);
+            reject(new Error('Signaling handshake failed'));
+          };
+          this.ws!.addEventListener('message', onMsg, { once: true });
+          this.ws!.addEventListener('error', onErr, { once: true });
+        });
+
+        parsed = JSON.parse(rawResp) as SignalingMessage;
+
+        // If 'create' failed because room already exists, retry with 'join'
+        if (parsed.type === 'error' && joinType === 'create') {
+          const code = (parsed as any).code as string | undefined;
+          if (code === 'room_exists' || (parsed.message ?? '').toLowerCase().includes('already exists')) {
+            joinType = 'join';
+            continue; // retry
+          }
+        }
+        break; // success or non-retryable error
       }
-      this.peerId = parsed.peerId ?? '';
-      this.hostId = parsed.hostId ?? '';
+
+      if (parsed!.type === 'error') {
+        throw new Error(parsed!.message ?? 'Server rejected connection');
+      }
+      this.peerId = parsed!.peerId ?? '';
+      this.hostId = parsed!.hostId ?? '';
 
       // 4. Listen for further signaling messages
       this.ws.addEventListener('message', (e) => {
