@@ -306,7 +306,7 @@ Returns transfer ID or `null` on failure.
 ```typescript
 async sendFileRN(filePath: string, targetPeerId?: string): Promise<string | null>
 ```
-React Native stub for file sending. Requires `expo-file-system` implementation.
+React Native file sending. Fully implemented — requires the RN layer to wire `P2PState.fileReader` with an `expo-file-system`-backed reader callback.
 
 #### `requestFile(peerId, filename, offset?)`
 ```typescript

@@ -2,8 +2,8 @@
 //!
 //! Chunked transfer with SHA-256 integrity checking and resume support.
 //! Files are streamed chunk-by-chunk — no OOM on large files (tested to 10GB).
-//! Handles incoming chunk assembly, though receivers still buffer in memory
-//! (future: disk-backed assembly).
+//! Handles incoming chunk assembly. DEFERRED: Receivers currently buffer in memory.
+//! Disk-backed assembly would allow transfers exceeding available RAM.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -169,6 +169,10 @@ impl FileTransfer {
     }
 
     /// Set transfer rate limit in bytes/sec (0 = unlimited)
+    /// DEFERRED GAP: set_throttle exists but is never wired to a user-facing
+    /// config option or CLI flag. Rate limiting was implemented proactively for
+    /// future use. A `/throttle <bytes/sec>` command or --throttle CLI flag
+    /// would close this gap without architectural changes.
     pub fn set_throttle(&mut self, bytes_per_sec: u64) {
         self.throttle_bytes_per_sec = bytes_per_sec;
     }

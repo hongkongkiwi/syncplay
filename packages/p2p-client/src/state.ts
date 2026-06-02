@@ -959,7 +959,10 @@ export class P2PStateManager {
     }
   }
 
-  /** Cancel an in-progress file transfer and free resources */
+  /** Cancel an in-progress file transfer and free resources.
+   *  FIXABLE GAP: cancelTransfer exists but is never wired to any UI (web/RN).
+   *  Clients can call this directly when implementing a transfer manager UI
+   *  that shows active downloads with cancel buttons. */
   cancelTransfer(transferId: string): void {
     const transfer = this.incomingTransfers.get(transferId);
     if (transfer) {
@@ -1122,7 +1125,7 @@ export class P2PStateManager {
   /**
    * Send a file to a peer in 256KB chunks with incremental SHA-256.
    *
-   * @param file - Browser File/Blob (web-only; RN: use sendFileRN stub)
+   * @param file - Browser File/Blob (web-client; RN uses sendFileRN with fileReader callback)
    * @param targetPeerId - Peer ID to send to (empty string = broadcast)
    *
    * Emits 'transfer-progress' events:
@@ -1311,15 +1314,17 @@ export class P2PStateManager {
 
           this._transport.send(MessageType.FileTransfer, payload);
 
-          // Emit progress (we don't know final totalSize yet, but we can report current)
+          // Emit intermediate progress. NOTE: totalSize and progress are unknown
+          // until all chunks are read — sendFileRN reads the full file into memory
+          // before the final emission with correct totals. Emit sent-so-far as totalSize.
           this.emit({
             type: 'transfer-progress',
             data: {
               transferId,
               filename,
               sentBytes: totalSize,
-              totalSize: totalSize, // placeholder — updated below
-              progress: 0, // placeholder
+              totalSize: totalSize, // best-effort: unknown until full file read
+              progress: 0, // unknown until final totalSize determined
             },
             timestamp: Date.now(),
           });

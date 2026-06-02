@@ -583,7 +583,7 @@ GET /rooms → [{ "room": "movienight", "peers": 3, "hasPassword": false }]
 
 Available on the signaling server's HTTP port (default 8998). Converts `ws://` to `http://`.
 
-### mDNS (planned)
+### mDNS (DEFERRED)
 
 Service type: `_syncplay-p2p._tcp.local`. TXT records for room, username, version. Available in Node.js/Electron; not in browsers.
 

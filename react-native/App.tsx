@@ -1973,7 +1973,7 @@ function BottomTabs({
   connected: boolean;
   onSelect: (screen: AppScreenId) => void;
 }) {
-  // transfers: planned future feature, hidden until file transfer UI is complete
+  // DEFERRED: transfers tab hidden until file transfer UI (send/receive progress, history) is built
   const screens = APP_SCREENS.filter(s => s.id !== 'transfers');
   return (
     <View style={styles.bottomTabs}>

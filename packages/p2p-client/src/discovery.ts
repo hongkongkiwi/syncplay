@@ -3,7 +3,7 @@
 // This module provides a PeerDiscovery class for discovering Syncplay peers
 // on the local network. The primary mechanism is HTTP-based room listing via
 // the signaling server's /rooms endpoint, with an mDNS fallback planned for
-// future Node.js/Electron environments.
+// DEFERRED Node.js/Electron environments.
 //
 // ── Discovery Methods ────────────────────────────────────────────────
 //
@@ -14,7 +14,7 @@
 //
 //    Response shape: [{ "room": "movienight", "peers": 3, "hasPassword": false }]
 //
-// 2. mDNS (future fallback, RFC 6762):
+// 2. mDNS (DEFERRED fallback, RFC 6762):
 //    Uses multicast UDP on 224.0.0.251:5353 to broadcast and discover
 //    services. Each Syncplay peer would announce `_syncplay-p2p._tcp` on
 //    port 8998 with TXT records for room/username. Requires `multicast-dns`
