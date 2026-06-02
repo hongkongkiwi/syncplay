@@ -57,6 +57,8 @@ type RoomUser = {
   isReady: boolean;
   isController: boolean;
   file?: { name: string };
+  rtt: number;
+  iceState: 'new' | 'checking' | 'connected' | 'disconnected' | 'failed' | 'closed';
 };
 
 type RemotePlaystate = {
@@ -133,6 +135,9 @@ function WebClient() {
 
   // Room users
   const [roomUsers, setRoomUsers] = useState<RoomUser[]>([]);
+
+  // Transfer progress
+  const [transferProgress, setTransferProgress] = useState<Array<{transferId:string, filename:string, progress:number, sentBytes:number, totalSize:number}>>([]);
 
   // Playlist (derived from connection snapshot)
   const [playlist, setPlaylistState] = useState<{
@@ -259,6 +264,8 @@ function WebClient() {
             isReady: p.isReady,
             isController: p.isController,
             file: p.file ? { name: p.file.name } : undefined,
+            rtt: p.rtt,
+            iceState: p.iceState,
           }));
           setRoomUsers(users);
 
@@ -284,10 +291,25 @@ function WebClient() {
             isReady: p.isReady,
             isController: p.isController,
             file: p.file ? { name: p.file.name } : undefined,
+            rtt: p.rtt,
+            iceState: p.iceState,
           }));
           setRoomUsers(users);
         } catch {
           // ignore
+        }
+        break;
+      }
+
+      case 'transfer-progress': {
+        const p = event.data as {transferId:string, filename:string, progress:number, sentBytes:number, totalSize:number};
+        setTransferProgress(prev => {
+          const existing = prev.find(t => t.transferId === p.transferId);
+          if (existing) return prev.map(t => t.transferId === p.transferId ? p : t);
+          return [...prev, p];
+        });
+        if (p.progress >= 1) {
+          setTimeout(() => setTransferProgress(prev => prev.filter(t => t.transferId !== p.transferId)), 3000);
         }
         break;
       }
@@ -767,6 +789,23 @@ function WebClient() {
           )}
         </div>
 
+        {transferProgress.length > 0 ? (
+          <div className="transfer-progress-section">
+            {transferProgress.map(t => (
+              <div key={t.transferId} className="transfer-item">
+                <span className="transfer-name">{t.filename}</span>
+                <div className="transfer-bar-track">
+                  <div
+                    className="transfer-bar-fill"
+                    style={{ width: `${Math.round(t.progress * 100)}%` }}
+                  />
+                </div>
+                <span className="transfer-pct">{Math.round(t.progress * 100)}%</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
         <div className="media-actions">
           <label className="file-button">
             <Upload size={18} />
@@ -899,22 +938,37 @@ function WebClient() {
             {roomUsers.length === 0 ? (
               <p className="muted">No room list yet.</p>
             ) : (
-              roomUsers.map(user => (
+              roomUsers.map(user => {
+                const iceColor =
+                  user.iceState === 'connected' ? '#4ade80' :
+                  user.iceState === 'checking' ? '#facc15' :
+                  user.iceState === 'failed' || user.iceState === 'disconnected' ? '#ef4444' :
+                  '#9ca3af';
+                return (
                 <div className="user-row" key={user.username}>
                   {user.isController ? (
                     <Crown size={12} className="crown-icon" />
                   ) : (
                     <Circle size={10} className={user.isReady ? 'ready-dot' : 'idle-dot'} />
                   )}
+                  {user.isController ? null : (
+                    <span
+                      className="ice-dot"
+                      style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', backgroundColor: iceColor, flexShrink: 0 }}
+                      title={`ICE: ${user.iceState}`}
+                    />
+                  )}
                   <div>
                     <strong>
                       {user.username}
+                      {user.rtt > 0 ? <span className="rtt-badge"> ({user.rtt}ms)</span> : null}
                       {user.isController ? <Crown size={11} className="crown-inline" /> : null}
                     </strong>
                     <span>{user.file?.name ?? 'No media announced'}</span>
                   </div>
                 </div>
-              ))
+                );
+              })
             )}
           </div>
         </section>

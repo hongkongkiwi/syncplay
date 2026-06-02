@@ -77,6 +77,8 @@ export interface RoomStateSnapshot {
   controllers: string[];
   readyStates: Record<string, boolean>;
   peers: PeerState[];
+  avatars: Record<string, { presetId: string; customUrl: string; accent: string }>;
+  statuses: Record<string, { statusText: string; timestamp: number }>;
 }
 
 export type ConnectionState = 'offline' | 'connecting' | 'handshaking' | 'connecting_peers' | 'ready' | 'reconnecting' | 'error';
@@ -142,6 +144,8 @@ export class P2PStateManager {
   private latencyMap = new Map<string, number>();
   private voiceMutes = new Map<string, boolean>();
   private incomingTransfers = new Map<string, IncomingTransfer>();
+  private avatarMap = new Map<string, { presetId: string; customUrl: string; accent: string }>();
+  private statusMap = new Map<string, { statusText: string; timestamp: number }>();
   private eventHandlers: EventHandler[] = [];
   private syncIntervalId: ReturnType<typeof setInterval> | null = null;
   private pingIntervalId: ReturnType<typeof setInterval> | null = null;
@@ -231,6 +235,8 @@ export class P2PStateManager {
       controllers: [...this.room.controllers],
       readyStates: Object.fromEntries(this.room.readyStates),
       peers: [...this.room.peers.values()].map(p => ({ ...p })),
+      avatars: Object.fromEntries(this.avatarMap),
+      statuses: Object.fromEntries(this.statusMap),
     };
   }
 
@@ -578,6 +584,20 @@ export class P2PStateManager {
     return username === this.username || this.room.controllers.has(username);
   }
 
+  // ── Avatar & Status ─────────────────────────────────────────────
+
+  setAvatar(presetId: string, customUrl: string, accent: string): void {
+    if (!this._transport || !this._connected) return;
+    this.avatarMap.set(this.username, { presetId, customUrl, accent });
+    this._transport.send(MessageType.AvatarSet, { username: this.username, preset_id: presetId, custom_url: customUrl, accent });
+  }
+
+  setStatus(statusText: string): void {
+    if (!this._transport || !this._connected) return;
+    this.statusMap.set(this.username, { statusText, timestamp: Date.now() });
+    this._transport.send(MessageType.StatusUpdate, { username: this.username, status_text: statusText, timestamp: Date.now() });
+  }
+
   // ── Voice ────────────────────────────────────────────────────────
 
   sendVoiceMute(muted: boolean): void {
@@ -645,6 +665,14 @@ export class P2PStateManager {
         peer_id: c, action: ControllerAction.Add,
       });
     }
+    // Send avatars
+    for (const [username, avatar] of this.avatarMap) {
+      this._transport.send(MessageType.AvatarSet, { username, preset_id: avatar.presetId, custom_url: avatar.customUrl, accent: avatar.accent });
+    }
+    // Send statuses
+    for (const [username, status] of this.statusMap) {
+      this._transport.send(MessageType.StatusUpdate, { username, status_text: status.statusText, timestamp: status.timestamp });
+    }
     // Send subtitle info if host has loaded subtitles
     if (this._subtitleTracks.length > 0) {
       this._transport.send(MessageType.SubtitleInfo, {
@@ -675,6 +703,8 @@ export class P2PStateManager {
       case MessageType.VoiceMute: return this.handleVoiceMute(payload as VoiceMutePayload, from);
       case MessageType.SubtitleInfo: return this.handleSubtitleInfo(payload as SubtitleInfoPayload);
       case MessageType.ControllerChange: return this.handleControllerChange(payload as ControllerChangePayload);
+      case MessageType.AvatarSet: return this.handleAvatarSet(payload as any);
+      case MessageType.StatusUpdate: return this.handleStatusUpdate(payload as any);
       case MessageType.VoiceFrame: return this.handleVoiceFrame(payload as any, from);
       case MessageType.FileRequest: break; // handled by file transfer module
     }
@@ -1302,6 +1332,14 @@ export class P2PStateManager {
       const peer = this.room.peers.get(p.peer_id);
       if (peer) peer.isController = false;
     }
+  }
+
+  private handleAvatarSet(p: { username: string; preset_id: string; custom_url: string; accent: string }): void {
+    this.avatarMap.set(p.username, { presetId: p.preset_id, customUrl: p.custom_url, accent: p.accent });
+  }
+
+  private handleStatusUpdate(p: { username: string; status_text: string; timestamp: number }): void {
+    this.statusMap.set(p.username, { statusText: p.status_text, timestamp: p.timestamp });
   }
 
   // ── Helpers ──────────────────────────────────────────────────────

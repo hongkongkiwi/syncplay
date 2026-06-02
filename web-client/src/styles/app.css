@@ -932,3 +932,78 @@ html.light-mode .controller-info {
 html.light-mode .brand-row {
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
 }
+
+/* ── Transfer progress ────────────────────────────────────────── */
+
+.transfer-progress-section {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0 0.85rem 0.6rem;
+}
+
+.transfer-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+}
+
+.transfer-name {
+  color: #bcb8ad;
+  font-size: 0.72rem;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transfer-bar-track {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  height: 6px;
+  overflow: hidden;
+}
+
+.transfer-bar-fill {
+  background: #d8ff62;
+  border-radius: 4px;
+  height: 100%;
+  transition: width 0.3s ease;
+}
+
+.transfer-pct {
+  color: #d8ff62;
+  font-size: 0.72rem;
+  font-weight: 750;
+  min-width: 2.5rem;
+  text-align: right;
+}
+
+/* ── RTT badge and ICE dot ────────────────────────────────────── */
+
+.rtt-badge {
+  color: #8fe5d0;
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
+.ice-dot {
+  align-self: center;
+}
+
+html.light-mode .transfer-bar-track {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+html.light-mode .transfer-bar-fill {
+  background: #1e7a5e;
+}
+
+html.light-mode .transfer-pct {
+  color: #1e7a5e;
+}
+
+html.light-mode .rtt-badge {
+  color: #1e7a5e;
+}

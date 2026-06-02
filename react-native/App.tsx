@@ -326,6 +326,9 @@ export default function App() {
   // Chat messages
   const [messages, setMessages] = useState<ChatMessage[]>([]);
 
+  // Transfer progress
+  const [transferProgress, setTransferProgress] = useState<Array<{transferId:string, filename:string, progress:number, sentBytes:number, totalSize:number}>>([]);
+
   // Form & local UI
   const [form, setForm] = useState(defaultForm);
   const [chatDraft, setChatDraft] = useState('');
@@ -467,6 +470,18 @@ export default function App() {
       }
       case 'host-change': {
         refreshPeers(conn);
+        break;
+      }
+      case 'transfer-progress': {
+        const p = event.data as {transferId:string, filename:string, progress:number, sentBytes:number, totalSize:number};
+        setTransferProgress(prev => {
+          const existing = prev.find(t => t.transferId === p.transferId);
+          if (existing) return prev.map(t => t.transferId === p.transferId ? p : t);
+          return [...prev, p];
+        });
+        if (p.progress >= 1) {
+          setTimeout(() => setTransferProgress(prev => prev.filter(t => t.transferId !== p.transferId)), 3000);
+        }
         break;
       }
       case 'error': {
@@ -1366,23 +1381,46 @@ export default function App() {
           <Text style={styles.panelTitle}>{form.room}</Text>
           <Text style={styles.countText}>{roomPeers.length}</Text>
         </View>
+        {transferProgress.length > 0 ? (
+          <View style={styles.transferSection}>
+            {transferProgress.map(t => (
+              <View key={t.transferId} style={styles.transferItem}>
+                <Text style={styles.transferName} numberOfLines={1}>{t.filename}</Text>
+                <View style={styles.transferBarTrack}>
+                  <View style={[styles.transferBarFill, { width: `${Math.round(t.progress * 100)}%` }]} />
+                </View>
+                <Text style={styles.transferPct}>{Math.round(t.progress * 100)}%</Text>
+              </View>
+            ))}
+          </View>
+        ) : null}
         <FlatList
           data={roomPeers}
           keyExtractor={item => item.username}
           scrollEnabled={false}
           ListEmptyComponent={<Text style={styles.mutedText}>No peers connected.</Text>}
-          renderItem={({ item }) => (
+          renderItem={({ item }) => {
+            const iceColor =
+              item.iceState === 'connected' ? '#4ade80' :
+              item.iceState === 'checking' ? '#facc15' :
+              item.iceState === 'failed' || item.iceState === 'disconnected' ? '#ef4444' :
+              '#9ca3af';
+            return (
             <View style={styles.userRow}>
               <View style={styles.userAvatar}>
                 <Text style={styles.userInitial}>{item.username.slice(0, 1).toUpperCase()}</Text>
               </View>
               <View style={styles.userMain}>
-                <Text style={styles.userName}>
-                  {item.username}
-                  {item.username === form.username ? ' (you)' : ''}
-                  {item.isHost ? ' · host' : ''}
-                  {item.isController ? ' · controller' : ''}
-                </Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <View style={[styles.iceDot, { backgroundColor: iceColor }]} />
+                  <Text style={styles.userName}>
+                    {item.username}
+                    {item.username === form.username ? ' (you)' : ''}
+                    {item.isHost ? ' · host' : ''}
+                    {item.isController ? ' · controller' : ''}
+                    {item.rtt > 0 ? ` (${item.rtt}ms)` : ''}
+                  </Text>
+                </View>
                 <Text style={styles.smallText} numberOfLines={1}>
                   {item.file?.name ?? 'No file'} {item.file ? `· ${formatBytes(item.file.size)}` : ''}
                 </Text>
@@ -1402,7 +1440,8 @@ export default function App() {
                 </Pressable>
               ) : null}
             </View>
-          )}
+            );
+          }}
         />
         <View style={styles.divider} />
         <View style={styles.panelTitleRow}>
@@ -2116,5 +2155,46 @@ const styles = StyleSheet.create({
     color: colors.ink,
     fontSize: 16,
     fontWeight: '800',
+  },
+  // Transfer progress
+  transferSection: {
+    gap: 6,
+    paddingVertical: 4,
+  },
+  transferItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  transferName: {
+    color: colors.muted,
+    fontSize: 11,
+    fontWeight: '700',
+    width: 80,
+  },
+  transferBarTrack: {
+    flex: 1,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.panelSoft,
+    overflow: 'hidden',
+  },
+  transferBarFill: {
+    height: '100%',
+    borderRadius: 3,
+    backgroundColor: colors.accent,
+  },
+  transferPct: {
+    color: colors.accent,
+    fontSize: 11,
+    fontWeight: '800',
+    width: 36,
+    textAlign: 'right',
+  },
+  // ICE dot
+  iceDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
   },
 });
