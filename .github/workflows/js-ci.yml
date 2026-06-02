@@ -21,6 +21,27 @@ on:
       - '.github/workflows/js-ci.yml'
 
 jobs:
+  shared-lib-test:
+    name: Shared Library — Vitest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Run Vitest (unit + integration)
+        run: cd packages/p2p-client && npx vitest run
+
   web-typecheck:
     name: Web Client — Type Check
     runs-on: ubuntu-latest
@@ -52,8 +73,24 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install dependencies (RN — independent node_modules)
+      - name: "Install dependencies (RN — independent node_modules with file dep)"
         run: cd react-native && npm install
 
       - name: Run Jest
         run: cd react-native && npx jest
+
+  rn-typecheck:
+    name: React Native — Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: cd react-native && npm install
+
+      - name: Type check (react-native)
+        run: cd react-native && npx tsc --noEmit
