@@ -1211,6 +1211,69 @@ describe('E2E Mesh', () => {
 // ── 11. destroy ────────────────────────────────────────────────
 
 describe('destroy', () => {
+  it('doSeek flag propagates from host to peer via playstate event', () => {
+    const hostManager = new P2PStateManager('hostuser');
+    const peerManager = new P2PStateManager('peeruser');
+
+    const hostTransport: P2PTransport = {
+      send(msgType: MessageType, payload: unknown) {
+        peerManager.dispatch(msgType, payload, 'hostuser');
+      },
+    };
+    const peerTransport: P2PTransport = {
+      send(msgType: MessageType, payload: unknown) {
+        hostManager.dispatch(msgType, payload, 'peeruser');
+      },
+    };
+
+    forceState(hostManager, 'connecting_peers');
+    hostManager.onConnected('hostuser', 'hostuser', hostTransport);
+    forceState(peerManager, 'connecting_peers');
+    peerManager.onConnected('peeruser', 'hostuser', peerTransport);
+
+    // Register peers
+    hostManager.dispatch(MessageType.Hello, {
+      username: 'peeruser', version: '2.0.0', room: 'test', features: ['chat'],
+    }, 'peeruser');
+    peerManager.dispatch(MessageType.Hello, {
+      username: 'hostuser', version: '2.0.0', room: 'test', features: ['chat'],
+    }, 'hostuser');
+
+    // Host sends playstate with doSeek=true via transport (simulates data channel)
+    const peerEvents: SyncEvent[] = [];
+    peerManager.onSyncEvent((e) => peerEvents.push(e));
+
+    const playstateMsg = {
+      position: 300,
+      paused: false,
+      doSeek: true,
+      setBy: 'hostuser',
+      seq: 1,
+      timestamp: Date.now(),
+      speed: 1.0,
+    };
+    hostTransport.send(MessageType.Playstate, playstateMsg);
+
+    const peerSnap = peerManager.getSnapshot();
+    expect(peerSnap.doSeek).toBe(true);
+    expect(peerSnap.position).toBeGreaterThanOrEqual(300);
+
+    // Second: doSeek=false (timeupdate pulse)
+    const playstateMsg2 = {
+      position: 305,
+      paused: false,
+      doSeek: false,
+      setBy: 'hostuser',
+      seq: 2,
+      timestamp: Date.now(),
+      speed: 1.0,
+    };
+    hostTransport.send(MessageType.Playstate, playstateMsg2);
+
+    const peerSnap2 = peerManager.getSnapshot();
+    expect(peerSnap2.doSeek).toBe(false);
+  });
+
   it('destroy stops loops and clears handlers', () => {
     const manager = new P2PStateManager('testuser');
     const { transport } = mockTransport();

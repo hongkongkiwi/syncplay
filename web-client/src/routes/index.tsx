@@ -70,6 +70,7 @@ type RemotePlaystate = {
   paused: boolean;
   setBy: string;
   speed: number;
+  doSeek: boolean;
 };
 
 // ── Constants ──────────────────────────────────────────────────────────
@@ -145,6 +146,7 @@ function WebClient() {
     paused: true,
     setBy: '',
     speed: 1,
+    doSeek: false,
   });
 
   // Room users
@@ -268,6 +270,7 @@ function WebClient() {
           paused: data?.paused ?? true,
           setBy: data?.setBy ?? '',
           speed: data?.speed ?? 1,
+          doSeek: data?.doSeek ?? false,
         });
         break;
       }
@@ -402,11 +405,15 @@ function WebClient() {
       remotePosition: playstate.position,
       remotePaused: playstate.paused,
       localPlaying: !video.paused,
-      doSeek: (playstate as any).doSeek === true,
+      doSeek: playstate.doSeek,
     });
 
     isApplyingRemoteRef.current = true;
     video.playbackRate = correction.rate;
+    // Apply host speed when not in correction mode
+    if (correction.rate === 1 && playstate.speed !== 1) {
+      video.playbackRate = playstate.speed;
+    }
     if (typeof correction.seekTo === 'number') {
       video.currentTime = correction.seekTo;
     }

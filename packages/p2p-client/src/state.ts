@@ -72,6 +72,7 @@ export interface RoomStateSnapshot {
   setBy: string;
   seq: number;
   speed: number;
+  doSeek: boolean;
   playlist: FileEntry[];
   playlistIndex: number;
   controllers: string[];
@@ -230,6 +231,7 @@ export class P2PStateManager {
       setBy: this.room.setBy,
       seq: this.room.seq,
       speed: this.room.speed,
+      doSeek: (this.room as any)._lastDoSeek ?? false,
       playlist: [...this.room.playlist],
       playlistIndex: this.room.playlistIndex,
       controllers: [...this.room.controllers],
@@ -733,6 +735,8 @@ export class P2PStateManager {
     this.room.setBy = p.setBy;
     this.room.seq = p.seq;
     this.room.speed = speed;
+    // Store doSeek flag so it survives through getSnapshot() to the UI sync correction
+    (this.room as any)._lastDoSeek = p.doSeek;
     this.emit({ type: 'playstate', data: this.getSnapshot(), timestamp: Date.now() });
   }
 
