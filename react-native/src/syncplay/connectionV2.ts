@@ -351,6 +351,7 @@ export interface RoomStateSnapshot {
   setBy: string;
   seq: number;
   speed: number;
+  doSeek: boolean;
   playlist: FileEntry[];
   playlistIndex: number;
   controllers: string[];   // serialisable: username[]
@@ -480,6 +481,7 @@ export class P2PStateManager {
       setBy: this._room.setBy,
       seq: this._room.seq,
       speed: this._room.speed,
+      doSeek: (this._room as any)._lastDoSeek ?? false,
       playlist: [...this._room.playlist],
       playlistIndex: this._room.playlistIndex,
       controllers: [...this._room.controllers],
@@ -649,12 +651,13 @@ export class P2PStateManager {
 
   // ── Playback control ──────────────────────────────────────────────────────
 
-  updatePlaystate(position: number, paused: boolean): void {
+  updatePlaystate(position: number, paused: boolean, speed?: number): void {
     if (!this._connected) return;
     if (!this.isHost) {
       this.requestSeek(position);
       return;
     }
+    if (speed !== undefined) this._room.speed = speed;
     this._room.position = position;
     this._room.paused = paused;
     this._room.setBy = this.username;
@@ -720,6 +723,23 @@ export class P2PStateManager {
     }
     const combined = [...this._room.playlist, ...entries].slice(0, MAX_PLAYLIST);
     this._room.playlist = combined;
+    this.broadcastPlaylist();
+  }
+
+  /** Replace entire playlist (not append) */
+  setPlaylist(files: string[]): void {
+    if (!this._connected) return;
+    const entries: FileEntry[] = files.filter(f => f).map(f => ({ name: f, duration: 0 }));
+    if (!this.isHost && this._transport) {
+      this._transport.send(MessageType.PlaylistRequest, {
+        action: PlaylistAction.SetPlaylist,
+        files: entries,
+        index: 0,
+      } as PlaylistRequestPayload);
+      return;
+    }
+    this._room.playlist = entries.slice(0, MAX_PLAYLIST);
+    this._room.playlistIndex = 0;
     this.broadcastPlaylist();
   }
 
@@ -914,6 +934,8 @@ export class P2PStateManager {
     this._room.setBy = p.setBy;
     this._room.seq = p.seq;
     this._room.speed = speed;
+    // Store doSeek flag so it survives through getSnapshot() to the UI sync correction
+    (this._room as any)._lastDoSeek = p.doSeek;
     this.emit({ type: 'playstate', data: this.getSnapshot(), timestamp: Date.now() });
   }
 
@@ -1793,13 +1815,12 @@ export class P2PConnection implements P2PTransport {
   sendPlaystate(position: number, paused: boolean, doSeek: boolean, speed = 1.0): void {
     if (!this.stateManager.isConnected) return;
     if (!this.dc || this.dc.readyState !== 'open') return;
+    // doSeek: when true, signals other peers to seek to this position (seeked event).
+    // When false, this is a timeupdate-driven sync pulse (gradual correction).
     if (doSeek) {
-      this.stateManager.updatePlaystate(position, paused);
+      this.stateManager.requestSeek(position);
     } else {
-      // Direct send for non-seek updates (e.g. local position sync)
-      this.send(MessageType.Playstate, playstatePayload(
-        position, paused, false, this.username, 0, speed,
-      ));
+      this.stateManager.updatePlaystate(position, paused, speed);
     }
   }
 

@@ -317,8 +317,8 @@ export default function App() {
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
   // Room state (synced from P2P)
-  const [playstate, setPlaystate] = useState<{ position: number; paused: boolean; setBy: string; speed: number }>({
-    position: 0, paused: true, setBy: '', speed: 1.0,
+  const [playstate, setPlaystate] = useState<{ position: number; paused: boolean; setBy: string; speed: number; doSeek: boolean }>({
+    position: 0, paused: true, setBy: '', speed: 1.0, doSeek: false,
   });
   const [playlist, setPlaylist] = useState<{ files: string[]; index: number }>({ files: [], index: 0 });
   const [roomPeers, setRoomPeers] = useState<PeerState[]>([]);
@@ -446,6 +446,7 @@ export default function App() {
           paused: snapshot.paused,
           setBy: snapshot.setBy,
           speed: snapshot.speed,
+          doSeek: snapshot.doSeek,
         });
         setPlaylist({
           files: snapshot.playlist.map(f => f.name),
@@ -611,7 +612,7 @@ export default function App() {
       remotePosition: playstate.position,
       remotePaused: playstate.paused,
       localPlaying: player.playing,
-      doSeek: playstate.setBy !== '' && playstate.setBy !== form.username,
+      doSeek: playstate.doSeek,
       timeOffset,
     });
 
@@ -751,6 +752,7 @@ export default function App() {
           paused: snap.paused,
           setBy: snap.setBy,
           speed: snap.speed,
+          doSeek: snap.doSeek,
         });
         setPlaylist({
           files: snap.playlist.map(f => f.name),
@@ -1131,7 +1133,7 @@ export default function App() {
 
   function sendPlaylist(files: string[]) {
     const deduped = Array.from(new Set(files.map(file => file.trim()).filter(Boolean)));
-    connection.stateManager.addToPlaylist(deduped);
+    connection.stateManager.setPlaylist(deduped);
     // Optimistically update local playlist state
     setPlaylist(prev => ({ ...prev, files: deduped }));
   }
