@@ -737,7 +737,7 @@ function WebClient() {
                 title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
                 aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
               >
-                {darkMode ? <Sun size={16} /> : <Moon size={16} />}
+                {darkMode ? <Moon size={16} /> : <Sun size={16} />}
               </button>
               <StatusPill status={connectionStatus} />
             </div>
@@ -829,7 +829,7 @@ function WebClient() {
             className={syncPaused ? 'active' : ''}
           >
             {syncPaused ? <Pause size={18} /> : <Play size={18} />}
-            {syncPaused ? 'Sync paused' : 'Sync active'}
+            {syncPaused ? 'Syncing paused' : 'Syncing'}
           </button>
           <span className="speed-display" title="Current playback speed">
             {playbackSpeed}x
@@ -862,8 +862,8 @@ function WebClient() {
           </div>
           <div className="field-grid">
             <label>
-              Signaling Server
-              <input value={form.host} onChange={event => updateForm('host', event.target.value)} />
+              Server
+              <input value={form.host} onChange={event => updateForm('host', event.target.value)} title="WebSocket signaling server address (e.g. myserver.com or 192.168.1.5)" />
             </label>
             <label>
               Name
@@ -904,7 +904,7 @@ function WebClient() {
               checked={form.sfu}
               onChange={event => updateForm('sfu', event.target.checked)}
             />
-            <span>SFU Mode (server-relayed)</span>
+            <span title="Server Forwarding Unit — routes all traffic through the server. Use for large rooms (5+ peers).">SFU Mode (large rooms)</span>
           </label>
           <div className="button-row">
             <button type="submit" disabled={connecting}>
