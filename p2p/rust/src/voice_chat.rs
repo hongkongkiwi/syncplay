@@ -46,6 +46,118 @@ pub enum VoiceEvent {
     Error(String),
 }
 
+/// Minimum RMS energy for voice activity detection (48kHz f32 samples).
+/// Audio below this threshold is treated as silence and not sent to peers.
+const VAD_ENERGY_THRESHOLD: f32 = 0.005;
+
+/// Per-peer RTP packet reordering buffer for jitter compensation.
+/// Holds up to `max_packets` pending packets, emitting them in sequence-number
+/// order once enough have arrived. Handles u16 sequence number wrap.
+#[derive(Clone)]
+struct AudioJitterBuffer {
+    /// Queued packets sorted by sequence number: (seq_num, payload)
+    packets: Arc<Mutex<VecDeque<(u16, Vec<u8>)>>>,
+    /// Next expected sequence number
+    next_seq: Arc<Mutex<Option<u16>>>,
+    /// Target number of packets to queue before emitting (2 = ~40ms latency)
+    target_depth: usize,
+    max_packets: usize,
+}
+
+impl AudioJitterBuffer {
+    fn new(target_depth: usize, max_packets: usize) -> Self {
+        Self {
+            packets: Arc::new(Mutex::new(VecDeque::new())),
+            next_seq: Arc::new(Mutex::new(None)),
+            target_depth,
+            max_packets,
+        }
+    }
+
+    /// Insert a packet. If seq is in the past (behind next_seq by < 128),
+    /// it's dropped as a late duplicate. Otherwise inserted in order.
+    fn insert(&self, seq: u16, payload: Vec<u8>) {
+        let mut packets = self.packets.lock();
+        let next = *self.next_seq.lock();
+
+        // Drop packets that are too old (>128 seq numbers behind)
+        if let Some(expected) = next {
+            let diff = seq.wrapping_sub(expected);
+            if diff > 32768 && expected.wrapping_sub(seq) < 128 {
+                return; // stale duplicate
+            }
+        }
+
+        // Insert sorted by sequence number (handling u16 wrap)
+        let pos = packets
+            .binary_search_by(|(s, _)| {
+                let a = s.wrapping_sub(seq);
+                if a == 0 {
+                    std::cmp::Ordering::Equal
+                } else if a < 32768 {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Greater
+                }
+            })
+            .unwrap_or_else(|e| e);
+        packets.insert(pos, (seq, payload));
+
+        // Evict oldest if over capacity
+        while packets.len() > self.max_packets {
+            packets.pop_front();
+            let mut ns = self.next_seq.lock();
+            if let Some(ref mut expected) = *ns {
+                *expected = expected.wrapping_add(1);
+            }
+        }
+    }
+
+    /// Pop the next in-order packet if available. Returns None if the
+    /// buffer hasn't reached target depth OR the next expected packet
+    /// is not yet present.
+    fn pop_ready(&self) -> Option<Vec<u8>> {
+        let mut packets = self.packets.lock();
+        let mut next = self.next_seq.lock();
+
+        if packets.is_empty() {
+            return None;
+        }
+
+        // Only emit when we have target_depth packets buffered
+        // (unless buffer is at max capacity, then force emit)
+        if packets.len() < self.target_depth && packets.len() < self.max_packets {
+            return None;
+        }
+
+        let expected = next.unwrap_or_else(|| {
+            // First packet: set expected to the front seq
+            packets[0].0
+        });
+
+        let front_seq = packets[0].0;
+        if front_seq == expected {
+            let (_, payload) = packets.pop_front().unwrap();
+            *next = Some(expected.wrapping_add(1));
+            Some(payload)
+        } else {
+            // Gap detected — skip ahead to the front packet
+            let gap = front_seq.wrapping_sub(expected);
+            if gap < 128 {
+                // Small gap: skip missing packets, fast-forward
+                *next = Some(front_seq);
+                let (_, payload) = packets.pop_front().unwrap();
+                *next = Some(front_seq.wrapping_add(1));
+                Some(payload)
+            } else {
+                // Large gap (probably wrap): reset
+                *next = Some(front_seq);
+                None
+            }
+        }
+    }
+}
+
 /// Per-peer PCM ring buffers shared between decode tasks (producers)
 /// and the cpal output callback (consumer). Each peer gets its own buffer;
 /// the output callback mixes by popping one sample from each non-empty
@@ -290,8 +402,22 @@ impl VoiceChat {
         self.local_track.clone()
     }
 
+    /// Calculate RMS (root mean square) energy of an f32 audio buffer.
+    /// Used for voice activity detection — skip sending silence.
+    fn rms_energy(data: &[f32]) -> f32 {
+        if data.is_empty() {
+            return 0.0;
+        }
+        let sum_sq: f32 = data.iter().map(|s| s * s).sum();
+        (sum_sq / data.len() as f32).sqrt()
+    }
+
     /// Start mic capture, returns event stream. Uses cpal for cross-platform audio.
     /// Only call once; subsequent calls return an error.
+    ///
+    /// Voice Activity Detection (VAD): audio frames with RMS energy below
+    /// `VAD_ENERGY_THRESHOLD` are silently dropped to avoid wasting bandwidth
+    /// on silence. Opus DTX handles the gaps gracefully.
     pub fn start_capture(&mut self) -> Result<mpsc::Receiver<VoiceEvent>> {
         if self._capture_handle.lock().is_some() {
             return Err(anyhow::anyhow!("Voice capture already started"));
@@ -322,13 +448,25 @@ impl VoiceChat {
                 if muted.load(Ordering::SeqCst) {
                     return;
                 }
+                let num_samples = data.len();
+                if num_samples == 0 {
+                    return;
+                }
+
+                // VAD: skip silence to save bandwidth
+                if VoiceChat::rms_energy(data) < VAD_ENERGY_THRESHOLD {
+                    return;
+                }
+
                 let pcm: Vec<i16> = data
                     .iter()
                     .map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
                     .collect();
+                // Calculate duration from actual sample count at 48kHz
+                let duration_ms = (num_samples as f64 / 48.0) as u64;
                 let sample = webrtc::media::Sample {
                     data: bytes::Bytes::from(bytemuck::cast_slice(&pcm).to_vec()),
-                    duration: std::time::Duration::from_millis(20),
+                    duration: std::time::Duration::from_millis(duration_ms.max(1)),
                     ..Default::default()
                 };
                 #[allow(clippy::let_underscore_future)]
@@ -347,12 +485,13 @@ impl VoiceChat {
 
         stream.play()?;
         *self._capture_handle.lock() = Some(stream);
-        info!("Voice capture active (48kHz mono)");
+        info!("Voice capture active (48kHz mono, VAD threshold={VAD_ENERGY_THRESHOLD})");
         Ok(rx)
     }
 
     /// Handle a remote audio track from a peer.
-    /// Decodes incoming Opus RTP packets and pushes PCM to the shared output mixer.
+    /// Uses a jitter buffer (AudioJitterBuffer) to reorder out-of-order RTP
+    /// packets before decoding. Decoded PCM is pushed to the shared output mixer.
     pub fn handle_remote_track(&self, peer_id: &str, track: Arc<TrackRemote>) {
         let pid = peer_id.to_string();
         info!("Voice track received from {pid} — starting decode + playback");
@@ -397,7 +536,11 @@ impl VoiceChat {
             .lock()
             .insert(pid.clone(), peer_buf_idx);
 
-        // Spawn a task to read RTP, decode Opus → PCM, and push to the per-peer buffer.
+        // Jitter buffer: target 2 packets (~40ms) latency, max 16 queued (~320ms)
+        let jitter = AudioJitterBuffer::new(2, 16);
+
+        // Spawn a task to read RTP, reorder via jitter buffer, decode Opus → PCM,
+        // and push to the per-peer buffer.
         // We only capture the VoiceBuffer (Send + Sync), not the cpal stream.
         tokio::spawn(async move {
             let mut decoder = match opus::Decoder::new(48000, opus::Channels::Mono) {
@@ -420,34 +563,43 @@ impl VoiceChat {
                     }
                 };
 
-                // Update speaking indicator
-                {
-                    let mut v = voices.lock();
-                    if let Some(pv) = v.get_mut(&pid2) {
-                        pv.speaking = true;
-                    }
-                }
-                if let Some(tx) = ev_tx.lock().as_ref() {
-                    if let Err(e) = tx.try_send(VoiceEvent::PeerSpeaking {
-                        peer_id: pid2.clone(),
-                        speaking: true,
-                    }) {
-                        warn!("Failed to send PeerSpeaking event for {pid2}: {e}");
-                    }
-                }
+                // Feed into jitter buffer for reordering
+                jitter.insert(
+                    rtp_packet.header.sequence_number,
+                    rtp_packet.payload.to_vec(),
+                );
 
-                // Decode Opus → PCM. FEC enabled for packet loss resilience.
-                match decoder.decode(&rtp_packet.payload, &mut pcm_buf, true) {
-                    Ok(n_samples) => {
-                        if n_samples > 0 {
-                            buf.push_samples(peer_buf_idx, &pcm_buf[..n_samples]);
+                // Drain all ready packets from jitter buffer
+                while let Some(payload) = jitter.pop_ready() {
+                    // Update speaking indicator
+                    {
+                        let mut v = voices.lock();
+                        if let Some(pv) = v.get_mut(&pid2) {
+                            pv.speaking = true;
                         }
                     }
-                    Err(ref e) if e.code() == opus::ErrorCode::BufferTooSmall => {
-                        warn!("Opus decode buffer too small for {pid2} — frame dropped");
+                    if let Some(tx) = ev_tx.lock().as_ref() {
+                        if let Err(e) = tx.try_send(VoiceEvent::PeerSpeaking {
+                            peer_id: pid2.clone(),
+                            speaking: true,
+                        }) {
+                            warn!("Failed to send PeerSpeaking event for {pid2}: {e}");
+                        }
                     }
-                    Err(e) => {
-                        warn!("Opus decode error from {pid2}: {e} — frame dropped");
+
+                    // Decode Opus → PCM. FEC enabled for packet loss resilience.
+                    match decoder.decode(&payload, &mut pcm_buf, true) {
+                        Ok(n_samples) => {
+                            if n_samples > 0 {
+                                buf.push_samples(peer_buf_idx, &pcm_buf[..n_samples]);
+                            }
+                        }
+                        Err(ref e) if e.code() == opus::ErrorCode::BufferTooSmall => {
+                            warn!("Opus decode buffer too small for {pid2} — frame dropped");
+                        }
+                        Err(e) => {
+                            warn!("Opus decode error from {pid2}: {e} — frame dropped");
+                        }
                     }
                 }
             }
@@ -484,8 +636,8 @@ pub fn opus_codec_capability() -> RTCRtpCodecCapability {
     RTCRtpCodecCapability {
         mime_type: MIME_TYPE_OPUS.to_string(),
         clock_rate: 48000,
-        channels: 2,
-        sdp_fmtp_line: "minptime=10;useinbandfec=1".to_string(),
+        channels: 1,
+        sdp_fmtp_line: "minptime=10;useinbandfec=1;stereo=0;sprop-stereo=0".to_string(),
         rtcp_feedback: vec![],
     }
 }

@@ -1,22 +1,27 @@
 // VoiceChat — P2P voice communication for Syncplay React Native
 // Implemented using expo-av Audio.Recording + Audio.Sound
 //
-// Recording: polls Audio.Recording every 500ms for duration,
-// every 2 seconds stops, reads base64, sends via P2PStateManager,
-// and starts a new recording.
+// Recording: uses Audio.Recording with explicit quality settings.
+// Polls getStatusAsync every 500ms; every 1s segment is drained and sent.
 //
-// Playback: each incoming VoiceFrame is written to a temp file
-// and played via Audio.Sound.
+// Playback: each peer gets a dedicated Audio.Sound instance for mixing.
+// Incoming VoiceFrames are written to temp files and played via Audio.Sound.
 
 import { Audio } from 'expo-av';
 import { File, Paths } from 'expo-file-system';
 import type { P2PStateManager } from 'syncplay-p2p-client';
 
+// ── Types ────────────────────────────────────────────────────────────────────
+
+interface PeerPlayback {
+  sound: Audio.Sound | null;
+  seq: number; // last sequence number received (for ordering)
+}
+
 // ── VoiceChat ────────────────────────────────────────────────────────────────
 
 export class VoiceChat {
   private recording: Audio.Recording | null = null;
-  private sound: Audio.Sound | null = null;
   private stateManager: P2PStateManager;
   private _muted = false;
   private _capturing = false;
@@ -25,8 +30,8 @@ export class VoiceChat {
   private _lastSendTime = 0;
   private _seq = 0;
 
-  // Playback state
-  private _isPlaying = false;
+  // Per-peer playback state for mixing multiple remote streams
+  private _peers: Map<string, PeerPlayback> = new Map();
   private _playbackFileIdx = 0;
 
   constructor(stateManager: any) {
@@ -57,14 +62,14 @@ export class VoiceChat {
   }
 
   /**
-   * Start capturing microphone audio via expo-av polling.
+   * Start capturing microphone audio via expo-av.
    *
    * 1. Request permission
-   * 2. Set audio mode for recording
-   * 3. Create recording and prepare with HIGH quality
+   * 2. Configure audio mode for voice chat (Bluetooth, speaker, interruptions)
+   * 3. Create recording with explicit HIGH_QUALITY settings
    * 4. Start recording
-   * 5. Poll getStatusAsync() every 500ms for duration
-   * 6. Every 2 seconds: stop, get URI, read base64, send, restart
+   * 5. Poll getStatusAsync() every 500ms
+   * 6. Every 1s: drain segment, send via P2PStateManager, restart
    */
   async startCapture(): Promise<void> {
     if (this._capturing) return;
@@ -76,10 +81,14 @@ export class VoiceChat {
     }
 
     try {
-      // 2. Set audio mode for recording
+      // 2. Configure audio mode for voice chat
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
+        staysActiveInBackground: true,
+        interruptionModeIOS: 2, // InterruptionModeIOS.DuckOthers
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
       });
 
       this._capturing = true;
@@ -89,20 +98,19 @@ export class VoiceChat {
       // 3. Create + prepare + start recording
       await this._startNewRecording();
 
-      // 4. Poll getStatusAsync() every 500ms for duration;
-      //    every 2 seconds, drain and restart
+      // 4. Poll getStatusAsync() every 500ms.
+      //    Every 1 second: drain segment, send, restart.
       this._captureInterval = setInterval(async () => {
         if (!this._capturing) return;
 
         try {
-          // 5. Poll status for duration
           if (this.recording) {
             const status = await this.recording.getStatusAsync();
             const durationMs = status.durationMillis ?? 0;
             const elapsed = Date.now() - this._lastSendTime;
 
-            // 6. Every 2 seconds: stop, read base64, send, restart
-            if (elapsed >= 2000 && durationMs >= 500) {
+            // 1000ms segments for lower latency (was 2000ms)
+            if (elapsed >= 1000 && durationMs >= 500) {
               await this._drainAndRestartRecording();
             }
           }
@@ -114,7 +122,7 @@ export class VoiceChat {
         }
       }, 500);
 
-      console.log('[VoiceChat] Voice capture started (2s segments)');
+      console.log('[VoiceChat] Voice capture started (1s segments, 48kHz)');
     } catch (err) {
       console.error('[VoiceChat] Failed to start capture:', err);
       this._capturing = false;
@@ -140,25 +148,27 @@ export class VoiceChat {
 
   /**
    * Play audio from a file URI via expo-av Audio.Sound.
+   * Used internally by per-peer playback pipeline.
    */
-  async playAudioUrl(uri: string): Promise<void> {
+  async playAudioUrl(uri: string, peerId: string): Promise<void> {
     try {
-      // 1. Unload existing sound
-      if (this.sound) {
-        await this.sound.unloadAsync().catch((err) => {
-        console.warn('[VoiceChat] Failed to unload prior sound:', err);
-      });
-        this.sound = null;
+      // Unload existing sound for this peer (replaced by new segment)
+      const peer = this._peers.get(peerId);
+      if (peer?.sound) {
+        await peer.sound.unloadAsync().catch((err) => {
+          console.warn('[VoiceChat] Failed to unload prior sound for', peerId, ':', err);
+        });
+        peer.sound = null;
       }
 
-      // 2. Create new Audio.Sound and load from URI
+      // Create new Audio.Sound and load from URI
       const { sound } = await Audio.Sound.createAsync(
         { uri },
-        { shouldPlay: false },
+        { shouldPlay: false, volume: 1.0 },
       );
-      this.sound = sound;
+      this._peers.set(peerId, { sound, seq: this._seq });
 
-      // 3. Play
+      // Play the sound — multiple peers can play simultaneously
       await sound.playAsync();
 
       // Clean up after playback finishes
@@ -167,7 +177,10 @@ export class VoiceChat {
           sound.unloadAsync().catch((err) => {
             console.warn('[VoiceChat] Failed to unload finished sound:', err);
           });
-          this.sound = null;
+          const p = this._peers.get(peerId);
+          if (p?.sound === sound) {
+            p.sound = null;
+          }
         }
       });
     } catch (err) {
@@ -176,21 +189,20 @@ export class VoiceChat {
   }
 
   /**
-   * Play audio from a base64-encoded string.
+   * Play audio from a base64-encoded string for a specific peer.
    * Writes to temp file, then delegates to playAudioUrl.
    */
-  async playAudioBase64(base64: string): Promise<void> {
+  async playAudioBase64(base64: string, peerId: string): Promise<void> {
     try {
-      // Write to temp file using new expo-file-system API (SDK 56+)
       const fileIdx = this._playbackFileIdx++;
-      const fileName = 'syncplay_voice_play_' + fileIdx + '.audio';
+      const fileName = `syncplay_voice_${peerId}_${fileIdx}.audio`;
 
       const file = new File(Paths.cache, fileName);
       file.create({ overwrite: true });
       file.write(base64, { encoding: 'base64' });
 
-      // Play via URL
-      await this.playAudioUrl(file.uri);
+      // Play via URL with peer-specific mixing
+      await this.playAudioUrl(file.uri, peerId);
     } catch (err) {
       console.error('[VoiceChat] playAudioBase64 error:', err);
     }
@@ -201,7 +213,6 @@ export class VoiceChat {
    */
   toggleMute(): boolean {
     this._muted = !this._muted;
-    // Notify state manager of mute change
     if (this.stateManager?.sendVoiceMute) {
       this.stateManager.sendVoiceMute(this._muted);
     }
@@ -209,18 +220,23 @@ export class VoiceChat {
   }
 
   /**
-   * Clean up all resources: stop capture, unload sounds, clear timers.
+   * Clean up all resources: stop capture, unload all peer sounds, clear timers.
    */
   destroy(): void {
     this.stopCapture().catch((err) => {
       console.warn('[VoiceChat] Failed to stop capture during destroy:', err);
     });
-    if (this.sound) {
-      this.sound.unloadAsync().catch((err) => {
-        console.warn('[VoiceChat] Failed to unload sound during destroy:', err);
-      });
-      this.sound = null;
+
+    // Unload all peer playback instances
+    for (const [peerId, peer] of this._peers) {
+      if (peer.sound) {
+        peer.sound.unloadAsync().catch((err) => {
+          console.warn(`[VoiceChat] Failed to unload sound for ${peerId}:`, err);
+        });
+      }
     }
+    this._peers.clear();
+
     // Remove the voice frame handler
     if (this.stateManager) {
       this.stateManager.onVoiceFrame = null;
@@ -233,13 +249,15 @@ export class VoiceChat {
   /**
    * Handle an incoming VoiceFrame from a remote peer.
    * Converts Uint8Array to base64 and queues for playback.
+   *
+   * Uses a TextDecoder-safe approach to avoid call stack overflow
+   * from String.fromCharCode(...largeArray).
    */
   handleIncomingFrame(data: Uint8Array, from: string): void {
-    // Convert Uint8Array → base64
-    const binary = String.fromCharCode(...data);
-    const base64 = this._btoa(binary);
+    // Convert Uint8Array → base64 safely (no call stack overflow)
+    const base64 = this._uint8ToBase64(data);
 
-    this.playAudioBase64(base64).catch((err) => {
+    this.playAudioBase64(base64, from).catch((err) => {
       console.error('[VoiceChat] handleIncomingFrame playback error:', err);
     });
   }
@@ -289,7 +307,7 @@ export class VoiceChat {
         }
 
         // Clean up temp file
-        try { file.delete(); } catch {}
+        try { file.delete(); } catch { /* ignore */ }
       } catch (err) {
         console.error('[VoiceChat] Failed to read/send recording:', err);
       }
@@ -302,6 +320,20 @@ export class VoiceChat {
   }
 
   // ── Private: base64 helpers ────────────────────────────────────────────────
+
+  /**
+   * Convert Uint8Array to base64 without call stack overflow.
+   * Processes data in 16KB chunks using String.fromCharCode.
+   */
+  private _uint8ToBase64(data: Uint8Array): string {
+    const CHUNK_SIZE = 16384; // 16KB chunks to avoid call stack overflow
+    let binary = '';
+    for (let i = 0; i < data.length; i += CHUNK_SIZE) {
+      const chunk = data.subarray(i, Math.min(i + CHUNK_SIZE, data.length));
+      binary += String.fromCharCode(...chunk);
+    }
+    return this._btoa(binary);
+  }
 
   /** Decode base64 → binary string. */
   private _atob(input: string): string {

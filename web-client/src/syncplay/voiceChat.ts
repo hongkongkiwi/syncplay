@@ -1,7 +1,51 @@
 // VoiceChat — WebRTC-compatible voice using MediaRecorder (Opus) + AudioContext playback
 // Sends VoiceFrame messages through the P2PStateManager's transport layer.
+//
+// Recording: MediaRecorder with Opus codec, 48kHz mono (fallback to 16kHz).
+// Playback:  AudioContext with decodeAudioData for WebM Opus chunks.
+//            Multiple remote streams mix naturally via Web Audio API graph.
+//            Per-peer gain control for volume balancing.
 
-import { P2PStateManager, MessageType } from 'syncplay-p2p-client';
+import { P2PStateManager } from 'syncplay-p2p-client';
+
+// ── Audio Quality Configuration ──────────────────────────────────────────────
+
+interface VoiceConfig {
+  sampleRate: number;
+  channelCount: number;
+  timesliceMs: number;       // MediaRecorder timeslice interval
+  echoCancellation: boolean;
+  noiseSuppression: boolean;
+  autoGainControl: boolean;
+}
+
+// Prefer 48kHz for superior Opus quality; fall back to 16kHz if unavailable
+const VOICE_CONFIG_48K: VoiceConfig = {
+  sampleRate: 48000,
+  channelCount: 1,
+  timesliceMs: 40,
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+};
+
+const VOICE_CONFIG_16K: VoiceConfig = {
+  sampleRate: 16000,
+  channelCount: 1,
+  timesliceMs: 40,
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+};
+
+// ── Per-peer playback state ──────────────────────────────────────────────────
+
+interface PeerAudio {
+  gainNode: GainNode;
+  lastActivity: number;
+}
+
+// ── VoiceChat ────────────────────────────────────────────────────────────────
 
 export class VoiceChat {
   private stream: MediaStream | null = null;
@@ -11,14 +55,19 @@ export class VoiceChat {
   private _muted = false;
   private _active = false;
   private seq = 0;
+  private config: VoiceConfig;
+
+  // Per-peer gain nodes for volume control
+  private peers: Map<string, PeerAudio> = new Map();
 
   constructor(stateManager: P2PStateManager) {
     this.stateManager = stateManager;
+    this.config = VOICE_CONFIG_48K; // prefer 48kHz
 
     // Wire incoming voice frames from the state manager
     stateManager.onVoiceFrame = async (data: Uint8Array, from: string) => {
       if (from === stateManager.myUsername) return; // skip self
-      await this.playAudioChunk(data);
+      await this.playAudioChunk(data, from);
     };
   }
 
@@ -28,24 +77,45 @@ export class VoiceChat {
   async startCapture(): Promise<void> {
     if (this._active) return;
     try {
-      // 1. Get microphone
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          sampleRate: 16000,
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
-      });
+      // Try 48kHz first, fall back to 16kHz
+      let stream: MediaStream | null = null;
+      let effectiveConfig = this.config;
 
-      // 2. Create MediaRecorder with Opus codec
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: this.config.channelCount,
+            sampleRate: this.config.sampleRate,
+            echoCancellation: this.config.echoCancellation,
+            noiseSuppression: this.config.noiseSuppression,
+            autoGainControl: this.config.autoGainControl,
+          },
+        });
+      } catch {
+        console.warn('[VoiceChat] 48kHz not supported, falling back to 16kHz');
+        this.config = VOICE_CONFIG_16K;
+        effectiveConfig = this.config;
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: this.config.channelCount,
+            sampleRate: this.config.sampleRate,
+            echoCancellation: this.config.echoCancellation,
+            noiseSuppression: this.config.noiseSuppression,
+            autoGainControl: this.config.autoGainControl,
+          },
+        });
+      }
+
+      this.stream = stream;
+
+      // Create MediaRecorder with Opus codec
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : 'audio/webm';
 
       this.recorder = new MediaRecorder(this.stream, { mimeType });
 
-      // 3. Handle audio data — send via data channel
+      // Handle audio data — send via data channel
       this.recorder.ondataavailable = async (event: BlobEvent) => {
         if (!this._active || this._muted || event.data.size === 0) return;
         try {
@@ -57,17 +127,20 @@ export class VoiceChat {
         }
       };
 
-      // 4. Start recording with 40ms timeslices for low latency
-      this.recorder.start(40);
+      // Start recording with configurable timeslice for low latency
+      this.recorder.start(effectiveConfig.timesliceMs);
 
-      // 5. Create AudioContext for playback
+      // Create AudioContext for playback (match capture sample rate)
       if (!this.audioCtx) {
-        this.audioCtx = new AudioContext({ sampleRate: 16000 });
+        this.audioCtx = new AudioContext({ sampleRate: effectiveConfig.sampleRate });
       }
 
       this._active = true;
       this._muted = false;
-      console.log('[VoiceChat] Capture started (Opus, 16kHz mono, 40ms frames)');
+      console.log(
+        `[VoiceChat] Capture started (Opus, ${effectiveConfig.sampleRate / 1000}kHz mono, ` +
+        `${effectiveConfig.timesliceMs}ms frames, AGC+EC+NS)`
+      );
     } catch (e) {
       console.error('[VoiceChat] Failed to start capture:', e);
       throw e;
@@ -83,21 +156,72 @@ export class VoiceChat {
     console.log('[VoiceChat] Capture stopped');
   }
 
-  async playAudioChunk(data: Uint8Array): Promise<void> {
+  /**
+   * Play an incoming Opus WebM chunk for a specific peer.
+   * Uses Web Audio API for natural multi-stream mixing.
+   * Each peer gets its own GainNode for volume control.
+   */
+  async playAudioChunk(data: Uint8Array, peerId: string): Promise<void> {
     if (!this.audioCtx) {
-      this.audioCtx = new AudioContext({ sampleRate: 16000 });
+      this.audioCtx = new AudioContext({ sampleRate: this.config.sampleRate });
     }
+
+    // Ensure per-peer gain node exists
+    if (!this.peers.has(peerId)) {
+      const gainNode = this.audioCtx.createGain();
+      gainNode.gain.value = 1.0; // unity gain — adjust per peer as needed
+      gainNode.connect(this.audioCtx.destination);
+      this.peers.set(peerId, { gainNode, lastActivity: Date.now() });
+    }
+
+    const peer = this.peers.get(peerId)!;
+    peer.lastActivity = Date.now();
+
     try {
-      // MediaRecorder Opus output → decode via AudioContext
-      const audioBuffer = await this.audioCtx.decodeAudioData(data.buffer.slice(0) as ArrayBuffer);
+      // Copy data to avoid detached buffer issues
+      const buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+
+      // decodeAudioData for WebM Opus chunks.
+      // Note: Individual MediaRecorder timeslices produce standalone WebM containers
+      // that decodeAudioData can process. If partial chunks fail, they are silently dropped.
+      const audioBuffer = await this.audioCtx.decodeAudioData(buffer as ArrayBuffer);
       const source = this.audioCtx.createBufferSource();
       source.buffer = audioBuffer;
-      source.connect(this.audioCtx.destination);
+      source.connect(peer.gainNode);
       source.start(0);
+
+      // Clean up source node after playback
+      source.onended = () => {
+        source.disconnect();
+      };
     } catch (e) {
-      // decodeAudioData may fail on partial Opus frames — skip
+      // decodeAudioData may fail on partial or malformed Opus frames — skip
       console.warn('[VoiceChat] Playback decode error:', e);
     }
+  }
+
+  /**
+   * Set gain (volume) for a specific peer. Range 0.0 - 2.0.
+   */
+  setPeerGain(peerId: string, gain: number): void {
+    const peer = this.peers.get(peerId);
+    if (peer) {
+      peer.gainNode.gain.value = Math.max(0, Math.min(2, gain));
+    }
+  }
+
+  /**
+   * Get a list of active peer IDs (with audio in the last 5 seconds).
+   */
+  get activePeers(): string[] {
+    const now = Date.now();
+    const result: string[] = [];
+    for (const [id, peer] of this.peers) {
+      if (now - peer.lastActivity < 5000) {
+        result.push(id);
+      }
+    }
+    return result;
   }
 
   toggleMute(): boolean {
@@ -117,5 +241,6 @@ export class VoiceChat {
     this.stopCapture();
     try { this.audioCtx?.close(); } catch { /* ok */ }
     this.audioCtx = null;
+    this.peers.clear();
   }
 }

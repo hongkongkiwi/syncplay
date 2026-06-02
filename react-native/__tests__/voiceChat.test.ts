@@ -232,12 +232,12 @@ describe('VoiceChat', () => {
   describe('playAudioUrl()', () => {
     it('creates a Sound and plays it', async () => {
       const vc = createVoiceChat();
-      await vc.playAudioUrl('file:///test/audio.aac');
+      await vc.playAudioUrl('file:///test/audio.aac', 'test-peer');
 
       const { Audio } = require('expo-av');
       expect(Audio.Sound.createAsync).toHaveBeenCalledWith(
         { uri: 'file:///test/audio.aac' },
-        { shouldPlay: false },
+        { shouldPlay: false, volume: 1.0 },
       );
       expect(mockSound.playAsync).toHaveBeenCalled();
     });
@@ -247,7 +247,7 @@ describe('VoiceChat', () => {
       Audio.Sound.createAsync.mockRejectedValueOnce(new Error('playback error'));
 
       const vc = createVoiceChat();
-      await expect(vc.playAudioUrl('file:///bad/audio.aac')).resolves.toBeUndefined();
+      await expect(vc.playAudioUrl('file:///bad/audio.aac', 'test-peer')).resolves.toBeUndefined();
     });
   });
 });

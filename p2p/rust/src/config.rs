@@ -66,6 +66,11 @@ pub struct PlayerConfig {
     /// File to open on start
     #[serde(default)]
     pub file: Option<String>,
+
+    /// IPC socket path (default: /tmp/syncplay-mpv-{pid}.sock)
+    /// Use {pid} placeholder for process-ID substitution.
+    #[serde(default)]
+    pub ipc_socket_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

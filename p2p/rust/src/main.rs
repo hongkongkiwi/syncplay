@@ -16,19 +16,25 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use syncplay_p2p::sfu::{SfuConfig, SfuServer};
-use syncplay_p2p::signalling::SignalingServer;
+use syncplay_p2p::signalling::{SignalingConfig, SignalingServer};
 
 fn usage() -> ! {
     eprintln!("Usage: syncplay-signaling [OPTIONS]");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --port, -p PORT    Port to listen on (default: 8998, env: PORT)");
-    eprintln!("  --bind, -b ADDR    Bind address (default: 127.0.0.1)");
-    eprintln!("  --sfu              Enable SFU mode (star topology, server routes data + audio)");
-    eprintln!("  --tls-cert PATH    TLS certificate file (PEM format, enables wss://)");
-    eprintln!("  --tls-key PATH     TLS private key file (PEM format, enables wss://)");
-    eprintln!("  --help, -h         Show this help");
-    eprintln!("  --version, -V      Show version");
+    eprintln!("  --port, -p PORT          Port to listen on (default: 8998, env: PORT)");
+    eprintln!("  --bind, -b ADDR          Bind address (default: 127.0.0.1)");
+    eprintln!(
+        "  --sfu                    Enable SFU mode (star topology, server routes data + audio)"
+    );
+    eprintln!("  --tls-cert PATH          TLS certificate file (PEM format, enables wss://)");
+    eprintln!("  --tls-key PATH           TLS private key file (PEM format, enables wss://)");
+    eprintln!("  --max-conn N             Max total connections (default: 5000)");
+    eprintln!("  --max-conn-per-ip N      Max connections per IP (default: 50)");
+    eprintln!("  --max-rooms N            Max rooms (default: 10000)");
+    eprintln!("  --max-peers-per-room N   Max peers per room (default: 100)");
+    eprintln!("  --help, -h               Show this help");
+    eprintln!("  --version, -V            Show version");
     std::process::exit(0);
 }
 
@@ -49,6 +55,12 @@ async fn main() -> anyhow::Result<()> {
     let mut sfu_mode = false;
     let mut tls_cert: Option<String> = None;
     let mut tls_key: Option<String> = None;
+
+    // DoS protection defaults
+    let mut max_conn: usize = 5000;
+    let mut max_conn_per_ip: usize = 50;
+    let mut max_rooms: usize = 10_000;
+    let mut max_peers_per_room: usize = 100;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -93,6 +105,50 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
                 tls_key = Some(args[i].clone());
+            }
+            "--max-conn" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("--max-conn requires a value");
+                    std::process::exit(1);
+                }
+                max_conn = args[i].parse().unwrap_or_else(|_| {
+                    eprintln!("Invalid --max-conn value: {}", args[i]);
+                    std::process::exit(1);
+                });
+            }
+            "--max-conn-per-ip" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("--max-conn-per-ip requires a value");
+                    std::process::exit(1);
+                }
+                max_conn_per_ip = args[i].parse().unwrap_or_else(|_| {
+                    eprintln!("Invalid --max-conn-per-ip value: {}", args[i]);
+                    std::process::exit(1);
+                });
+            }
+            "--max-rooms" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("--max-rooms requires a value");
+                    std::process::exit(1);
+                }
+                max_rooms = args[i].parse().unwrap_or_else(|_| {
+                    eprintln!("Invalid --max-rooms value: {}", args[i]);
+                    std::process::exit(1);
+                });
+            }
+            "--max-peers-per-room" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("--max-peers-per-room requires a value");
+                    std::process::exit(1);
+                }
+                max_peers_per_room = args[i].parse().unwrap_or_else(|_| {
+                    eprintln!("Invalid --max-peers-per-room value: {}", args[i]);
+                    std::process::exit(1);
+                });
             }
             other => {
                 eprintln!("Unknown flag: {other}");
@@ -168,14 +224,57 @@ async fn main() -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION")
     );
 
+    // Build server config with DoS protection limits
+    let server_config = SignalingConfig {
+        max_connections_total: max_conn,
+        max_connections_per_ip: max_conn_per_ip,
+        max_rooms,
+        max_peers_per_room,
+        ..SignalingConfig::default()
+    };
+
     let server = if sfu_mode {
         let sfu = SfuServer::new(SfuConfig::default()).await?;
-        SignalingServer::new().with_sfu(sfu)
+        SignalingServer::new_with_config(server_config).with_sfu(sfu)
     } else {
-        SignalingServer::new()
+        SignalingServer::new_with_config(server_config)
+    };
+
+    let server = Arc::new(server);
+
+    // Set up graceful shutdown on SIGTERM/SIGINT
+    let server_shutdown = {
+        let srv = server.clone();
+        tokio::spawn(async move {
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sigterm =
+                    signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+                let mut sigint =
+                    signal(SignalKind::interrupt()).expect("failed to register SIGINT handler");
+                tokio::select! {
+                    _ = sigterm.recv() => {
+                        eprintln!("\nReceived SIGTERM, shutting down gracefully...");
+                    }
+                    _ = sigint.recv() => {
+                        eprintln!("\nReceived SIGINT, shutting down gracefully...");
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                tokio::signal::ctrl_c().await.ok();
+                eprintln!("\nReceived Ctrl+C, shutting down gracefully...");
+            }
+            srv.shutdown();
+        })
     };
 
     server.run(addr, tls_config).await?;
+
+    // Wait for shutdown handler to complete
+    server_shutdown.await.ok();
 
     Ok(())
 }

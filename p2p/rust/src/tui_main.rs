@@ -182,19 +182,29 @@ async fn main() -> anyhow::Result<()> {
     // Launch player if we have one
     if !cfg.player.path.is_empty() {
         let path_lower = cfg.player.path.to_lowercase();
+        // Careful: check "mpc" before "mpv" to avoid false mpv match on mpc-hc paths
         let ptype = if path_lower.contains("mpc-hc") || path_lower.contains("mpc-hc64") {
             syncplay_p2p::player_controller::PlayerType::MpcHc
         } else if path_lower.contains("mplayer") {
             syncplay_p2p::player_controller::PlayerType::Mplayer
-        } else if path_lower.contains("mpv") {
-            syncplay_p2p::player_controller::PlayerType::Mpv
         } else if path_lower.contains("iina") {
             syncplay_p2p::player_controller::PlayerType::Iina
+        } else if path_lower.contains("mpv") {
+            syncplay_p2p::player_controller::PlayerType::Mpv
         } else {
             syncplay_p2p::player_controller::PlayerType::Vlc
         };
+
+        // Resolve socket path: use configured path or default
+        let socket = if cfg.player.ipc_socket_path.is_empty() {
+            format!("/tmp/syncplay-mpv-{}.sock", std::process::id())
+        } else {
+            cfg.player
+                .ipc_socket_path
+                .replace("{pid}", &std::process::id().to_string())
+        };
+
         let mut pc = syncplay_p2p::player_controller::PlayerController::new(ptype);
-        let socket = format!("/tmp/syncplay-mpv-{}.sock", std::process::id());
         match pc
             .launch(&cfg.player.path, cfg.player.file.as_deref(), &socket)
             .await
@@ -203,10 +213,18 @@ async fn main() -> anyhow::Result<()> {
                 // Set player socket BEFORE setting ready to avoid race
                 // (readiness broadcast needs the player socket to be available)
                 sync.set_player_socket(Some(socket.clone()));
-                println!("Player launched — IPC socket: {socket}");
+                println!(
+                    "Player launched — {} IPC socket: {socket}",
+                    ptype.display_name()
+                );
                 let _player = pc; // keep alive to prevent Drop killing the child
-                                  // Spawn event consumer to feed playstate back to sync
+
+                // Spawn event consumer to feed playstate back to sync
                 let sync2 = sync.clone();
+                let _player_path = cfg.player.path.clone();
+                let _player_file = cfg.player.file.clone();
+                let _socket2 = socket.clone();
+                let _ptype2 = ptype;
                 tokio::spawn(async move {
                     while let Some(event) = rx.recv().await {
                         match event {
@@ -236,9 +254,25 @@ async fn main() -> anyhow::Result<()> {
                                 };
                                 sync2.send_file_info(Some(meta)).await;
                             }
-                            _ => {}
+                            syncplay_p2p::player_controller::PlayerEvent::PlayerExited { code } => {
+                                log::warn!(
+                                    "Player process exited (code: {code:?}) — clearing player socket"
+                                );
+                                sync2.set_player_socket(None);
+                                // Auto-restart is handled by the outer system or user; log the exit
+                                // so a future improve could implement auto-restart with backoff.
+                            }
+                            syncplay_p2p::player_controller::PlayerEvent::EndOfFile => {
+                                log::info!("Playback ended (EOF)");
+                            }
+                            syncplay_p2p::player_controller::PlayerEvent::Error(msg) => {
+                                log::error!("Player error: {msg}");
+                                sync2.set_player_socket(None);
+                            }
                         }
                     }
+                    // rx closed without PlayerExited — log this anomaly
+                    log::warn!("Player event channel closed unexpectedly");
                 });
             }
             Err(e) => {
