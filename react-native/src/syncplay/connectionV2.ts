@@ -435,6 +435,9 @@ export class P2PStateManager {
   private _reconnectAttempts = 0;
   private _lastConfig: { host: string; username: string; room: string } | null = null;
 
+  /** Detected subtitle tracks for current media file */
+  private _subtitleTracks: SubtitleTrack[] = [];
+
   /** Called by transport when reconnection succeeds */
   onReconnectSuccess: (() => void) | null = null;
 
@@ -1147,6 +1150,12 @@ export class P2PStateManager {
         action: ControllerAction.Add,
       } as ControllerChangePayload);
     }
+    // Send subtitle info if available
+    if (this._subtitleTracks.length > 0) {
+      this._transport.send(MessageType.SubtitleInfo, {
+        subtitles: this._subtitleTracks,
+      } satisfies SubtitleInfoPayload);
+    }
   }
 
   /** Update ICE connection state for a specific peer */
@@ -1205,6 +1214,149 @@ export class P2PStateManager {
       }
     } catch { /* storage unavailable */ }
     return { host: '', username: '', room: '' };
+  }
+
+  // ── Subtitle detection ─────────────────────────────────────────────────
+
+  /** Subtitle file extensions recognized by the matcher */
+  private static readonly SUBTITLE_EXTENSIONS: ReadonlySet<string> = new Set([
+    '.srt', '.ass', '.ssa', '.vtt', '.sub', '.idx', '.txt',
+  ]);
+
+  /** Map common 3-letter language codes to ISO 639-1 2-letter codes */
+  private static readonly LANG_CODE_MAP: Record<string, string> = {
+    eng: 'en', fra: 'fr', fre: 'fr', deu: 'de', ger: 'de',
+    spa: 'es', ita: 'it', por: 'pt', rus: 'ru', jpn: 'ja',
+    kor: 'ko', ara: 'ar', zho: 'zh', chi: 'zh', nld: 'nl',
+    dut: 'nl', swe: 'sv', nor: 'no', dan: 'da', fin: 'fi',
+    pol: 'pl', tur: 'tr', heb: 'he', hin: 'hi', tha: 'th',
+    vie: 'vi', ukr: 'uk', ces: 'cs', cze: 'cs', ron: 'ro',
+    hun: 'hu', ell: 'el', gre: 'el', bul: 'bg', cat: 'ca',
+    eus: 'eu', baq: 'eu', glg: 'gl', slv: 'sl', slo: 'sk',
+    srp: 'sr', hrv: 'hr', msa: 'ms', may: 'ms', fil: 'tl',
+    ind: 'id', fas: 'fa', per: 'fa', lit: 'lt', lav: 'lv',
+    est: 'et', isl: 'is', ice: 'is', mar: 'mr', ben: 'bn',
+    tam: 'ta', tel: 'te', mal: 'ml', kan: 'kn', guj: 'gu',
+  };
+
+  /**
+   * Extract a language code from a subtitle filename stem.
+   *
+   * Common patterns:
+   *   "movie.en"       → "en" (2-letter ISO 639-1)
+   *   "movie.eng"      → "en" (3-letter ISO 639-2 → mapped)
+   *   "movie.en.sdh"   → "en" (2-letter + hearing-impaired suffix)
+   *   "movie.eng.forced" → "en" (3-letter + forced flag)
+   *
+   * Falls back to undefined if no language code is detected.
+   */
+  static detectSubtitleLanguage(filename: string): string | undefined {
+    const stem = filename.replace(/\.[^.]+$/, ''); // drop extension
+    const parts = stem.split(/[._-]/);
+
+    // Walk parts from right to left looking for a language code
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const token = parts[i]!.toLowerCase();
+
+      // Skip known non-language suffixes
+      if (token === 'forced' || token === 'sdh' || token === 'hi' ||
+          token === 'cc' || token === 'commentary' || token === 'stereo' ||
+          token === 'surround' || token === 'dub' || token === 'sub') {
+        continue;
+      }
+
+      // Exact 2-letter code
+      if (/^[a-z]{2}$/.test(token)) {
+        return token;
+      }
+
+      // 3-letter code — map to 2-letter if known
+      if (/^[a-z]{3}$/.test(token)) {
+        return P2PStateManager.LANG_CODE_MAP[token] ?? token;
+      }
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Find subtitle files matching a video file.
+   *
+   * A subtitle file is considered a match when:
+   *   - Its extension is a known subtitle extension.
+   *   - Its stem starts with the video file's stem (case-insensitive).
+   *   - Any suffix after the video stem is a language code or flag.
+   *
+   * @param files   - Array of file-like objects (at minimum {name, size}).
+   * @param videoName - The video filename to match against (e.g., "movie.mkv").
+   * @returns SubtitleTrack[] with filename, size, and detected language.
+   */
+  findSubtitles(
+    files: ReadonlyArray<{ name: string; size?: number }>,
+    videoName: string,
+  ): SubtitleTrack[] {
+    const videoStem = videoName.replace(/\.[^.]+$/, '').toLowerCase();
+    if (!videoStem) return [];
+
+    const tracks: SubtitleTrack[] = [];
+
+    for (const f of files) {
+      const name = f.name;
+      const extDot = name.lastIndexOf('.');
+      if (extDot === -1) continue;
+
+      const ext = name.slice(extDot).toLowerCase();
+      if (!P2PStateManager.SUBTITLE_EXTENSIONS.has(ext)) continue;
+
+      // Check if the stem starts with the video stem (case-insensitive)
+      const stem = name.slice(0, extDot).toLowerCase();
+      if (!stem.startsWith(videoStem)) continue;
+
+      // The suffix after the video stem should be a language code or empty
+      const suffix = stem.slice(videoStem.length);
+
+      // Allow optional separator and language/flag suffix
+      if (suffix.length > 0) {
+        // Must start with a separator (. _ -) followed by a language indicator
+        if (!/^[._-]/.test(suffix)) continue;
+
+        const langCandidate = suffix.slice(1);
+        // Allow flags like "forced", "sdh", "cc", "hi"
+        const isLangOrFlag = /^[a-z]{2,3}([._-](forced|sdh|hi|cc|commentary|stereo|surround|dub|sub))?$/i.test(langCandidate);
+        if (!isLangOrFlag) continue;
+      }
+
+      const lang = P2PStateManager.detectSubtitleLanguage(name);
+      const track: SubtitleTrack = {
+        filename: name,
+        size: f.size ?? 0,
+      };
+      if (lang) track.language = lang;
+      tracks.push(track);
+    }
+
+    return tracks;
+  }
+
+  /**
+   * Send subtitle information to all connected peers.
+   * Called after findSubtitles when the user loads media with bundled subtitles.
+   */
+  sendSubtitleInfo(): void {
+    if (!this._transport || !this._connected) return;
+    if (this._subtitleTracks.length === 0) return;
+
+    this._transport.send(MessageType.SubtitleInfo, {
+      subtitles: this._subtitleTracks,
+    } satisfies SubtitleInfoPayload);
+  }
+
+  /**
+   * Store detected subtitle tracks so they can be replayed
+   * to late-joining peers via sendStateTo().
+   */
+  setSubtitleTracks(tracks: SubtitleTrack[]): void {
+    this._subtitleTracks = tracks;
   }
 
   destroy(): void {
@@ -1324,6 +1476,7 @@ export class P2PConnection implements P2PTransport {
 
   get connectionState(): ConnectionState { return this._connectionState; }
   get isHost(): boolean { return this.peerId !== '' && this.peerId === this.hostId; }
+  get manager(): P2PStateManager { return this.stateManager; }
 
   // ── Connect ───────────────────────────────────────────────────────────────
 
@@ -1636,6 +1789,10 @@ export class P2PConnection implements P2PTransport {
 
   requestSetSpeed(speed: number): void {
     this.stateManager.requestSetSpeed(speed);
+  }
+
+  sendFileInfo(file?: FileMetadata): void {
+    this.stateManager.sendFileInfo(file);
   }
 
   toggleMute(): boolean {

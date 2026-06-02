@@ -57,6 +57,7 @@ import {
   type PeerState,
   type RoomStateSnapshot,
   type SyncEvent,
+  type SubtitleTrack,
 } from './src/syncplay/connectionV2';
 import VoiceChat from './src/syncplay/voiceChat';
 import { scanMediaDirectory } from './src/app/directoryScanner';
@@ -329,6 +330,7 @@ export default function App() {
   const [form, setForm] = useState(defaultForm);
   const [chatDraft, setChatDraft] = useState('');
   const [mediaUri, setMediaUri] = useState<string | null>(null);
+  const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrack[]>([]);
   const [media, setMedia] = useState<SyncplayFile | null>(null);
   const [mediaLibrary, setMediaLibrary] = useState<MediaLibraryItem[]>([]);
   const [streamUrl, setStreamUrl] = useState('');
@@ -785,29 +787,119 @@ export default function App() {
 
   async function pickMedia() {
     const result = await DocumentPicker.getDocumentAsync({
-      type: 'video/*',
+      type: ['video/*', 'text/*', 'application/*'],
       copyToCacheDirectory: false,
-      multiple: false
+      multiple: true
     });
 
     if (result.canceled || !result.assets[0]) return;
 
-    const asset = result.assets[0];
-    const item = rememberMediaAssets([asset])[0];
-    if (item) loadMediaItem(item);
+    // Separate videos and subtitles
+    const videoAssets = result.assets.filter(a => {
+      const name = a.name.toLowerCase();
+      const mime = (a.mimeType ?? '').toLowerCase();
+      if (mime.startsWith('video/')) return true;
+      return name.endsWith('.mkv') || name.endsWith('.mp4') || name.endsWith('.avi') ||
+             name.endsWith('.webm') || name.endsWith('.mov');
+    });
+
+    const subtitleAssets = result.assets.filter(a => {
+      const name = a.name.toLowerCase();
+      return name.endsWith('.srt') || name.endsWith('.ass') || name.endsWith('.ssa') ||
+             name.endsWith('.vtt') || name.endsWith('.sub') || name.endsWith('.idx') ||
+             name.endsWith('.txt');
+    });
+
+    const allItems = rememberMediaAssets(result.assets);
+    const videoItems = allItems.filter(item => {
+      const name = item.name.toLowerCase();
+      const uri = item.uri.toLowerCase();
+      return videoAssets.some(v => v.uri === item.uri) ||
+             name.endsWith('.mkv') || name.endsWith('.mp4') || name.endsWith('.avi') ||
+             name.endsWith('.webm') || name.endsWith('.mov');
+    });
+
+    const videoItem = videoItems[0];
+    if (!videoItem) {
+      setConnectionError('No video file found in selection.');
+      return;
+    }
+
+    // Detect subtitles
+    if (subtitleAssets.length > 0) {
+      const subtitleFiles = subtitleAssets.map(a => ({ name: a.name, size: a.size ?? 0 }));
+      const tracks = connection.manager.findSubtitles(subtitleFiles, videoItem.name);
+      setSubtitleTracks(tracks);
+
+      if (tracks.length > 0) {
+        const trackDesc = tracks
+          .map(t => t.language ? `${t.filename} [${t.language}]` : t.filename)
+          .join(', ');
+        setMessages(prev => [...prev, {
+          id: nextMessageId(),
+          text: `Found ${tracks.length} subtitle file${tracks.length > 1 ? 's' : ''}: ${trackDesc}.`,
+          kind: 'system',
+          createdAt: Date.now(),
+        }].slice(-500));
+      }
+    } else {
+      setSubtitleTracks([]);
+    }
+
+    loadMediaItem(videoItem);
   }
 
   async function pickMediaSearchFiles() {
     const result = await DocumentPicker.getDocumentAsync({
-      type: 'video/*',
+      type: ['video/*', 'text/*', 'application/*'],
       copyToCacheDirectory: false,
       multiple: true
     });
 
     if (result.canceled || result.assets.length === 0) return;
 
+    // Separate videos and subtitles
+    const videoAssets = result.assets.filter(a => {
+      const name = a.name.toLowerCase();
+      const mime = (a.mimeType ?? '').toLowerCase();
+      if (mime.startsWith('video/')) return true;
+      return name.endsWith('.mkv') || name.endsWith('.mp4') || name.endsWith('.avi') ||
+             name.endsWith('.webm') || name.endsWith('.mov');
+    });
+
+    const subtitleAssets = result.assets.filter(a => {
+      const name = a.name.toLowerCase();
+      return name.endsWith('.srt') || name.endsWith('.ass') || name.endsWith('.ssa') ||
+             name.endsWith('.vtt') || name.endsWith('.sub') || name.endsWith('.idx') ||
+             name.endsWith('.txt');
+    });
+
     const addedItems = rememberMediaAssets(result.assets);
-    if (!mediaUri && addedItems[0]) loadMediaItem(addedItems[0]);
+
+    if (!mediaUri && addedItems[0]) {
+      // Detect subtitles
+      if (subtitleAssets.length > 0) {
+        const subtitleFiles = subtitleAssets.map(a => ({ name: a.name, size: a.size ?? 0 }));
+        const tracks = connection.manager.findSubtitles(subtitleFiles, addedItems[0].name);
+        setSubtitleTracks(tracks);
+
+        if (tracks.length > 0) {
+          const trackDesc = tracks
+            .map(t => t.language ? `${t.filename} [${t.language}]` : t.filename)
+            .join(', ');
+          setMessages(prev => [...prev, {
+            id: nextMessageId(),
+            text: `Found ${tracks.length} subtitle file${tracks.length > 1 ? 's' : ''}: ${trackDesc}.`,
+            kind: 'system',
+            createdAt: Date.now(),
+          }].slice(-500));
+        }
+      } else {
+        setSubtitleTracks([]);
+      }
+
+      loadMediaItem(addedItems[0]);
+    }
   }
 
   async function pickMediaSearchDirectory() {
@@ -855,6 +947,10 @@ export default function App() {
     setMediaUri(item.uri);
     setMedia(file);
     setMissingMediaName(null);
+
+    // Attach subtitle tracks to state manager and send file info
+    connection.manager.setSubtitleTracks(subtitleTracks);
+    connection.sendFileInfo(file);
   }
 
   function openLibraryFileByName(filename: string | null) {
