@@ -1,45 +1,8 @@
-# Syncplay P2P — Rust build targets
-# Primary workflow: use 'just' (see justfile).
-# This Makefile exists for CI and muscle-memory compatibility.
-# All old Python targets (syncplayClient.py, syncplayServer.py) removed.
+# macOS compatibility: if gmake exists, use it; otherwise fall back to make
+GMAKE := $(shell command -v gmake 2>/dev/null || echo make)
 
-CARGO = cargo
-MANIFEST = p2p/rust/Cargo.toml
-FEATURES = --features tui
+all:
+	@$(GMAKE)
 
-.PHONY: all build release check test clippy fmt clean signaling tui
-
-all: build
-
-build:
-	$(CARGO) build $(FEATURES) --manifest-path $(MANIFEST)
-
-release:
-	$(CARGO) build $(FEATURES) --release --manifest-path $(MANIFEST)
-
-check:
-	$(CARGO) check $(FEATURES) --manifest-path $(MANIFEST)
-
-test:
-	$(CARGO) test --lib --manifest-path $(MANIFEST)
-
-clippy:
-	$(CARGO) clippy $(FEATURES) --all-targets --manifest-path $(MANIFEST) -- -D warnings
-
-fmt:
-	$(CARGO) fmt --manifest-path $(MANIFEST) -- --check
-
-clean:
-	$(CARGO) clean --manifest-path $(MANIFEST)
-
-signaling:
-	$(CARGO) run --bin syncplay-signaling --manifest-path $(MANIFEST)
-
-tui:
-	$(CARGO) run --bin syncplay-tui $(FEATURES) --manifest-path $(MANIFEST)
-
-# Legacy target stubs — print migration notice
-install-client install-server install uninstall-client uninstall-server uninstall:
-	@echo "Syncplay is now a pure Rust project. Use 'make build' or 'just build'."
-	@echo "Binaries: target/release/syncplay-signaling  +  target/release/syncplay-tui"
-	@exit 1
+.DEFAULT:
+	@$(GMAKE) $@

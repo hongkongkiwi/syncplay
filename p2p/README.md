@@ -12,7 +12,7 @@ p2p/rust/                  ← single Rust crate (edition 2021)
     main.rs                → syncplay-signaling  (WebSocket relay)
     tui_main.rs            → syncplay-tui        (ratatui client, --features tui)
     turn_main.rs           → syncplay-turn       (TURN relay for NAT traversal)
-    messages.rs            — 20 message types (0x01–0x13) + payloads + builders
+    messages.rs            — 22 message types (0x01–0x16) + payloads + builders
     wire.rs                — MessagePack framing (17 tests)
     connection.rs          — WebRTC ICE/STUN/TURN, signaling handshake, peer lifecycle
     sync.rs                — Host-authoritative state sync, controller gating
@@ -81,7 +81,7 @@ just release
 
 ## Protocol
 
-20 message types over length-prefixed MessagePack frames on WebRTC data channels.
+22 message types over length-prefixed MessagePack frames on WebRTC data channels.
 Host-authoritative with controller delegation.
 See [docs/webrtc-p2p-protocol.md](../docs/webrtc-p2p-protocol.md).
 

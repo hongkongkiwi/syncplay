@@ -9,7 +9,7 @@ Syncplay P2P v2.0 uses WebRTC data channels for direct peer-to-peer communicatio
 Each peer connects directly to every other peer via WebRTC data channels. The signaling server only relays SDP offers/answers and ICE candidates.
 
 ```
-Signaling Server (Rust, ~400 lines)
+Signaling Server (Rust, ~1400 lines)
          │
     ┌────┼────┐
     ▼    ▼    ▼

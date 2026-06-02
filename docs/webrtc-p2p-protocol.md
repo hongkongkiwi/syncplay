@@ -3,7 +3,7 @@
 ## Overview
 
 Replace the central Twisted TCP server with:
-1. A **lightweight signaling server** (language-agnostic, ~200 lines)
+1. A **lightweight signaling server** (language-agnostic, ~1400 lines)
 2. **WebRTC data channels** between peers for all sync, chat, and file transfer
 3. Standard **TURN server** (coturn/eturnal) for NAT fallback only
 
@@ -48,13 +48,9 @@ Client → Server
   "type": "create",
   "room": "movie-night",
   "password": "optional-room-password",
-  "features": {
-    "version": "2.0.0",
-    "chat": true,
-    "fileTransfer": true,
-    "readiness": true,
-    "playlist": true
-  }
+  "username": "alice",
+  "persistent": false,
+  "features": ["chat", "fileTransfer", "readiness", "playlist"]
 }
 ```
 
@@ -64,8 +60,8 @@ Client → Server
   "type": "join",
   "room": "movie-night",
   "password": "optional-room-password",
-  "username": "alice",
-  "features": { "version": "2.0.0", ... }
+  "username": "bob",
+  "features": ["chat", "fileTransfer", "readiness", "playlist"]
 }
 ```
 
@@ -192,8 +188,8 @@ Each peer pair opens a **single WebRTC DataChannel** (binary, reliable+ordered).
 | Type | Name | Direction | Description |
 |------|------|-----------|-------------|
 | 0x01 | `hello` | both | Connection handshake |
-| 0x02 | `playstate` | host→peers | Authoritative position/paused state |
-| 0x03 | `playstate_request` | peer→host | Non-host wants to seek/pause/play |
+| 0x02 | `playstate` | host→peers | Authoritative position/paused/speed state |
+| 0x03 | `playstate_request` | peer→host | Non-host wants to seek/pause/play/set-speed |
 | 0x04 | `chat` | both (relay: peer→host→all) | Chat message |
 | 0x05 | `readiness` | both (relay: peer→host→all) | User ready/not-ready |
 | 0x06 | `playlist_change` | host→peers | Playlist updated |
@@ -206,6 +202,13 @@ Each peer pair opens a **single WebRTC DataChannel** (binary, reliable+ordered).
 | 0x0D | `latency_pong` | both | RTT response |
 | 0x0E | `host_elected` | new_host→all | Host change announcement |
 | 0x0F | `user_info` | both | Username, features on connect |
+| 0x10 | `peer_disconnect` | both | Graceful disconnect notification |
+| 0x11 | `voice_mute` | both | Voice mute/unmute toggle |
+| 0x12 | `subtitle_info` | host→peers | Available subtitle tracks |
+| 0x13 | `controller_change` | host→peers | Controller add/remove |
+| 0x14 | `avatar_set` | both | Avatar preset/custom assignment |
+| 0x15 | `status_update` | both | User status text update |
+| 0x16 | `voice_frame` | both | Opus-encoded audio frame |
 
 ### 2.2 Message Payloads (MessagePack schema)
 
@@ -227,20 +230,21 @@ Each peer pair opens a **single WebRTC DataChannel** (binary, reliable+ordered).
     "doSeek": True,           # False = smooth correction, True = immediate seek
     "setBy": "alice",         # who caused this change
     "timestamp": 1717000000,  # unix ms, for latency compensation
-    "seq": 42                 # monotonic sequence number
+    "seq": 42,                # monotonic sequence number
+    "speed": 1.0,             # playback speed (1.0 = normal, 2.0 = double)
 }
 ```
 
 #### playstate_request (0x03) — Peer → Host
 ```python
 {
-    "action": "seek" | "pause" | "play",
+    "action": "seek" | "pause" | "play" | {"setspeed": 2.0},
     "position": 123.456,      # for seek
     "requestId": "uuid"       # for correlation
 }
 ```
 
-Host validates (is peer allowed to control?), then broadcasts new `playstate`.
+Host validates (is peer allowed to control?), then broadcasts new `playstate`. `setspeed` changes playback speed (0.5, 1.0, 2.0).
 
 #### chat (0x04) — Peer → Host → All
 ```python
@@ -345,6 +349,74 @@ Host broadcasts to all connected peers. This avoids N×(N-1) relay but adds one 
 }
 ```
 
+#### peer_disconnect (0x10)
+```python
+{
+    "reason": "left"  # disconnect reason
+}
+```
+
+#### voice_mute (0x11)
+```python
+{
+    "muted": True  # whether sender is muted
+}
+```
+
+#### subtitle_info (0x12)
+```python
+{
+    "subtitles": [
+        {"filename": "movie.eng.srt", "size": 4096, "language": "eng"},
+    ]
+}
+```
+
+Supported subtitle extensions: .srt, .ass, .ssa, .vtt, .sub, .idx, .txt. Language detection supports 50+ ISO 639-1/2 codes.
+
+#### controller_change (0x13)
+```python
+{
+    "peer_id": "alice",          # username being granted/revoked
+    "action": "add" | "remove"   # grant or revoke
+}
+```
+
+#### avatar_set (0x14)
+```python
+{
+    "username": "alice",
+    "preset_id": "cool-cat",    # one of 12 built-in presets
+    "custom_url": "",           # custom image URL (overrides preset)
+    "accent": "#FF6B6B",        # CSS accent color
+}
+```
+
+Built-in avatar presets (12): cool-cat, pixel-panda, retro-ghost, foxy, octo, bot-buddy, sparkle, cactus, pizza-pal, rocker, wizard, dino.
+
+#### status_update (0x15)
+```python
+{
+    "username": "alice",
+    "status_text": "I'm feeling: hyped! 🔥",
+    "timestamp": 1717000000000,
+}
+```
+
+Built-in status presets (14): hyped, cozy, sleepy, excited, nostalgic, snacks, bathroom, wild, intently, no-spoilers, laughing, crying, mindblown, afk.
+
+#### voice_frame (0x16) — P2P direct (or via host relay in mesh)
+```python
+{
+    "data": b"...",             # Opus-encoded audio
+    "seq": 0,                   # sequence number for ordering
+    "timestamp": 1717000000000, # capture time (unix ms)
+    "sampleRate": 16000,        # sample rate in Hz
+    "channels": 1,              # audio channels
+    "from": "peer-uuid-1",      # sender peer ID
+}
+```
+
 ---
 
 ## 3. Room Host Model
@@ -352,13 +424,16 @@ Host broadcasts to all connected peers. This avoids N×(N-1) relay but adds one 
 ### 3.1 Host Responsibilities
 
 The host is the **authoritative source of truth** for:
-- Playstate (position, paused, seeking)
+- Playstate (position, paused, speed)
 - Playlist (current list, current index)
 - Chat relay (receives from peers, broadcasts to all)
+- Controller management (grant/revoke control)
+- Voice frame relay (receives from peers, broadcasts in mesh)
 
 The host does NOT touch:
 - File transfers (P2P direct between requester and provider)
 - File info (peers broadcast directly)
+- Voice frames in SFU mode (server-managed)
 
 ### 3.2 Host Election
 
@@ -401,14 +476,14 @@ For LAN/zeroconf scenarios without a signaling server:
 
 ```
 Host plays video →
-  Every 500ms: host broadcasts playstate(position, paused=false)
+  Every 500ms: host broadcasts playstate(position, paused=false, speed)
 
 Peer receives →
   Compare with local position
   If diff > rewindThreshold: rewind
   If diff > slowDownThreshold: adjust speed
   If behind: fastforward
-  Apply latency compensation: position += (now - playstate.timestamp) / 1000
+  Apply latency compensation: position += (now - playstate.timestamp) * speed / 1000 + latency * speed
 ```
 
 This mirrors the current `_changePlayerStateAccordingToGlobalState` logic in `client.py`.

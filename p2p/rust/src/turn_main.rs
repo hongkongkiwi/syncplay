@@ -183,7 +183,7 @@ async fn main() {
         }],
         realm,
         auth_handler: Arc::new(StaticAuthHandler::new(cred_map)),
-        channel_bind_timeout: Duration::from_secs(0), // use default (10 min)
+        channel_bind_timeout: Duration::from_secs(0), // 0 = use library default (10 min)
         alloc_close_notify: None,
     })
     .await

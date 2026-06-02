@@ -575,6 +575,7 @@ fn create_opus_track(from_peer_id: &str) -> Result<Arc<TrackLocalStaticSample>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use webrtc::track::track_local::TrackLocal;
 
     #[test]
     fn test_default_config() {
@@ -590,5 +591,33 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(cfg.max_peers_per_room, 50);
+    }
+
+    #[test]
+    fn test_sfu_config_turn_servers() {
+        let cfg = SfuConfig {
+            turn_servers: vec!["turn:user:pass@turn.example.com:3478".into()],
+            ..Default::default()
+        };
+        assert_eq!(cfg.turn_servers.len(), 1);
+    }
+
+    #[test]
+    fn test_create_opus_track() {
+        let track = create_opus_track("test-peer").expect("should create track");
+        assert_eq!(track.id(), "audio-from-test-peer");
+        assert_eq!(track.stream_id(), "syncplay-voice");
+        assert_eq!(track.codec().mime_type, "audio/opus");
+        assert_eq!(track.codec().clock_rate, 48000);
+        assert_eq!(track.codec().channels, 2);
+    }
+
+    #[test]
+    fn test_sfu_config_max_peers_zero() {
+        let cfg = SfuConfig {
+            max_peers_per_room: 0,
+            ..Default::default()
+        };
+        assert_eq!(cfg.max_peers_per_room, 0);
     }
 }

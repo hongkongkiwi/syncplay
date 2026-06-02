@@ -10,11 +10,10 @@ Syncplay P2P replaces the central TCP server architecture with:
 ```
 ┌─────────────────────────────────────────────┐
 │           SIGNALING SERVER                   │
-│  WebSocket (Rust, ~400 lines)                │
+│  WebSocket (Rust, ~1400 lines)               │
 │                                              │
 │  create/join → room management               │
 │  signal → SDP/ICE relay                      │
-│  GET /rooms → room listing                   │
 └──────┬──────────┬──────────┬─────────────────┘
        │ SDP/ICE  │ SDP/ICE  │ SDP/ICE
        │ relay    │ relay    │ relay
@@ -45,15 +44,12 @@ Transport: WebSocket with JSON messages.
   "room": "movie-night",
   "password": "optional-room-password",
   "username": "alice",
-  "features": {
-    "version": "2.0.0",
-    "chat": true,
-    "fileTransfer": true,
-    "readiness": true,
-    "playlist": true
-  }
+  "persistent": false,
+  "features": ["chat", "fileTransfer", "readiness", "playlist"]
 }
 ```
+
+`persistent` (optional, default false): if true, room is not removed when empty. `username` (optional) sets the display name. `features` is a string array of enabled features.
 
 #### Join Room
 ```json
@@ -62,13 +58,7 @@ Transport: WebSocket with JSON messages.
   "room": "movie-night",
   "password": "optional-room-password",
   "username": "bob",
-  "features": {
-    "version": "2.0.0",
-    "chat": true,
-    "fileTransfer": true,
-    "readiness": true,
-    "playlist": true
-  }
+  "features": ["chat", "fileTransfer", "readiness", "playlist"]
 }
 ```
 
@@ -87,6 +77,7 @@ Transport: WebSocket with JSON messages.
   "type": "created",
   "roomId": "movie-night",
   "hostId": "peer-uuid-1",
+  "peerId": "peer-uuid-1",
   "peers": []
 }
 ```
@@ -97,9 +88,10 @@ Transport: WebSocket with JSON messages.
   "type": "room_info",
   "roomId": "movie-night",
   "hostId": "peer-uuid-1",
+  "peerId": "peer-uuid-2",
   "peers": [
-    { "peerId": "peer-uuid-1", "username": "alice", "features": { "version": "2.0.0" } },
-    { "peerId": "peer-uuid-3", "username": "carol", "features": { "version": "2.0.0" } }
+    { "peerId": "peer-uuid-1", "username": "alice", "features": ["chat", "fileTransfer"] },
+    { "peerId": "peer-uuid-3", "username": "carol", "features": ["chat", "readiness"] }
   ]
 }
 ```
@@ -110,7 +102,7 @@ Transport: WebSocket with JSON messages.
   "type": "peer_joined",
   "peerId": "peer-uuid-2",
   "username": "bob",
-  "features": { "version": "2.0.0" }
+  "features": ["chat", "fileTransfer", "readiness", "playlist"]
 }
 ```
 
@@ -226,7 +218,7 @@ position:    f64       — seconds
 paused:      bool      — is playback paused
 doSeek:      bool      — true = immediate seek, false = smooth correction
 setBy:       string    — who caused this change
-seq:         u32       — monotonic sequence number (drop stale)
+seq:         u64       — monotonic sequence number (drop stale)
 timestamp:   u64       — unix ms, for latency compensation
 speed:       f64       — playback speed multiplier (0.5, 1.0, 2.0)
 ```
@@ -238,7 +230,7 @@ position += (now - playstate.timestamp) * speed / 1000 + latency * speed
 
 #### PlaystateRequest (0x03) — Peer → Host
 ```
-action:      string | { SetSpeed: f64 }  — "seek" | "pause" | "play" | set_speed
+action:      string | { setspeed: f64 }  — "seek" | "pause" | "play" | setspeed
 position:    f64       — for seek action
 requestId:   string    — UUID for correlation
 ```
@@ -247,7 +239,7 @@ Valid actions:
 - `"seek"` — seek to position
 - `"pause"` — pause playback
 - `"play"` — resume playback
-- `{ "SetSpeed": 0.5 }` — change speed (0.5, 1.0, 2.0)
+- `{ "setspeed": 0.5 }` — change speed (0.5, 1.0, 2.0)
 
 Host validates controller access, then broadcasts new Playstate.
 
@@ -269,7 +261,7 @@ setBy:         string  — who set this (for host overrides)
 #### PlaylistChange (0x06) — Host → All
 ```
 files:  [{ name: string, duration: f64 }]  — playlist entries
-index:  u32                                 — current playlist index
+index:  u64                                 — current playlist index
 setBy:  string                              — who set the playlist
 ```
 
@@ -279,7 +271,7 @@ Max playlist size: 250 entries.
 ```
 action:  "set_playlist" | "set_index"
 files:   [{ name: string, duration: f64 }]  — for set_playlist
-index:   u32                                 — for set_index
+index:   u64                                 — for set_index
 ```
 
 #### FileInfo (0x08)
@@ -289,17 +281,16 @@ file:      { name: string, duration: f64, size: u64, checksum?: string } | null
 ```
 
 #### FileTransfer (0x09)
-```
+```json
 transferId:  string         — UUID
-chunkIndex:  u32            — chunk sequence number
+chunkIndex:  u64            — chunk sequence number
 offset:      u64            — byte offset in file
 totalSize:   u64            — total file size
 chunkSize:   u32            — bytes per chunk (256KB default, must not be 0)
-filename:    string         — original filename
 data:        bin            — raw bytes for this chunk (up to 256KB)
 ```
 
-Final verification chunk sent with `chunkIndex = Number.MAX_SAFE_INTEGER`, `data` empty. Receiver computes SHA-256 of assembled file and verifies.
+Final verification chunk sent with `chunkIndex = 0xFFFFFFFFFFFFFFFF` (u64::MAX). Receiver computes SHA-256 of assembled file and verifies against the fingerprint sent in the verification chunk's `data` field.
 
 #### FileRequest (0x0A)
 ```
@@ -393,11 +384,11 @@ hyped 🔥, cozy 🧋, sleepy 😴, excited 🎬, nostalgic 🥲, snacks 🍿, b
 #### VoiceFrame (0x16)
 ```
 data:        bin       — Opus-encoded audio data
-seq:         u32       — sequence number for ordering
+seq:         u64       — sequence number for ordering
 timestamp:   u64       — capture time (unix ms)
-sampleRate:  u32?      — sample rate in Hz (default 16000)
-channels:    u32?      — audio channels (default 1)
-from:        string?   — sender peer ID
+sampleRate:  u32       — sample rate in Hz
+channels:    u32       — audio channels
+from:        string    — sender peer ID
 ```
 
 ---

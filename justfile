@@ -50,6 +50,14 @@ all: fmt check test clippy
 
 # ── Run ────────────────────────────────────────────────────────────
 
+# Build just the TURN binary
+build-turn:
+    cargo build --bin syncplay-turn
+
+# Build just the signaling binary
+build-signaling:
+    cargo build --bin syncplay-signaling
+
 # Start the TURN relay server
 run-turn public_ip="127.0.0.1" port="3478" users="alice=test,bob=test" realm="syncplay":
     cargo run --bin syncplay-turn -- \

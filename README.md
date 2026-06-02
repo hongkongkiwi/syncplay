@@ -52,8 +52,6 @@ npx expo start
 - [Protocol Specification](docs/PROTOCOL.md)
 - [Architecture Overview](docs/ARCHITECTURE.md)
 - [API Reference](docs/API.md)
-- [Web Client Guide](docs/WEB-CLIENT.md)
-- [React Native Guide](docs/RN-CLIENT.md)
 - [Rust Client Guide](p2p/README.md)
 - [Contributing](docs/CONTRIBUTING.md)
 

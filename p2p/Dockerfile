@@ -20,11 +20,16 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs \
     && echo 'fn main() {}' > src/tui_main.rs \
     && echo 'fn main() {}' > src/turn_main.rs \
     && mkdir -p tests && echo '' > tests/e2e_integration.rs
+# First pass: build with dummy sources to cache dependencies
 RUN cargo build --release --bin syncplay-signaling \
     && cargo build --release --bin syncplay-turn \
-    && rm -rf src target
+    && cargo build --release --features tui --bin syncplay-tui
 
-COPY p2p/rust/ .
+# Replace dummy sources with real sources (keep target for cache)
+COPY p2p/rust/src ./src
+COPY p2p/rust/tests ./tests
+RUN touch src/main.rs src/tui_main.rs src/turn_main.rs
+# Second pass: rebuild only changed source files (dependencies stay cached)
 RUN cargo build --release --bin syncplay-signaling \
     && cargo build --release --features tui --bin syncplay-tui \
     && cargo build --release --bin syncplay-turn
