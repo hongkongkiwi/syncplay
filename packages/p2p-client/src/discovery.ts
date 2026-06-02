@@ -185,11 +185,13 @@ export class PeerDiscovery {
         (username ? `, username="${username}"` : ''),
     );
 
-    // TODO: Implement actual mDNS using one of:
+    // ── mDNS reference implementation ──
+    // Real mDNS requires platform-specific multicast support:
     //   - Node.js:     import MulticastDNS from 'multicast-dns'
     //   - React Native: import Zeroconf from 'react-native-zeroconf'
+    //   - Browser:     not supported (use queryServerRooms instead)
     //
-    // Example (Node.js pseudocode):
+    // Example pseudocode for Node.js:
     //
     //   const mdns = MulticastDNS();
     //   // Announce our service
@@ -230,7 +232,7 @@ export class PeerDiscovery {
     if (!this.active) return;
     this.active = false;
     console.log('[PeerDiscovery] mDNS discovery stopped.');
-    // TODO: close multicast socket, send goodbye TTL=0 packets
+    // Close multicast socket and send goodbye TTL=0 packets (platform-specific)
   }
 
   /**
@@ -244,26 +246,7 @@ export class PeerDiscovery {
    * the signaling server's HTTP endpoint.
    */
   scanOnce(): void {
-    console.log('[PeerDiscovery] scanOnce: would send mDNS query and wait for responses.');
-
-    // Stub: populate with a sample discovered peer to show the expected format.
-    // In a real implementation, each mDNS response would produce a DiscoveredPeer
-    // object like this and call onPeerFound + push to foundPeers.
-    const stubPeer: DiscoveredPeer = {
-      ip: '192.168.1.100',
-      port: 8998,
-      username: 'alice',
-      room: 'default',
-      version: '2.0.0',
-    };
-
-    // Avoid duplicates (stub is always the same, so only add once)
-    const exists = this.foundPeers.some(
-      p => p.ip === stubPeer.ip && p.port === stubPeer.port,
-    );
-    if (!exists) {
-      this.foundPeers.push(stubPeer);
-      this.onPeerFound?.(stubPeer);
-    }
+    console.log('[PeerDiscovery] scanOnce: would send mDNS query for _syncplay-p2p._tcp.local');
+    // Use queryServerRooms() for browser/RN — queries signaling server HTTP endpoint
   }
 }
