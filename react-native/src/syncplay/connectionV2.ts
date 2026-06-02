@@ -555,7 +555,7 @@ export class P2PConnection implements P2PTransport {
     if (!this.stateManager.connected) return;
     if (!this.dc || this.dc.readyState !== 'open') return;
     try {
-      this.dc.send(encode(msgType, payload));
+      this.dc.send(encode(msgType, payload) as unknown as Uint8Array<ArrayBuffer>);
     } catch (err) {
       console.warn('[P2P] send error:', err);
     }

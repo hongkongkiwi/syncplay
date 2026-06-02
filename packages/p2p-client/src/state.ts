@@ -87,7 +87,7 @@ export interface RoomStateSnapshot {
 }
 
 export type ConnectionState = 'offline' | 'connecting' | 'handshaking' | 'connecting_peers' | 'ready' | 'reconnecting' | 'error';
-export type SyncEventType = 'chat' | 'playstate' | 'user-join' | 'user-leave' | 'host-change' | 'error' | 'transfer-complete' | 'transfer-progress';
+export type SyncEventType = 'chat' | 'playstate' | 'user-join' | 'user-leave' | 'host-change' | 'error' | 'transfer-complete' | 'transfer-progress' | 'file-request';
 
 export interface SyncEvent {
   type: SyncEventType;

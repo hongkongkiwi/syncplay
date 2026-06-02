@@ -50,13 +50,18 @@ pub enum VoiceEvent {
 /// Audio below this threshold is treated as silence and not sent to peers.
 const VAD_ENERGY_THRESHOLD: f32 = 0.005;
 
+/// Queue of RTP packets: (sequence number, payload bytes)
+type JitterQueue = VecDeque<(u16, Vec<u8>)>;
+/// Shared jitter queue behind Arc<Mutex<...>>
+type SharedJitterQueue = Arc<Mutex<JitterQueue>>;
+
 /// Per-peer RTP packet reordering buffer for jitter compensation.
 /// Holds up to `max_packets` pending packets, emitting them in sequence-number
 /// order once enough have arrived. Handles u16 sequence number wrap.
 #[derive(Clone)]
 struct AudioJitterBuffer {
     /// Queued packets sorted by sequence number: (seq_num, payload)
-    packets: Arc<Mutex<VecDeque<(u16, Vec<u8>)>>>,
+    packets: SharedJitterQueue,
     /// Next expected sequence number
     next_seq: Arc<Mutex<Option<u16>>>,
     /// Target number of packets to queue before emitting (2 = ~40ms latency)

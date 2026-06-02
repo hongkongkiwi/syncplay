@@ -28,7 +28,7 @@ class MockWebSocket {
   close = jest.fn();
 }
 
-(global as any).WebSocket = MockWebSocket;
+(globalThis as any).WebSocket = MockWebSocket;
 
 // Mock RTCPeerConnection — declare mock fns with "mock" prefix so Jest allows them
 const mockCreateOffer = jest.fn();
