@@ -1,3 +1,4 @@
+// DEPRECATED: v1.x legacy. Use connectionV2.ts for v2.0.0 P2P.
 import {
   createIncomingTransfer,
   isTransferStatus,

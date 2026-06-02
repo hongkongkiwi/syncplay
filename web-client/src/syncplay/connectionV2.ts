@@ -11,8 +11,19 @@ import {
   type SyncEvent,
 } from 'syncplay-p2p-client';
 
-import type { ConnectionConfig } from './connection.ts';
-import type { ConnectionStatus } from './state.ts';
+export type ConnectionStatus =
+  | 'idle'
+  | 'connecting'
+  | 'connected'
+  | 'disconnected'
+  | 'error';
+
+export type ConnectionConfig = {
+  host: string;
+  username: string;
+  room: string;
+  password?: string;
+};
 
 // ── Signaling message shapes ──────────────────────────────────────
 

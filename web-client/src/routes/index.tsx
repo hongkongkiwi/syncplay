@@ -22,7 +22,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { SyncplayP2PConnection } from '~/syncplay/connectionV2';
 import type { SyncEvent } from 'syncplay-p2p-client';
-import type { ConnectionConfig } from '~/syncplay/connection';
+import type { ConnectionConfig } from '~/syncplay/connectionV2';
 import { calculateSyncCorrection } from '~/syncplay/syncControl';
 
 export const Route = createFileRoute('/')({
@@ -422,12 +422,9 @@ function WebClient() {
 
     const config: ConnectionConfig = {
       host: form.host.trim(),
-      port: 8998, // signaling server port, not used directly by V2
-      tls: false,
       username: form.username.trim() || defaultForm.username,
       room: roomName,
       password: form.password || roomPass || undefined,
-      proxyUrl: '',
     };
 
     manualDisconnectRef.current = false;

@@ -2,7 +2,8 @@ import type { DocumentPickerAsset } from 'expo-document-picker';
 
 import type { TransferSession } from '../syncplay/fileTransfer';
 import type { IncomingMediaLibraryItem } from '../syncplay/mediaLibrary';
-import type { SyncplayFile } from '../syncplay/protocol';
+
+type SyncplayFile = { name: string; duration: number; size: number };
 
 export function isStreamUri(value: string): boolean {
   return /^[a-z][a-z\d+.-]*:\/\//i.test(value);

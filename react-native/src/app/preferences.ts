@@ -1,5 +1,6 @@
 import type { MediaLibraryItem } from '../syncplay/mediaLibrary';
-import type { PrivacyMode } from '../syncplay/protocol';
+
+type PrivacyMode = 'full' | 'hashed' | 'none';
 
 export const PREFERENCES_STORAGE_KEY = 'syncplay-mobile/preferences/v1';
 

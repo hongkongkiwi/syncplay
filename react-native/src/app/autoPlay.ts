@@ -1,4 +1,4 @@
-import type { RoomUser } from '../syncplay/state';
+type RoomUser = { username: string; isReady: boolean; isController: boolean; file?: { name: string } | null };
 
 export type AutoPlayConfig = {
   enabled: boolean;
