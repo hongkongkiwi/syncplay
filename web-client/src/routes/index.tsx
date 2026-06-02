@@ -163,6 +163,7 @@ function WebClient() {
   const [syncPaused, setSyncPaused] = useState(false);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<{ name: string; size: number } | null>(null);
+  const [selectedSubtitles, setSelectedSubtitles] = useState<Array<{ filename: string; size: number; language?: string }>>([]);
   const [newPlaylistUrl, setNewPlaylistUrl] = useState('');
   const [showPlaylistPanel, setShowPlaylistPanel] = useState(false);
   const [unreadChat, setUnreadChat] = useState(false);
@@ -582,17 +583,48 @@ function WebClient() {
     [connected, connection],
   );
 
-  const selectMedia = (file: File | null) => {
-    if (!file) {
+  const selectMedia = (files: File[] | null) => {
+    if (!files || files.length === 0) {
       return;
     }
 
-    const nextUrl = URL.createObjectURL(file);
+    // Video file extensions to filter
+    const VIDEO_EXTENSIONS = new Set([
+      '.mkv', '.avi', '.mp4', '.webm', '.mov', '.ogv', '.flv',
+      '.m4v', '.mpg', '.mpeg', '.wmv', '.3gp', '.ts',
+    ]);
+
+    // Find the first video file
+    const videoFile = files.find(f => {
+      const ext = '.' + f.name.split('.').pop()?.toLowerCase();
+      return VIDEO_EXTENSIONS.has(ext) || f.type.startsWith('video/');
+    });
+
+    if (!videoFile) {
+      addSystemMessage('No video file found in selection.');
+      return;
+    }
+
+    const nextUrl = URL.createObjectURL(videoFile);
     setMediaUrl(nextUrl);
-    setSelectedFile({ name: file.name, size: file.size });
-    addSystemMessage(
-      `Loaded ${file.name}. Metadata will be sent after the browser reads the duration.`,
-    );
+    setSelectedFile({ name: videoFile.name, size: videoFile.size });
+
+    // Detect subtitle files among the selected files
+    const tracks = connection.manager.findSubtitles(files, videoFile.name);
+    setSelectedSubtitles(tracks);
+
+    if (tracks.length > 0) {
+      const trackDesc = tracks
+        .map(t => t.language ? `${t.filename} [${t.language}]` : t.filename)
+        .join(', ');
+      addSystemMessage(
+        `Loaded ${videoFile.name}. Found ${tracks.length} subtitle file${tracks.length > 1 ? 's' : ''}: ${trackDesc}. Metadata will be sent after the browser reads the duration.`,
+      );
+    } else {
+      addSystemMessage(
+        `Loaded ${videoFile.name}. No subtitles found. Metadata will be sent after the browser reads the duration.`,
+      );
+    }
   };
 
   const publishMedia = () => {
@@ -600,6 +632,9 @@ function WebClient() {
     if (!video || !mediaUrl) {
       return;
     }
+
+    // Store detected subtitle tracks so state manager can relay them
+    connection.manager.setSubtitleTracks(selectedSubtitles);
 
     connection.sendFileInfo({
       name: selectedFile?.name ?? 'Browser media',
@@ -722,9 +757,10 @@ function WebClient() {
               <span>Choose a video file</span>
               <input
                 type="file"
-                accept="video/*,.mkv,.avi,.mp4,.webm,.mov"
+                multiple
+                accept="video/*,.mkv,.avi,.mp4,.webm,.mov,.srt,.ass,.ssa,.vtt,.sub,.idx,.txt"
                 onChange={event => {
-                  selectMedia(event.target.files?.[0] ?? null);
+                  selectMedia(event.target.files ? Array.from(event.target.files) : null);
                 }}
               />
             </label>
@@ -737,9 +773,10 @@ function WebClient() {
             <span>Media</span>
             <input
               type="file"
-              accept="video/*,.mkv,.avi,.mp4,.webm,.mov"
+              multiple
+              accept="video/*,.mkv,.avi,.mp4,.webm,.mov,.srt,.ass,.ssa,.vtt,.sub,.idx,.txt"
               onChange={event => {
-                selectMedia(event.target.files?.[0] ?? null);
+                selectMedia(event.target.files ? Array.from(event.target.files) : null);
               }}
             />
           </label>

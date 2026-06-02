@@ -159,6 +159,7 @@ export class P2PStateManager {
   lastTransitionMessage = '';
   private _lastConfig: { host: string; username: string; room: string } | null = null;
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private _subtitleTracks: SubtitleTrack[] = [];
 
   // Configurable callbacks for the connection layer
   onSendTransport: ((msgType: MessageType, payload: unknown) => void) | null = null;
@@ -546,6 +547,7 @@ export class P2PStateManager {
   sendFileInfo(file?: FileMetadata): void {
     if (!this.isHost || !this._transport) return;
     this._transport.send(MessageType.FileInfo, { username: this.username, file });
+    this.sendSubtitleInfo();
   }
 
   // ── Controllers ──────────────────────────────────────────────────
@@ -641,6 +643,12 @@ export class P2PStateManager {
     for (const c of this.room.controllers) {
       this._transport.send(MessageType.ControllerChange, {
         peer_id: c, action: ControllerAction.Add,
+      });
+    }
+    // Send subtitle info if host has loaded subtitles
+    if (this._subtitleTracks.length > 0) {
+      this._transport.send(MessageType.SubtitleInfo, {
+        subtitles: this._subtitleTracks,
       });
     }
   }
@@ -885,55 +893,149 @@ export class P2PStateManager {
 
   // ── Subtitle detection ────────────────────────────────────────────
 
+  /** Subtitle file extensions recognized by the matcher */
+  private static readonly SUBTITLE_EXTENSIONS: ReadonlySet<string> = new Set([
+    '.srt', '.ass', '.ssa', '.vtt', '.sub', '.idx', '.txt',
+  ]);
+
+  /** Map common 3-letter language codes to ISO 639-1 2-letter codes */
+  private static readonly LANG_CODE_MAP: Record<string, string> = {
+    eng: 'en', fra: 'fr', fre: 'fr', deu: 'de', ger: 'de',
+    spa: 'es', ita: 'it', por: 'pt', rus: 'ru', jpn: 'ja',
+    kor: 'ko', ara: 'ar', zho: 'zh', chi: 'zh', nld: 'nl',
+    dut: 'nl', swe: 'sv', nor: 'no', dan: 'da', fin: 'fi',
+    pol: 'pl', tur: 'tr', heb: 'he', hin: 'hi', tha: 'th',
+    vie: 'vi', ukr: 'uk', ces: 'cs', cze: 'cs', ron: 'ro',
+    hun: 'hu', ell: 'el', gre: 'el', bul: 'bg', cat: 'ca',
+    eus: 'eu', baq: 'eu', glg: 'gl', slv: 'sl', slo: 'sk',
+    srp: 'sr', hrv: 'hr', msa: 'ms', may: 'ms', fil: 'tl',
+    ind: 'id', fas: 'fa', per: 'fa', lit: 'lt', lav: 'lv',
+    est: 'et', isl: 'is', ice: 'is', mar: 'mr', ben: 'bn',
+    tam: 'ta', tel: 'te', mal: 'ml', kan: 'kn', guj: 'gu',
+  };
+
   /**
-   * Scan for subtitle tracks matching a given video filename.
+   * Extract a language code from a subtitle filename stem.
+   *
+   * Common patterns:
+   *   "movie.en"       → "en" (2-letter ISO 639-1)
+   *   "movie.eng"      → "en" (3-letter ISO 639-2 → mapped)
+   *   "movie.en.sdh"   → "en" (2-letter + hearing-impaired suffix)
+   *   "movie.eng.forced" → "en" (3-letter + forced flag)
+   *
+   * Falls back to undefined if no language code is detected.
+   */
+  static detectSubtitleLanguage(filename: string): string | undefined {
+    const stem = filename.replace(/\.[^.]+$/, ''); // drop extension
+    const parts = stem.split(/[._-]/);
+
+    // Walk parts from right to left looking for a language code
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const token = parts[i].toLowerCase();
+
+      // Skip known non-language suffixes
+      if (token === 'forced' || token === 'sdh' || token === 'hi' ||
+          token === 'cc' || token === 'commentary' || token === 'stereo' ||
+          token === 'surround' || token === 'dub' || token === 'sub') {
+        continue;
+      }
+
+      // Exact 2-letter code
+      if (/^[a-z]{2}$/.test(token)) {
+        return token;
+      }
+
+      // 3-letter code — map to 2-letter if known
+      if (/^[a-z]{3}$/.test(token)) {
+        return P2PStateManager.LANG_CODE_MAP[token] ?? token;
+      }
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Find subtitle tracks matching a given video filename from a list of
+   * browser file-like objects.
+   *
+   * In the browser, the user selects files via `<input multiple>` or
+   * drag-and-drop. This method filters those files for subtitle tracks
+   * whose stem matches the video's stem.
    *
    * Supported subtitle extensions: .srt, .ass, .ssa, .vtt, .sub, .idx, .txt
    *
-   * In the Rust TUI, this method performs a full filesystem directory scan:
-   *   - Reads the video's parent directory entries
-   *   - Matches filenames that share the video's base name but have a subtitle
-   *     extension (e.g., "movie.srt", "movie.en.ass", "movie.zh.vtt")
-   *   - Parses subtitle headers to detect language and track metadata
-   *   - Returns SubtitleTrack[] with path, language, and format info
+   * Matching rules:
+   *   - video "movie.mkv"  → matches "movie.srt", "movie.en.ass", "movie.en.sdh.vtt"
+   *   - video "episode.mkv" → matches "episode.fr.srt", "episode_EN.vtt" (case-insensitive)
    *
-   * In the browser (this stub), there is no filesystem access. The Web File
-   * API only provides access to explicitly user-selected files via <input> or
-   * drag-and-drop – there is no way to scan a directory for sibling files.
-   * Therefore, this method always returns an empty array and logs a warning.
-   *
-   * For Electron/React Native, platform-specific modules (fs, expo-file-system,
-   * react-native-fs) could be used to implement directory scanning.
-   *
-   * @param videoName - The video filename to find subtitles for (e.g., "movie.mkv")
-   * @returns Always returns an empty array in the browser stub
+   * @param files   - Array of file-like objects (at minimum {name, size}).
+   * @param videoName - The video filename to match against (e.g., "movie.mkv").
+   * @returns SubtitleTrack[] with filename, size, and detected language.
    */
-  findSubtitles(videoName: string): SubtitleTrack[] {
-    const SUBTITLE_EXTENSIONS = ['.srt', '.ass', '.ssa', '.vtt', '.sub', '.idx', '.txt'];
+  findSubtitles(
+    files: ReadonlyArray<{ name: string; size?: number }>,
+    videoName: string,
+  ): SubtitleTrack[] {
+    const videoStem = videoName.replace(/\.[^.]+$/, '').toLowerCase();
+    if (!videoStem) return [];
 
-    console.log(
-      `[P2PState] findSubtitles: would scan for subtitles matching "${videoName}" ` +
-      `(extensions: ${SUBTITLE_EXTENSIONS.join(', ')})`,
-    );
-    console.log(
-      '[P2PState] findSubtitles: browser has no filesystem access — ' +
-      'directory scan not possible. In Rust, this does a read_dir() on the ' +
-      'video parent directory and matches subtitle extensions.',
-    );
+    const tracks: SubtitleTrack[] = [];
 
-    // Stub: In the browser, we cannot scan the filesystem.
-    // The Rust implementation does:
-    //   let dir = std::fs::read_dir(parent)?;
-    //   let base = Path::new(videoName).file_stem()?;
-    //   for entry in dir {
-    //     let path = entry?.path();
-    //     if SUBTITLE_EXTENSIONS.contains(&path.extension()) {
-    //       if path.file_stem()?.starts_with(&base) {
-    //         tracks.push(SubtitleTrack { path, ... });
-    //       }
-    //     }
-    //   }
-    return [];
+    for (const f of files) {
+      const name = f.name;
+      const extDot = name.lastIndexOf('.');
+      if (extDot === -1) continue;
+
+      const ext = name.slice(extDot).toLowerCase();
+      if (!P2PStateManager.SUBTITLE_EXTENSIONS.has(ext)) continue;
+
+      // Check if the stem starts with the video stem (case-insensitive)
+      const stem = name.slice(0, extDot).toLowerCase();
+      if (!stem.startsWith(videoStem)) continue;
+
+      // The suffix after the video stem should be a language code or empty
+      const suffix = stem.slice(videoStem.length);
+
+      // Allow optional separator and language/flag suffix
+      if (suffix.length > 0) {
+        // Must start with a separator (. _ -) followed by a language indicator
+        if (!/^[._-]/.test(suffix)) continue;
+
+        const langCandidate = suffix.slice(1);
+        // Allow flags like "forced", "sdh", "cc", "hi"
+        const isLangOrFlag = /^[a-z]{2,3}([._-](forced|sdh|hi|cc|commentary|stereo|surround|dub|sub))?$/i.test(langCandidate);
+        if (!isLangOrFlag) continue;
+      }
+
+      tracks.push({
+        filename: name,
+        size: f.size ?? 0,
+        language: P2PStateManager.detectSubtitleLanguage(name),
+      });
+    }
+
+    return tracks;
+  }
+
+  /**
+   * Send subtitle information to all connected peers.
+   * Called after findSubtitles when the user loads media with bundled subtitles.
+   */
+  sendSubtitleInfo(): void {
+    if (!this._transport || !this._connected) return;
+    if (this._subtitleTracks.length === 0) return;
+
+    this._transport.send(MessageType.SubtitleInfo, {
+      subtitles: this._subtitleTracks,
+    } satisfies SubtitleInfoPayload);
+  }
+
+  /**
+   * Store detected subtitle tracks so they can be replayed
+   * to late-joining peers via sendStateTo().
+   */
+  setSubtitleTracks(tracks: SubtitleTrack[]): void {
+    this._subtitleTracks = tracks;
   }
 
   // ── File transfer sender ──────────────────────────────────────────

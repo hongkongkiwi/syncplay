@@ -12,6 +12,7 @@ import {
   Film,
   FolderOpen,
   Globe,
+  HelpCircle,
   KeyRound,
   Library,
   Link,
@@ -36,6 +37,7 @@ import {
   FlatList,
   KeyboardAvoidingView,
   Linking,
+  Modal,
   Platform,
   Pressable,
   SafeAreaView,
@@ -348,6 +350,7 @@ export default function App() {
   const [autosaveJoinedRooms, setAutosaveJoinedRooms] = useState(true);
   const [hideEmptyRooms, setHideEmptyRooms] = useState(false);
   const [darkMode, setDarkMode] = useState(true); // default dark
+  const [showHelp, setShowHelp] = useState(false);
 
   // Refs
   const lastSentPositionRef = useRef(0);
@@ -1579,6 +1582,13 @@ export default function App() {
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
               <Pressable
                 style={styles.darkModeToggle}
+                onPress={() => setShowHelp(true)}
+                accessibilityLabel="Open help"
+              >
+                <HelpCircle color={darkMode ? '#8ea4c0' : '#4a6fa5'} size={20} />
+              </Pressable>
+              <Pressable
+                style={styles.darkModeToggle}
                 onPress={() => setDarkMode(d => !d)}
                 accessibilityLabel={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
               >
@@ -1597,6 +1607,49 @@ export default function App() {
         <BottomTabs activeScreen={activeScreen} onSelect={setActiveScreen} connected={connected} />
       </KeyboardAvoidingView>
     </SafeAreaView>
+      <Modal
+        visible={showHelp}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setShowHelp(false)}
+      >
+        <View style={styles.helpOverlay}>
+          <View style={styles.helpModal}>
+            <Text style={styles.helpTitle}>Syncplay P2P Commands</Text>
+            <ScrollView
+              style={styles.helpScroll}
+              contentContainerStyle={styles.helpScrollContent}
+              showsVerticalScrollIndicator={true}
+            >
+              <Text style={styles.helpSection}>Chat Commands</Text>
+              {[
+                '/help — Show this help',
+                '/me <action> — Send an action message',
+                '/users — List users in the room',
+                '/ready — Toggle ready state',
+                '/leave — Leave the room',
+                '/version — Show server version',
+                '/controller — Request controller role',
+                '/playlist — Show playlist',
+                '/settings — Open settings',
+                '/shrug — ¯\\_(ツ)_/¯',
+                '/tableflip — (╯°□°)╯︵ ┻━┻',
+                '/lenny — ( ͡° ͜ʖ ͡°)',
+              ].map((cmd, i) => (
+                <Text key={i} style={styles.helpCommand}>{cmd}</Text>
+              ))}
+              <Text style={styles.helpSection}>Speed Controls</Text>
+              <Text style={styles.helpCommand}>Use the speed buttons in the media bar to adjust playback speed (0.5x, 1x, 1.5x, 2x).</Text>
+            </ScrollView>
+            <Pressable
+              style={[styles.helpCloseButton, { backgroundColor: colors.accent }]}
+              onPress={() => setShowHelp(false)}
+            >
+              <Text style={styles.helpCloseText}>Close</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </ErrorBoundary>
   );
 }
@@ -1908,4 +1961,64 @@ const styles = StyleSheet.create({
   smallText: { color: colors.muted, fontSize: 12, marginTop: 3 },
   mutedText: { color: colors.muted, fontSize: 13, paddingVertical: 8 },
   errorText: { color: colors.error, fontSize: 13 },
+  // Help modal
+  helpOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  helpModal: {
+    width: '100%',
+    maxWidth: 420,
+    maxHeight: '80%',
+    borderRadius: 16,
+    backgroundColor: '#151520',
+    borderColor: '#2a2a3e',
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  helpTitle: {
+    color: colors.text,
+    fontSize: 20,
+    fontWeight: '800',
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 12,
+    borderBottomColor: colors.line,
+    borderBottomWidth: 1,
+  },
+  helpScroll: {
+    maxHeight: 400,
+  },
+  helpScrollContent: {
+    padding: 20,
+    gap: 8,
+  },
+  helpSection: {
+    color: colors.accent,
+    fontSize: 15,
+    fontWeight: '800',
+    marginTop: 12,
+    marginBottom: 6,
+  },
+  helpCommand: {
+    color: colors.text,
+    fontSize: 14,
+    paddingVertical: 4,
+    fontFamily: Platform.select({ ios: 'Menlo', default: 'monospace' }),
+  },
+  helpCloseButton: {
+    margin: 20,
+    minHeight: 46,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  helpCloseText: {
+    color: colors.ink,
+    fontSize: 16,
+    fontWeight: '800',
+  },
 });
