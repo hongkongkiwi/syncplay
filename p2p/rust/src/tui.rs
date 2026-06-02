@@ -436,6 +436,15 @@ async fn handle_input(
                 }
                 KeyCode::Home => s.input_cursor = 0,
                 KeyCode::End => s.input_cursor = s.input.len(),
+                KeyCode::Char('j') => {
+                    if !s.playlist.is_empty() {
+                        s.playlist_scroll = (s.playlist_scroll + 1)
+                            .min(s.playlist.len().saturating_sub(PLAYLIST_VISIBLE));
+                    }
+                }
+                KeyCode::Char('k') => {
+                    s.playlist_scroll = s.playlist_scroll.saturating_sub(1);
+                }
                 KeyCode::Char(c) => {
                     let pos = s.input_cursor;
                     if pos <= s.input.len() {

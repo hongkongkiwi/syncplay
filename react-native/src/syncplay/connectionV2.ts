@@ -837,7 +837,7 @@ export class P2PStateManager {
     switch (msgType) {
       case MessageType.Hello: return this.handleHello(payload as HelloPayload);
       case MessageType.Playstate: return this.handlePlaystate(payload as PlaystatePayload);
-      case MessageType.PlaystateRequest: return this.handlePlaystateRequest(payload as PlaystateRequestPayload);
+      case MessageType.PlaystateRequest: return this.handlePlaystateRequest(payload as PlaystateRequestPayload, from);
       case MessageType.Chat: return this.handleChat(payload as ChatPayload);
       case MessageType.Readiness: return this.handleReadiness(payload as ReadinessPayload);
       case MessageType.PlaylistChange: return this.handlePlaylistChange(payload as PlaylistChangePayload);
@@ -917,10 +917,10 @@ export class P2PStateManager {
     this.emit({ type: 'playstate', data: this.getSnapshot(), timestamp: Date.now() });
   }
 
-  private handlePlaystateRequest(p: PlaystateRequestPayload): void {
+  private handlePlaystateRequest(p: PlaystateRequestPayload, from?: string): void {
     if (!this.isHost) return;
-    const controller = this._room.setBy || p.requestId;
-    if (!this.isController(controller) && controller !== this.username) {
+    const requester = from ?? p.requestId;
+    if (!this.isController(requester)) {
       console.warn('[P2P] PlaystateRequest denied — not a controller');
       return;
     }

@@ -501,7 +501,13 @@ export class SyncplayP2PConnection {
   }
 
   sendPlaystate(position: number, paused: boolean, doSeek: boolean, speed = 1.0): void {
-    this.stateManager.updatePlaystate(position, paused, speed);
+    // doSeek: when true, signals other peers to seek to this position (seeked event).
+    // When false, this is a timeupdate-driven sync pulse (gradual correction).
+    if (doSeek) {
+      this.stateManager.requestSeek(position);
+    } else {
+      this.stateManager.updatePlaystate(position, paused, speed);
+    }
   }
 
   toggleReady(): boolean {

@@ -683,7 +683,7 @@ export class P2PStateManager {
     switch (msgType) {
       case MessageType.Hello: return this.handleHello(payload as HelloPayload, from);
       case MessageType.Playstate: return this.handlePlaystate(payload as any);
-      case MessageType.PlaystateRequest: return this.handlePlaystateRequest(payload as PlaystateRequestPayload);
+      case MessageType.PlaystateRequest: return this.handlePlaystateRequest(payload as PlaystateRequestPayload, from);
       case MessageType.Chat: return this.handleChat(payload as ChatPayload);
       case MessageType.Readiness: return this.handleReadiness(payload as ReadinessPayload);
       case MessageType.PlaylistChange: return this.handlePlaylistChange(payload as PlaylistChangePayload);
@@ -736,8 +736,14 @@ export class P2PStateManager {
     this.emit({ type: 'playstate', data: this.getSnapshot(), timestamp: Date.now() });
   }
 
-  private handlePlaystateRequest(p: PlaystateRequestPayload): void {
+  private handlePlaystateRequest(p: PlaystateRequestPayload, from?: string): void {
     if (!this.isHost) return;
+    // Controller validation: only peers granted Controller status can send playstate requests
+    const requester = from ?? p.requestId;
+    if (!this.isController(requester)) {
+      console.warn(`[P2PState] PlaystateRequest denied — ${requester} is not a controller`);
+      return;
+    }
     if (typeof p.action === 'object' && 'set_speed' in p.action) {
       this.room.speed = p.action.set_speed;
       this.updatePlaystate(this.room.position, this.room.paused);
@@ -1350,9 +1356,10 @@ export class P2PStateManager {
   }
 
   private settingsText(): string {
+    const roomName = this._lastConfig?.room ?? '(unknown)';
     return [
       `Username: ${this.username}`,
-      `Room: ${this.username}`,
+      `Room: ${roomName}`,
       `Position: ${this.room.position.toFixed(1)}s ${this.room.paused ? '⏸' : '▶'}`,
       `Speed: ${this.room.speed}x`,
       `Playlist: ${this.room.playlist.length} items, index ${this.room.playlistIndex}`,
