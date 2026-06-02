@@ -1,5 +1,16 @@
-import { findMediaByName, type MediaLibraryItem } from '../syncplay/mediaLibrary';
-import { isStreamUri } from './appHelpers';
+type MediaLibraryItem = { name: string; uri: string; size: number; duration: number | null; directory: string | null };
+
+function findMediaByName(items: MediaLibraryItem[], name: string): MediaLibraryItem | undefined {
+  const stripped = (name.replace(/^.*[\\/]/, '').split('?')[0] ?? '').split('#')[0] ?? '';
+  return items.find(item => {
+    const itemName = (item.name.replace(/^.*[\\/]/, '').split('?')[0] ?? '').split('#')[0] ?? '';
+    return itemName.toLowerCase() === stripped.toLowerCase();
+  });
+}
+
+function isStreamUri(uri: string): boolean {
+  return /^(https?:\/\/|rtmp:\/\/|rtsp:\/\/)/i.test(uri);
+}
 
 export type PlaylistResolution =
   | { kind: 'none' }

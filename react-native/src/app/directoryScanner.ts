@@ -1,4 +1,4 @@
-import type { IncomingMediaLibraryItem } from '../syncplay/mediaLibrary';
+type IncomingMediaLibraryItem = { uri: string; name: string; size?: number; duration?: number | null; directory?: string | null };
 
 export type ScanFileLike = {
   uri: string;

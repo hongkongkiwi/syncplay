@@ -29,6 +29,7 @@ import {
   type ReadinessPayload,
   type StatusUpdatePayload,
   type SubtitleInfoPayload,
+  type SubtitleTrack,
   type UserInfoPayload,
   type VoiceMutePayload,
   avatarSetPayload,
@@ -880,6 +881,59 @@ export class P2PStateManager {
       console.log(`Cancelling file transfer: ${transfer.filename} (${transferId})`);
       this.incomingTransfers.delete(transferId);
     }
+  }
+
+  // ── Subtitle detection ────────────────────────────────────────────
+
+  /**
+   * Scan for subtitle tracks matching a given video filename.
+   *
+   * Supported subtitle extensions: .srt, .ass, .ssa, .vtt, .sub, .idx, .txt
+   *
+   * In the Rust TUI, this method performs a full filesystem directory scan:
+   *   - Reads the video's parent directory entries
+   *   - Matches filenames that share the video's base name but have a subtitle
+   *     extension (e.g., "movie.srt", "movie.en.ass", "movie.zh.vtt")
+   *   - Parses subtitle headers to detect language and track metadata
+   *   - Returns SubtitleTrack[] with path, language, and format info
+   *
+   * In the browser (this stub), there is no filesystem access. The Web File
+   * API only provides access to explicitly user-selected files via <input> or
+   * drag-and-drop – there is no way to scan a directory for sibling files.
+   * Therefore, this method always returns an empty array and logs a warning.
+   *
+   * For Electron/React Native, platform-specific modules (fs, expo-file-system,
+   * react-native-fs) could be used to implement directory scanning.
+   *
+   * @param videoName - The video filename to find subtitles for (e.g., "movie.mkv")
+   * @returns Always returns an empty array in the browser stub
+   */
+  findSubtitles(videoName: string): SubtitleTrack[] {
+    const SUBTITLE_EXTENSIONS = ['.srt', '.ass', '.ssa', '.vtt', '.sub', '.idx', '.txt'];
+
+    console.log(
+      `[P2PState] findSubtitles: would scan for subtitles matching "${videoName}" ` +
+      `(extensions: ${SUBTITLE_EXTENSIONS.join(', ')})`,
+    );
+    console.log(
+      '[P2PState] findSubtitles: browser has no filesystem access — ' +
+      'directory scan not possible. In Rust, this does a read_dir() on the ' +
+      'video parent directory and matches subtitle extensions.',
+    );
+
+    // Stub: In the browser, we cannot scan the filesystem.
+    // The Rust implementation does:
+    //   let dir = std::fs::read_dir(parent)?;
+    //   let base = Path::new(videoName).file_stem()?;
+    //   for entry in dir {
+    //     let path = entry?.path();
+    //     if SUBTITLE_EXTENSIONS.contains(&path.extension()) {
+    //       if path.file_stem()?.starts_with(&base) {
+    //         tracks.push(SubtitleTrack { path, ... });
+    //       }
+    //     }
+    //   }
+    return [];
   }
 
   // ── File transfer sender ──────────────────────────────────────────

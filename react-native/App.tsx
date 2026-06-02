@@ -18,12 +18,14 @@ import {
   ListPlus,
   MessageCircle,
   MonitorPlay,
+  Moon,
   Pause,
   Play,
   Plug,
   Send,
   Settings as SettingsIcon,
   Shuffle,
+  Sun,
   Trash2,
   Undo2,
   Users
@@ -55,32 +57,10 @@ import {
   type SyncEvent,
 } from './src/syncplay/connectionV2';
 import VoiceChat from './src/syncplay/voiceChat';
-import { parseTimestamp } from './src/syncplay/playback';
-import {
-  assetToMediaLibraryItem,
-  formatBytes,
-  formatClockTime,
-  formatTime,
-  parseSlashCommand,
-  shuffleFiles,
-} from './src/app/appHelpers';
 import { scanMediaDirectory } from './src/app/directoryScanner';
-import {
-  PREFERENCES_STORAGE_KEY,
-  createPersistedPreferences,
-  parsePersistedPreferences,
-  serializePersistedPreferences,
-  type LoopMode
-} from './src/app/preferences';
 import { resolvePlaylistItem } from './src/app/playlistPlayback';
 import { calculateSyncCorrection } from './src/app/syncControl';
 import { ErrorBoundary } from './src/app/ErrorBoundary';
-import {
-  addMediaItems,
-  buildDirectoryLabels,
-  findMediaByName,
-  type MediaLibraryItem
-} from './src/syncplay/mediaLibrary';
 import {
   APP_SCREENS,
   getInitialScreen,
@@ -95,6 +75,193 @@ type SyncplayFile = {
   duration: number;
   size: number;
 };
+
+// ── Local helpers (inlined from deleted v1 files) ─────────────────────
+
+// -- Media library types --
+type MediaLibraryItem = { name: string; uri: string; size: number; duration: number | null; directory: string | null };
+type IncomingMediaLibraryItem = { name?: string | null; uri: string; size?: number | null; duration?: number | null; directory?: string | null };
+
+// -- Helper functions for media library --
+function stripQueryAndHash(path: string): string { return path.split(/[?#]/, 1)[0] ?? path; }
+function decodePathPart(part: string): string { try { return decodeURIComponent(part); } catch { return part; } }
+
+function getFilenameFromPath(path: string | null | undefined): string {
+  if (!path) return '';
+  const cleanPath = stripQueryAndHash(path);
+  const parts = cleanPath.split(/[\\/]/).filter(Boolean);
+  const filename = parts.at(-1) ?? cleanPath;
+  return decodePathPart(filename);
+}
+
+function normalizeFilename(filename: string | null | undefined): string {
+  return getFilenameFromPath(filename).trim().toLocaleLowerCase();
+}
+
+function getDirectoryLabel(uri: string): string | null {
+  const cleanUri = stripQueryAndHash(uri);
+  const parts = cleanUri.split(/[\\/]/).filter(Boolean);
+  if (parts.length < 2) return null;
+  const directory = parts[parts.length - 2];
+  return directory ? decodePathPart(directory) || null : null;
+}
+
+function normalizeMediaItem(item: IncomingMediaLibraryItem): MediaLibraryItem {
+  const name = item.name?.trim() || getFilenameFromPath(item.uri) || 'video';
+  return { name, uri: item.uri, size: item.size ?? 0, duration: item.duration ?? null, directory: item.directory?.trim() || getDirectoryLabel(item.uri) };
+}
+
+// -- Media library functions --
+function addMediaItems(existingItems: MediaLibraryItem[], incomingItems: IncomingMediaLibraryItem[]): MediaLibraryItem[] {
+  const itemsByUri = new Map(existingItems.map(item => [item.uri, item]));
+  for (const incomingItem of incomingItems) {
+    if (!incomingItem.uri || itemsByUri.has(incomingItem.uri)) continue;
+    itemsByUri.set(incomingItem.uri, normalizeMediaItem(incomingItem));
+  }
+  return Array.from(itemsByUri.values());
+}
+
+function findMediaByName(items: MediaLibraryItem[], filename: string | null | undefined): MediaLibraryItem | null {
+  const target = normalizeFilename(filename);
+  if (!target) return null;
+  return items.find(item => normalizeFilename(item.name) === target) ?? null;
+}
+
+function buildDirectoryLabels(items: MediaLibraryItem[]): string[] {
+  const seen = new Set<string>();
+  const labels: string[] = [];
+  for (const item of items) {
+    if (!item.directory || seen.has(item.directory)) continue;
+    seen.add(item.directory);
+    labels.push(item.directory);
+  }
+  return labels;
+}
+
+// -- File picker helpers --
+function assetToMediaLibraryItem(asset: { uri: string; name: string; size?: number }): IncomingMediaLibraryItem {
+  return { name: asset.name, uri: asset.uri, size: asset.size ?? 0, duration: null, directory: null };
+}
+
+// -- Formatting helpers --
+function formatTime(seconds: number): string {
+  const safe = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+  const minutes = Math.floor(safe / 60);
+  const remaining = Math.floor(safe % 60);
+  return `${minutes}:${String(remaining).padStart(2, '0')}`;
+}
+
+function formatClockTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${hours}:${minutes}`;
+}
+
+function formatBytes(bytes: number): string {
+  if (!bytes) return 'unknown size';
+  const megabytes = bytes / 1024 / 1024;
+  return `${megabytes.toFixed(megabytes >= 100 ? 0 : 1)} MB`;
+}
+
+// -- Timestamp parsing --
+function parseTimestamp(value: string): number | null {
+  const cleaned = value.trim();
+  if (!cleaned) return null;
+  const parts = cleaned.split(':');
+  if (parts.some(part => !/^\d+$/.test(part))) return null;
+  const numbers = parts.map(part => Number.parseInt(part, 10));
+  if (numbers.some(number => !Number.isFinite(number))) return null;
+  return numbers.reduce((total, part) => total * 60 + part, 0);
+}
+
+// -- Slash command parser --
+type SlashCommandResult =
+  | { kind: 'chat'; text: string }
+  | { kind: 'me'; action: string }
+  | { kind: 'nick'; username: string }
+  | { kind: 'topic'; topic: string }
+  | { kind: 'help'; commands: string };
+
+function parseSlashCommand(input: string, username: string): SlashCommandResult | null {
+  const trimmed = input.trim();
+  if (trimmed === '/help') {
+    const commands = [
+      '/help — Show this help',
+      '/me <action> — Send an action message',
+      '/nick <username> — Change your username',
+      '/topic <text> — Set room topic'
+    ].join('\n');
+    return { kind: 'help', commands };
+  }
+  if (trimmed.startsWith('/me ')) {
+    const action = trimmed.slice(4).trim();
+    if (!action) return null;
+    return { kind: 'me', action };
+  }
+  if (trimmed.startsWith('/nick ')) {
+    const newUsername = trimmed.slice(6).trim();
+    if (!newUsername) return null;
+    return { kind: 'nick', username: newUsername };
+  }
+  if (trimmed.startsWith('/topic ')) {
+    const topic = trimmed.slice(7).trim();
+    if (!topic) return null;
+    return { kind: 'topic', topic };
+  }
+  if (trimmed.startsWith('/')) return { kind: 'chat', text: trimmed };
+  return null;
+}
+
+// -- Shuffle --
+function shuffleFiles(files: string[], random = Math.random): string[] {
+  const shuffled = [...files];
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    const current = shuffled[index];
+    const swap = shuffled[swapIndex];
+    if (current === undefined || swap === undefined) continue;
+    shuffled[index] = swap;
+    shuffled[swapIndex] = current;
+  }
+  return shuffled;
+}
+
+// -- Preferences types and storage key --
+type LoopMode = 'none' | 'single' | 'playlist';
+const PREFERENCES_STORAGE_KEY = 'syncplay-mobile/preferences/v2';
+
+interface PersistedPreferences {
+  form: { serverAddress?: string; username?: string; room?: string; password?: string };
+  savedRooms: string[];
+  mediaLibrary: MediaLibraryItem[];
+  controlPasswords: Record<string, string>;
+  autosaveJoinedRooms: boolean;
+  hideEmptyRooms: boolean;
+  syncPaused: boolean;
+  autoReconnect: boolean;
+  autoFileSwitch: boolean;
+  keepPlayingInBackground: boolean;
+  privacyMode: string;
+  autoPlayEnabled: boolean;
+  autoPlayThreshold: number;
+  timeOffset: number;
+  loopMode: LoopMode;
+}
+
+function createPersistedPreferences(p: PersistedPreferences): PersistedPreferences {
+  return { ...p, form: { ...p.form } };
+}
+
+function parsePersistedPreferences(value: string | null): PersistedPreferences | null {
+  if (!value) return null;
+  try { return JSON.parse(value) as PersistedPreferences; }
+  catch { return null; }
+}
+
+function serializePersistedPreferences(p: PersistedPreferences): string {
+  return JSON.stringify(p);
+}
 
 type ConnectionForm = {
   host: string;
@@ -180,6 +347,7 @@ export default function App() {
   const [roomListDraft, setRoomListDraft] = useState('default');
   const [autosaveJoinedRooms, setAutosaveJoinedRooms] = useState(true);
   const [hideEmptyRooms, setHideEmptyRooms] = useState(false);
+  const [darkMode, setDarkMode] = useState(true); // default dark
 
   // Refs
   const lastSentPositionRef = useRef(0);
@@ -347,6 +515,22 @@ export default function App() {
       });
     return () => { alive = false; };
   }, []);
+
+  // Load dark mode preference
+  useEffect(() => {
+    AsyncStorage.getItem('syncplay-rn-theme')
+      .then(value => {
+        if (value !== null) {
+          setDarkMode(value === 'dark');
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // Persist dark mode
+  useEffect(() => {
+    AsyncStorage.setItem('syncplay-rn-theme', darkMode ? 'dark' : 'light').catch(() => {});
+  }, [darkMode]);
 
   useEffect(() => {
     if (!preferencesLoaded) return;
@@ -1371,10 +1555,13 @@ export default function App() {
       </View>
     );
 
+  const themeBg = darkMode ? '#0e0e14' : '#f5f5f5';
+  const themeText = darkMode ? '#e1e1f0' : '#1a1a2e';
+
   return (
     <ErrorBoundary>
-    <SafeAreaView style={styles.safe}>
-      <StatusBar barStyle="light-content" />
+    <SafeAreaView style={[styles.safe, { backgroundColor: themeBg }]}>
+      <StatusBar barStyle={darkMode ? 'light-content' : 'dark-content'} />
       <KeyboardAvoidingView
         style={styles.container}
         behavior={Platform.select({ ios: 'padding', android: undefined })}
@@ -1389,7 +1576,20 @@ export default function App() {
                 {connected ? ` · ${roomPeers.length} peer${roomPeers.length !== 1 ? 's' : ''}` : ''}
               </Text>
             </View>
-            <View style={[styles.statusDot, connected ? styles.dotLive : styles.dotIdle]} />
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              <Pressable
+                style={styles.darkModeToggle}
+                onPress={() => setDarkMode(d => !d)}
+                accessibilityLabel={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+              >
+                {darkMode ? (
+                  <Sun color="#f5c542" size={20} />
+                ) : (
+                  <Moon color="#4a6fa5" size={20} />
+                )}
+              </Pressable>
+              <View style={[styles.statusDot, connected ? styles.dotLive : styles.dotIdle]} />
+            </View>
           </View>
 
           {screenContent}
@@ -1539,6 +1739,12 @@ const styles = StyleSheet.create({
   statusDot: { width: 14, height: 14, borderRadius: 7 },
   dotLive: { backgroundColor: colors.green },
   dotIdle: { backgroundColor: colors.faint },
+  darkModeToggle: {
+    width: 36, height: 36, borderRadius: 8,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: colors.panelSoft,
+    borderColor: colors.line, borderWidth: 1,
+  },
   videoShell: {
     minHeight: 210,
     borderRadius: 8,

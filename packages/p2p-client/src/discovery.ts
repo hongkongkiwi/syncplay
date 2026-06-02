@@ -47,8 +47,41 @@
 //   // ... later ...
 //   discovery.stopDiscovery();
 
+/** Payload shape emitted when a Syncplay peer is discovered on LAN */
+export interface DiscoveredPeer {
+  /** IPv4 address of the peer (e.g., "192.168.1.42") */
+  ip: string;
+  /** Signaling server port the peer advertises */
+  port: number;
+  /** The peer's username */
+  username: string;
+  /** The room the peer is in */
+  room: string;
+  /** Protocol version the peer advertises */
+  version?: string;
+}
+
+export type PeerFoundCallback = (peer: DiscoveredPeer) => void;
+
 export class PeerDiscovery {
   private active = false;
+
+  /**
+   * Callback invoked each time a Syncplay peer is discovered on the LAN.
+   * Set this to receive real-time peer notifications.
+   *
+   * @example
+   *   discovery.onPeerFound = (peer) => {
+   *     console.log(`Found ${peer.username} at ${peer.ip}:${peer.port}`);
+   *   };
+   */
+  onPeerFound: PeerFoundCallback | null = null;
+
+  /**
+   * List of all peers discovered since the last startDiscovery() call.
+   * Cleared on each start. Duplicates are suppressed (by ip:port).
+   */
+  foundPeers: DiscoveredPeer[] = [];
 
   /**
    * Start LAN peer discovery.
@@ -70,6 +103,7 @@ export class PeerDiscovery {
   startDiscovery(port = 8998, room?: string, username?: string): void {
     if (this.active) return;
     this.active = true;
+    this.foundPeers = [];
     console.log(
       `[PeerDiscovery] mDNS discovery would broadcast on port ${port}` +
         (room ? `, room="${room}"` : '') +
@@ -122,5 +156,39 @@ export class PeerDiscovery {
     this.active = false;
     console.log('[PeerDiscovery] mDNS discovery stopped.');
     // TODO: close multicast socket, send goodbye TTL=0 packets
+  }
+
+  /**
+   * Perform a one-shot scan for LAN peers (non-blocking stub).
+   *
+   * When implemented, this sends an mDNS query for `_syncplay-p2p._tcp.local`
+   * and collects responses for a short window (~3 seconds). Discovered peers
+   * are appended to `foundPeers` and the `onPeerFound` callback is invoked.
+   *
+   * In the browser stub, this populates foundPeers with a sample entry to
+   * demonstrate the expected format.
+   */
+  scanOnce(): void {
+    console.log('[PeerDiscovery] scanOnce: would send mDNS query and wait for responses.');
+
+    // Stub: populate with a sample discovered peer to show the expected format.
+    // In a real implementation, each mDNS response would produce a DiscoveredPeer
+    // object like this and call onPeerFound + push to foundPeers.
+    const stubPeer: DiscoveredPeer = {
+      ip: '192.168.1.100',
+      port: 8998,
+      username: 'alice',
+      room: 'default',
+      version: '2.0.0',
+    };
+
+    // Avoid duplicates (stub is always the same, so only add once)
+    const exists = this.foundPeers.some(
+      p => p.ip === stubPeer.ip && p.port === stubPeer.port,
+    );
+    if (!exists) {
+      this.foundPeers.push(stubPeer);
+      this.onPeerFound?.(stubPeer);
+    }
   }
 }
