@@ -73,6 +73,7 @@ import {
   getScreenTitle,
   type AppScreenId
 } from './src/navigation/screens';
+import TransfersScreen from './src/screens/TransfersScreen';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -1683,6 +1684,20 @@ export default function App() {
           </Pressable>
         </View>
       </View>
+    ) : activeScreen === 'transfers' ? (
+      <View style={styles.panel}>
+        <View style={styles.panelTitleRow}>
+          <Download color="#7fd2ff" size={18} />
+          <Text style={styles.panelTitle}>Transfers</Text>
+        </View>
+        <TransfersScreen
+          transfers={transferProgress}
+          stateManager={connected ? connection.stateManager : null}
+          onCancelTransfer={(transferId) => {
+            setTransferProgress(prev => prev.filter(t => t.transferId !== transferId));
+          }}
+        />
+      </View>
     ) : (
       <View style={styles.panel}>
         <View style={styles.panelTitleRow}>
@@ -1973,8 +1988,8 @@ function BottomTabs({
   connected: boolean;
   onSelect: (screen: AppScreenId) => void;
 }) {
-  // DEFERRED: transfers tab hidden until file transfer UI (send/receive progress, history) is built
-  const screens = APP_SCREENS.filter(s => s.id !== 'transfers');
+  // Transfers tab is now active — see TransfersScreen
+  const screens = APP_SCREENS;
   return (
     <View style={styles.bottomTabs}>
       {screens.map(screen => {
@@ -2001,6 +2016,7 @@ function renderTabIcon(screenId: AppScreenId, color: string) {
     case 'connect': return <Plug color={color} size={17} />;
     case 'watch': return <Film color={color} size={17} />;
     case 'room': return <Users color={color} size={17} />;
+    case 'transfers': return <Download color={color} size={17} />;
     case 'chat': return <MessageCircle color={color} size={17} />;
     case 'settings': return <SettingsIcon color={color} size={17} />;
     default: return null;

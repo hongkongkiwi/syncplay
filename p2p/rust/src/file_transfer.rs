@@ -6,6 +6,7 @@
 //! Disk-backed assembly would allow transfers exceeding available RAM.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
@@ -133,6 +134,8 @@ pub struct FileTransfer {
     transfers: Arc<Mutex<HashMap<String, IncomingTransfer>>>,
     /// Bytes/sec throttle for sending (0 = unlimited)
     throttle_bytes_per_sec: u64,
+    /// Paused transfer IDs — send_file checks this set before each chunk
+    paused_transfers: Arc<Mutex<HashSet<String>>>,
 }
 
 impl FileTransfer {
@@ -165,16 +168,26 @@ impl FileTransfer {
             conn,
             transfers,
             throttle_bytes_per_sec: 0,
+            paused_transfers: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
     /// Set transfer rate limit in bytes/sec (0 = unlimited)
-    /// DEFERRED GAP: set_throttle exists but is never wired to a user-facing
-    /// config option or CLI flag. Rate limiting was implemented proactively for
-    /// future use. A `/throttle <bytes/sec>` command or --throttle CLI flag
-    /// would close this gap without architectural changes.
     pub fn set_throttle(&mut self, bytes_per_sec: u64) {
         self.throttle_bytes_per_sec = bytes_per_sec;
+    }
+
+    /// Pause a sending transfer by transfer_id.
+    /// The send_file loop will block on the next chunk until resumed.
+    pub fn pause(&self, transfer_id: &str) {
+        self.paused_transfers.lock().insert(transfer_id.to_string());
+        info!("Paused transfer: {transfer_id}");
+    }
+
+    /// Resume a paused transfer.
+    pub fn resume(&self, transfer_id: &str) {
+        self.paused_transfers.lock().remove(transfer_id);
+        info!("Resumed transfer: {transfer_id}");
     }
 
     pub async fn request_file(
@@ -246,6 +259,12 @@ impl FileTransfer {
             };
             self.conn.send_one(peer_id, &wire::encode(&chunk)?).await?;
             debug!("Sent chunk {i}/{total_chunks} to {peer_id}");
+
+            // Pause check: if transfer is paused, wait until resumed
+            let paused = self.paused_transfers.clone();
+            while paused.lock().contains(transfer_id) {
+                time::sleep(Duration::from_millis(100)).await;
+            }
 
             // Rate limiting: throttle if configured
             let throttle = self.throttle_bytes_per_sec;

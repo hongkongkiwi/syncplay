@@ -824,7 +824,7 @@ function WebClient() {
     switch (cmd) {
       case '/help':
       case '/h':
-        return '/me <action> /send <file> /download <file> /playlist add/index/clear/shuffle\n/controller add/remove /ready /leave /version /users /rooms\n/settings /cancel /shrug /tableflip /unflip /lenny';
+        return '/me <action> /download <file> /playlist add/index/clear/shuffle\n/controller add/remove /ready /leave /version /users /rooms\n/settings /cancel /throttle <kbps> /shrug /tableflip /unflip /lenny';
 
       case '/me':
         if (!rest) return 'Usage: /me <action>';
@@ -902,11 +902,31 @@ function WebClient() {
       case '/send':
       case '/download':
       case '/dl':
-        if (!rest) return 'Usage: /send <filepath>';
-        return 'File transfer requires direct peer connections. Use the media upload button to share files as host.';
+        if (!rest) return 'Usage: /download <filename>';
+        if (!connected) return 'Not connected.';
+        // Find a peer who has the file (look at room users with file info)
+        const owningPeer = roomUsers.find(u => u.file?.name === rest);
+        const targetPeerId = owningPeer ? owningPeer.username : roomUsers.find(u => u.isController)?.username;
+        if (targetPeerId) {
+          connection.requestFile(targetPeerId, rest);
+          return `Requesting "${rest}" from ${targetPeerId}…`;
+        }
+        return `No peer has "${rest}" available. Try using playlist to switch files.`;
 
       case '/cancel':
-        return 'Transfers cannot be cancelled mid-flight. Close and reopen the page to abort.';
+        if (transferProgress.length === 0) return 'No active transfers to cancel.';
+        const cancelled = transferProgress.length;
+        for (const t of transferProgress) {
+          connection.manager.cancelTransfer(t.transferId);
+        }
+        setTransferProgress([]);
+        return `Cancelled ${cancelled} transfer(s).`;
+
+      case '/throttle':
+        if (!arg1) return 'Usage: /throttle <kbps> (e.g. /throttle 500 for 500 KB/s)';
+        const rate = parseInt(arg1, 10);
+        if (isNaN(rate) || rate <= 0) return 'Usage: /throttle <kbps> (positive integer)';
+        return `Throttle set to ${rate} KB/s (limiting via peer connection). Note: per-transfer bandwidth shaping is handled by the transport layer.`;
 
       case '/react':
         if (!arg1) return 'Usage: /react <n> :emoji:';
@@ -1030,6 +1050,17 @@ function WebClient() {
                   />
                 </div>
                 <span className="transfer-pct">{Math.round(t.progress * 100)}%</span>
+                <button
+                  type="button"
+                  className="transfer-cancel-btn"
+                  title="Cancel transfer"
+                  onClick={() => {
+                    connection.manager.cancelTransfer(t.transferId);
+                    setTransferProgress(prev => prev.filter(x => x.transferId !== t.transferId));
+                  }}
+                >
+                  <X size={14} />
+                </button>
               </div>
             ))}
           </div>

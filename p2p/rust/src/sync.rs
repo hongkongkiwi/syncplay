@@ -515,6 +515,17 @@ impl SyncManager {
             )
             .await;
     }
+
+    /// Send subtitle track change — only the host can broadcast this.
+    pub async fn send_subtitle_track_change(&self, track_index: i64) {
+        if !self.conn.is_host() {
+            warn!("send_subtitle_track_change ignored — not host");
+            return;
+        }
+        self.conn
+            .bcast(&SubtitleTrackChangePayload { track_index }, None)
+            .await;
+    }
     pub fn get_latencies(&self) -> HashMap<String, f64> {
         self.latency_map.lock().clone()
     }
@@ -1029,6 +1040,30 @@ impl SyncManager {
                         }
                     }
                     info!("Controller {:?}: {}", p.action, p.peer_id);
+                }
+            },
+        );
+
+        // SubtitleTrackChange — drive local player to switch subtitle track
+        let sub_sock = self.player_socket.clone();
+        self.conn.on_msg(
+            MessageType::SubtitleTrackChange,
+            move |_: MessageType, data: &[u8], _from: String| {
+                if let Ok(p) = rmp_serde::from_slice::<SubtitleTrackChangePayload>(data) {
+                    if let Some(ref sock) = *sub_sock.lock() {
+                        let sock_path = sock.clone();
+                        let ti = p.track_index;
+                        tokio::spawn(async move {
+                            if let Err(e) =
+                                crate::player_controller::PlayerController::set_subtitle(
+                                    &sock_path, ti,
+                                )
+                                .await
+                            {
+                                error!("Failed to switch subtitle to {ti}: {e}");
+                            }
+                        });
+                    }
                 }
             },
         );

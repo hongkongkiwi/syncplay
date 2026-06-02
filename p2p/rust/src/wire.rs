@@ -52,6 +52,9 @@ impl_payload!(ControllerChangePayload, ControllerChange);
 impl_payload!(AvatarSetPayload, AvatarSet);
 impl_payload!(StatusUpdatePayload, StatusUpdate);
 impl_payload!(VoiceFramePayload, VoiceFrame);
+impl_payload!(SubtitleTrackChangePayload, SubtitleTrackChange);
+impl_payload!(TransferPausePayload, TransferPause);
+impl_payload!(TransferResumePayload, TransferResume);
 
 /// Encode any payload into a wire frame.
 pub fn encode<T: MessagePayload>(payload: &T) -> Result<Bytes, WireError> {
@@ -109,6 +112,9 @@ pub fn decode_header(buf: &[u8]) -> Result<(MessageType, usize), WireError> {
         0x14 => MessageType::AvatarSet,
         0x15 => MessageType::StatusUpdate,
         0x16 => MessageType::VoiceFrame,
+        0x17 => MessageType::SubtitleTrackChange,
+        0x18 => MessageType::TransferPause,
+        0x19 => MessageType::TransferResume,
         unknown => {
             warn!("Unknown message type: 0x{unknown:02x}");
             return Err(WireError::UnknownType { type_byte: unknown });
@@ -225,6 +231,18 @@ pub fn encode_status_update(p: &StatusUpdatePayload) -> Result<Bytes, WireError>
     encode(p)
 }
 pub fn encode_voice_frame(p: &VoiceFramePayload) -> Result<Bytes, WireError> {
+    encode(p)
+}
+
+pub fn encode_subtitle_track_change(p: &SubtitleTrackChangePayload) -> Result<Bytes, WireError> {
+    encode(p)
+}
+
+pub fn encode_transfer_pause(p: &TransferPausePayload) -> Result<Bytes, WireError> {
+    encode(p)
+}
+
+pub fn encode_transfer_resume(p: &TransferResumePayload) -> Result<Bytes, WireError> {
     encode(p)
 }
 
@@ -801,6 +819,28 @@ mod tests {
             },
             MessageType::ControllerChange,
         );
+
+        // SubtitleTrackChange (0x17)
+        roundtrip(
+            &SubtitleTrackChangePayload { track_index: 1 },
+            MessageType::SubtitleTrackChange,
+        );
+
+        // TransferPause (0x18)
+        roundtrip(
+            &TransferPausePayload {
+                transfer_id: "tid-1".into(),
+            },
+            MessageType::TransferPause,
+        );
+
+        // TransferResume (0x19)
+        roundtrip(
+            &TransferResumePayload {
+                transfer_id: "tid-1".into(),
+            },
+            MessageType::TransferResume,
+        );
     }
 
     // ── Corrupted / malformed inputs ──────────────────────────────────
@@ -1132,6 +1172,17 @@ mod tests {
         assert!(encode_controller_change(&ControllerChangePayload {
             peer_id: "x".into(),
             action: ControllerAction::Add,
+        })
+        .is_ok());
+        assert!(
+            encode_subtitle_track_change(&SubtitleTrackChangePayload { track_index: 0 }).is_ok()
+        );
+        assert!(encode_transfer_pause(&TransferPausePayload {
+            transfer_id: "t".into()
+        })
+        .is_ok());
+        assert!(encode_transfer_resume(&TransferResumePayload {
+            transfer_id: "t".into()
         })
         .is_ok());
     }

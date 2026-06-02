@@ -11,27 +11,30 @@ use uuid::Uuid;
 #[repr(u8)]
 pub enum MessageType {
     Hello = 0x01,
-    Playstate = 0x02,        // host → peers: authoritative position/paused
-    PlaystateRequest = 0x03, // peer → host: "I want to seek/pause/play"
-    Chat = 0x04,             // peer → host → all (relayed)
-    Readiness = 0x05,        // peer → host → all: ready/not-ready
-    PlaylistChange = 0x06,   // host → peers: playlist updated
-    PlaylistRequest = 0x07,  // peer → host: request playlist change
-    FileInfo = 0x08,         // broadcast current file metadata
-    FileTransfer = 0x09,     // P2P direct file chunk
-    FileRequest = 0x0A,      // request file from peer
-    FileResponse = 0x0B,     // accept/reject file request
-    LatencyPing = 0x0C,      // RTT measurement
-    LatencyPong = 0x0D,      // RTT response
-    HostElected = 0x0E,      // new host announcement
-    UserInfo = 0x0F,         // username + features on connect
-    PeerDisconnect = 0x10,   // graceful disconnect notification
-    VoiceMute = 0x11,        // peer muted/unmuted voice
-    SubtitleInfo = 0x12,     // available subtitle tracks for a file
-    ControllerChange = 0x13, // host adds/removes playback controller
-    AvatarSet = 0x14,        // peer sets their avatar/preset
-    StatusUpdate = 0x15,     // peer updates their status text
-    VoiceFrame = 0x16,       // voice audio frame (Opus/PCM)
+    Playstate = 0x02,           // host → peers: authoritative position/paused
+    PlaystateRequest = 0x03,    // peer → host: "I want to seek/pause/play"
+    Chat = 0x04,                // peer → host → all (relayed)
+    Readiness = 0x05,           // peer → host → all: ready/not-ready
+    PlaylistChange = 0x06,      // host → peers: playlist updated
+    PlaylistRequest = 0x07,     // peer → host: request playlist change
+    FileInfo = 0x08,            // broadcast current file metadata
+    FileTransfer = 0x09,        // P2P direct file chunk
+    FileRequest = 0x0A,         // request file from peer
+    FileResponse = 0x0B,        // accept/reject file request
+    LatencyPing = 0x0C,         // RTT measurement
+    LatencyPong = 0x0D,         // RTT response
+    HostElected = 0x0E,         // new host announcement
+    UserInfo = 0x0F,            // username + features on connect
+    PeerDisconnect = 0x10,      // graceful disconnect notification
+    VoiceMute = 0x11,           // peer muted/unmuted voice
+    SubtitleInfo = 0x12,        // available subtitle tracks for a file
+    ControllerChange = 0x13,    // host adds/removes playback controller
+    AvatarSet = 0x14,           // peer sets their avatar/preset
+    StatusUpdate = 0x15,        // peer updates their status text
+    VoiceFrame = 0x16,          // voice audio frame (Opus/PCM)
+    SubtitleTrackChange = 0x17, // host → peers: switch subtitle track
+    TransferPause = 0x18,       // pause a file transfer
+    TransferResume = 0x19,      // resume a paused file transfer
 }
 
 // ── Payload types ────────────────────────────────────────────────────
@@ -276,6 +279,24 @@ pub struct VoiceFramePayload {
     pub seq: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubtitleTrackChangePayload {
+    /// 0-based subtitle track index (-1 to disable subtitles)
+    pub track_index: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransferPausePayload {
+    #[serde(rename = "transferId")]
+    pub transfer_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransferResumePayload {
+    #[serde(rename = "transferId")]
+    pub transfer_id: String,
+}
+
 impl SubtitleInfoPayload {
     pub fn new(subtitles: Vec<SubtitleTrack>) -> Self {
         Self { subtitles }
@@ -457,6 +478,9 @@ mod tests {
         assert_eq!(MessageType::AvatarSet as u8, 0x14);
         assert_eq!(MessageType::StatusUpdate as u8, 0x15);
         assert_eq!(MessageType::VoiceFrame as u8, 0x16);
+        assert_eq!(MessageType::SubtitleTrackChange as u8, 0x17);
+        assert_eq!(MessageType::TransferPause as u8, 0x18);
+        assert_eq!(MessageType::TransferResume as u8, 0x19);
     }
 
     #[test]
