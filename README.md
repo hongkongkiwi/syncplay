@@ -1,81 +1,65 @@
-# Syncplay
+# Syncplay P2P v2.0
 
-Synchronized video playback across multiple instances of mpv, VLC, MPC-HC, MPC-BE and mplayer2 over the Internet.
+Synchronized video playback across multiple platforms using WebRTC peer-to-peer data channels with a lightweight signaling relay.
 
-## P2P Rust Client (v2.0)
+## Clients
 
-The next-generation Syncplay is a **pure Rust P2P stack** that replaces the central server architecture with WebRTC data channels, a lightweight signaling relay, and an integrated TURN relay server — all in one crate.
+| Client | Platform | Protocol | Status |
+|--------|----------|----------|--------|
+| Rust TUI | Linux/macOS/Windows | v2.0.0 P2P | ✅ |
+| Web | Any browser | v2.0.0 P2P | ✅ |
+| React Native | iOS/Android | v2.0.0 P2P | ✅ |
 
-```
-syncplay-tui          Terminal UI client (ratatui)
-syncplay-signaling    WebSocket signaling relay
-syncplay-turn         TURN relay for NAT traversal
-```
+## Quick Start
 
-See **[p2p/README.md](p2p/README.md)** for setup, keybindings, and slash commands.  
-Full protocol spec: **[docs/webrtc-p2p-protocol.md](docs/webrtc-p2p-protocol.md)**
+### Web Client (easiest)
+1. Start signaling server: `cd p2p/rust && cargo run --bin syncplay-signaling`
+2. Start web client: `cd web-client && pnpm dev`
+3. Open http://localhost:3000
 
-### Quick install
-
+### Rust TUI
 ```bash
 cd p2p/rust
 cargo build --release --features tui
-
-# Start signaling server
-./target/release/syncplay-signaling
-
-# Start TURN relay (for peers behind NAT)
-./target/release/syncplay-turn --public-ip <your-ip> --users alice=pass,bob=pass
-
-# Join a room
-./target/release/syncplay-tui --room movie-night --username alice --voice
+./target/release/syncplay-signaling &
+./target/release/syncplay-tui --room movienight --username alice
 ```
 
-### Development
-
+### React Native
 ```bash
-cd p2p/rust
-cargo test --lib          # 91 unit tests
-cargo test --test e2e_integration  # 10 integration tests
-cargo clippy --features tui --all-targets -- -D warnings
-
-# Or use just:
-just build      # debug build
-just release    # release build
-just test       # run tests
-just clippy     # lint
-just all        # fmt + check + test + clippy
-just dev        # tmux: signaling + two TUI clients
+cd react-native
+npm install
+npx expo start
 ```
 
-## Original Python Syncplay
+## Features
 
-The original Python Syncplay server and client remain available and fully functional.  
-Official site: https://syncplay.pl  
-Downloads: https://syncplay.pl/download/
+- 22 message types over binary MessagePack protocol
+- Speed sync (0.5x / 1x / 2x)
+- Latency compensation with per-peer RTT tracking
+- Controller access control (host-managed permissions)
+- State replay for late-joining peers
+- File transfer with SHA-256 verification
+- Subtitle auto-detection and bundling
+- Voice chat via Opus codec
+- SFU mode for large rooms
+- TURN relay support for NAT traversal
+- Dark/light mode
+- Keyboard shortcuts
 
-## Mobile client
+## Documentation
 
-An Expo React Native mobile client lives in [`react-native/`](react-native/README.md). It can connect to a Syncplay server, join rooms, pick local media or stream URLs, use shared playlists, chat, and apply playback sync through the native mobile player.
+- [Protocol Specification](docs/PROTOCOL.md)
+- [Architecture Overview](docs/ARCHITECTURE.md)
+- [API Reference](docs/API.md)
+- [Web Client Guide](docs/WEB-CLIENT.md)
+- [React Native Guide](docs/RN-CLIENT.md)
+- [Rust Client Guide](p2p/README.md)
+- [Contributing](docs/CONTRIBUTING.md)
 
-The mobile app needs a native development build. Expo Go cannot run it because the TCP socket, file-system, video, and local storage pieces use native modules.
+## Tests
 
-## Web client
-
-A browser client lives in [`web-client/`](web-client/README.md). It uses TanStack Start and pnpm, plays local media through the browser video element, and talks to Syncplay through a WebSocket bridge because browsers cannot open raw TCP sockets.
-
-```sh
-pnpm install
-pnpm --filter syncplay-web-client dev
-```
-
-## What it does
-
-Syncplay synchronises the position and play state of multiple media players so that the viewers can watch the same thing at the same time. When one person pauses/unpauses playback or seeks within their media player, this is replicated across all media players connected to the same room. New joiners are synchronised automatically. Includes text chat and voice chat (P2P edition).
-
-## What it doesn't do
-
-Syncplay is not a file sharing service. The P2P edition supports file transfers for shared watching but only within a room of mutually trusted peers.
+324 tests: 245 Rust + 65 JS E2E + 12 RN + 2 RN helpers
 
 ## License
 
@@ -83,8 +67,8 @@ Licensed under the [Apache License, version 2.0](https://www.apache.org/licenses
 
 ## Authors
 
-- *Initial concept and core internals developer* - Uriziel.
-- *GUI design and current lead developer* - Et0h.
-- *Original SyncPlay code* - Tomasz Kowalczyk (Fluxid).
-- *P2P Rust rewrite* - [hongkongkiwi](https://github.com/hongkongkiwi)
+- *Initial concept and core internals developer* - Uriziel
+- *GUI design and current lead developer* - Et0h
+- *Original SyncPlay code* - Tomasz Kowalczyk (Fluxid)
+- *P2P rewrite* - [hongkongkiwi](https://github.com/hongkongkiwi)
 - *Other contributors* - See http://syncplay.pl/about/development/
