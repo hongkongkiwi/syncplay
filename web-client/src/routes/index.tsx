@@ -3,6 +3,8 @@ import {
   Check,
   Circle,
   Crown,
+  Info,
+  KeyRound,
   Link2,
   LoaderCircle,
   MessageSquare,
@@ -12,16 +14,18 @@ import {
   Pause,
   Play,
   PlaySquare,
-  PlugZap,
   Plus,
+  PlugZap,
   Radio,
   Send,
   Shuffle,
+  Smile,
   Sun,
   Trash2,
   Unplug,
   Upload,
   UsersRound,
+  X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { SyncplayP2PConnection } from '~/syncplay/connectionV2';
@@ -982,6 +986,16 @@ function WebClient() {
                     </strong>
                     <span>{user.file?.name ?? 'No media announced'}</span>
                   </div>
+                  {connection.isHost && user.username !== currentUsername ? (
+                    <button
+                      type="button"
+                      className="inline-action-btn"
+                      title={user.isController ? 'Remove controller' : 'Make controller'}
+                      onClick={() => user.isController ? connection.removeController(user.username) : connection.addController(user.username)}
+                    >
+                      {user.isController ? <X size={14} /> : <Crown size={14} />}
+                    </button>
+                  ) : null}
                 </div>
                 );
               })
@@ -1092,6 +1106,14 @@ function WebClient() {
             )}
           </div>
           <form className="chat-form" onSubmit={sendChat}>
+            <div className="emoji-bar">
+              {['😊','😂','❤️','👍','🔥','👏','🎉','💀','🚀','🍿'].map(emoji => (
+                <button key={emoji} type="button" className="emoji-btn"
+                  onClick={() => setChatDraft(d => d + emoji)}
+                  title={`Insert ${emoji}`}>{emoji}</button>
+              ))}
+            </div>
+            <div className="chat-input-row">
             <input
               ref={chatInputRef}
               value={chatDraft}
@@ -1108,6 +1130,7 @@ function WebClient() {
             <button type="submit" disabled={!chatDraft.trim()} aria-label="Send chat">
               <Send size={18} />
             </button>
+            </div>
           </form>
         </section>
       </aside>
