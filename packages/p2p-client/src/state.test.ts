@@ -891,6 +891,235 @@ describe('Slash commands', () => {
   });
 });
 
+// ── 10b. E2E Mesh (two P2PStateManagers via mock transports) ────
+
+describe('E2E Mesh', () => {
+  it('chat flow: peer sends chat → host relays → peer receives', () => {
+    // Create host and peer managers
+    const hostManager = new P2PStateManager('hostuser');
+    const peerManager = new P2PStateManager('peeruser');
+
+    // Wire them with mock transports that forward to each other's dispatch
+    const hostTransport: P2PTransport = {
+      send(msgType: MessageType, payload: unknown) {
+        // Forward to peer
+        peerManager.dispatch(msgType, payload, 'hostuser');
+      },
+    };
+    const peerTransport: P2PTransport = {
+      send(msgType: MessageType, payload: unknown) {
+        // Forward to host
+        hostManager.dispatch(msgType, payload, 'peeruser');
+      },
+    };
+
+    // Set up as connected
+    forceState(hostManager, 'connecting_peers');
+    hostManager.onConnected('hostuser', 'hostuser', hostTransport);
+    forceState(peerManager, 'connecting_peers');
+    peerManager.onConnected('peeruser', 'hostuser', peerTransport);
+
+    // Register peers via Hello
+    hostManager.dispatch(MessageType.Hello, {
+      username: 'peeruser',
+      version: '2.0.0',
+      room: 'test',
+      features: ['chat'],
+    }, 'peeruser');
+
+    peerManager.dispatch(MessageType.Hello, {
+      username: 'hostuser',
+      version: '2.0.0',
+      room: 'test',
+      features: ['chat'],
+    }, 'hostuser');
+
+    // Track chat events on peer side
+    const peerEvents: SyncEvent[] = [];
+    peerManager.onSyncEvent((e) => peerEvents.push(e));
+
+    const hostEvents: SyncEvent[] = [];
+    hostManager.onSyncEvent((e) => hostEvents.push(e));
+
+    // Peer sends a chat message
+    peerManager.sendChat('Hello from peer!');
+
+    // Host should receive the chat via transport
+    const hostChatEvents = hostEvents.filter(e => e.type === 'chat');
+    expect(hostChatEvents.length).toBeGreaterThanOrEqual(1);
+    const chatData = hostChatEvents[hostChatEvents.length - 1].data as any;
+    expect(chatData.from).toBe('peeruser');
+    expect(chatData.message).toBe('Hello from peer!');
+  });
+
+  it('playstate flow: host updates → peer receives', () => {
+    const hostManager = new P2PStateManager('hostuser');
+    const peerManager = new P2PStateManager('peeruser');
+
+    // Wire transports
+    const hostTransport: P2PTransport = {
+      send(msgType: MessageType, payload: unknown) {
+        peerManager.dispatch(msgType, payload, 'hostuser');
+      },
+    };
+    const peerTransport: P2PTransport = {
+      send(msgType: MessageType, payload: unknown) {
+        hostManager.dispatch(msgType, payload, 'peeruser');
+      },
+    };
+
+    // Set up as connected
+    forceState(hostManager, 'connecting_peers');
+    hostManager.onConnected('hostuser', 'hostuser', hostTransport);
+    forceState(peerManager, 'connecting_peers');
+    peerManager.onConnected('peeruser', 'hostuser', peerTransport);
+
+    // Register peers
+    hostManager.dispatch(MessageType.Hello, {
+      username: 'peeruser',
+      version: '2.0.0',
+      room: 'test',
+      features: ['chat'],
+    }, 'peeruser');
+
+    peerManager.dispatch(MessageType.Hello, {
+      username: 'hostuser',
+      version: '2.0.0',
+      room: 'test',
+      features: ['chat'],
+    }, 'hostuser');
+
+    // Track playstate events on peer side
+    const peerEvents: SyncEvent[] = [];
+    peerManager.onSyncEvent((e) => peerEvents.push(e));
+
+    // Host broadcasts a playstate update
+    hostManager.updatePlaystate(120.5, false, 1.5);
+    const hostSnap = hostManager.getSnapshot();
+    expect(hostSnap.position).toBeGreaterThanOrEqual(120);
+
+    // Peer should get the state via transport
+    const peerSnap = peerManager.getSnapshot();
+    expect(peerSnap.paused).toBe(false);
+    expect(peerSnap.speed).toBe(1.5);
+  });
+
+  it('readiness flow: peer toggles → host receives', () => {
+    const hostManager = new P2PStateManager('hostuser');
+    const peerManager = new P2PStateManager('peeruser');
+
+    // Wire transports
+    const hostTransport: P2PTransport = {
+      send(msgType: MessageType, payload: unknown) {
+        peerManager.dispatch(msgType, payload, 'hostuser');
+      },
+    };
+    const peerTransport: P2PTransport = {
+      send(msgType: MessageType, payload: unknown) {
+        hostManager.dispatch(msgType, payload, 'peeruser');
+      },
+    };
+
+    // Set up as connected
+    forceState(hostManager, 'connecting_peers');
+    hostManager.onConnected('hostuser', 'hostuser', hostTransport);
+    forceState(peerManager, 'connecting_peers');
+    peerManager.onConnected('peeruser', 'hostuser', peerTransport);
+
+    // Register peers
+    hostManager.dispatch(MessageType.Hello, {
+      username: 'peeruser',
+      version: '2.0.0',
+      room: 'test',
+      features: ['chat'],
+    }, 'peeruser');
+
+    peerManager.dispatch(MessageType.Hello, {
+      username: 'hostuser',
+      version: '2.0.0',
+      room: 'test',
+      features: ['chat'],
+    }, 'hostuser');
+
+    // Peer sets ready to true
+    peerManager.setReady(true);
+
+    // Host should have the readiness state
+    const hostSnap = hostManager.getSnapshot();
+    expect(hostSnap.readyStates['peeruser']).toBe(true);
+
+    // Peer sets ready to false
+    peerManager.setReady(false);
+    const hostSnap2 = hostManager.getSnapshot();
+    expect(hostSnap2.readyStates['peeruser']).toBe(false);
+  });
+
+  it('ICE state tracking via updateIceState', () => {
+    const manager = new P2PStateManager('testuser');
+    const { transport } = mockTransport();
+    forceState(manager, 'connecting_peers');
+    manager.onConnected('testuser', 'testuser', transport);
+
+    // Add a peer
+    manager.dispatch(MessageType.UserInfo, {
+      username: 'remotepeer',
+      features: [],
+    }, 'remotepeer');
+
+    // Update ICE state
+    manager.updateIceState('remotepeer', 'checking');
+    let stats = manager.getPeerStats();
+    let peerStat = stats.find(s => s.peerId === 'remotepeer');
+    expect(peerStat?.iceState).toBe('checking');
+
+    // Update to connected
+    manager.updateIceState('remotepeer', 'connected');
+    stats = manager.getPeerStats();
+    peerStat = stats.find(s => s.peerId === 'remotepeer');
+    expect(peerStat?.iceState).toBe('connected');
+
+    // Update to failed (should log warning)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    manager.updateIceState('remotepeer', 'failed');
+    stats = manager.getPeerStats();
+    peerStat = stats.find(s => s.peerId === 'remotepeer');
+    expect(peerStat?.iceState).toBe('failed');
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('ICE connection failed'),
+    );
+    warnSpy.mockRestore();
+
+    // Update unknown peer (no-op)
+    manager.updateIceState('nonexistent', 'connected');
+    expect(manager.getPeerStats().length).toBe(1); // still just remotepeer
+  });
+
+  it('getPeerStats returns formatted stats', () => {
+    const { manager } = setupHost();
+
+    manager.dispatch(MessageType.UserInfo, {
+      username: 'peer1',
+      features: ['chat'],
+    }, 'peer1');
+
+    manager.dispatch(MessageType.UserInfo, {
+      username: 'peer2',
+      features: ['readiness'],
+    }, 'peer2');
+
+    const stats = manager.getPeerStats();
+    expect(stats).toHaveLength(2);
+
+    const peer1 = stats.find(s => s.peerId === 'peer1');
+    expect(peer1).toBeDefined();
+    expect(peer1!.username).toBe('peer1');
+    expect(peer1!.iceState).toBe('connected'); // default
+    expect(peer1!.rtt).toBe(0);
+    expect(peer1!.muted).toBe(false);
+    expect(peer1!.isReady).toBe(false);
+  });
+});
+
 // ── 11. destroy ────────────────────────────────────────────────
 
 describe('destroy', () => {

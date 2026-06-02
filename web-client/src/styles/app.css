@@ -924,3 +924,11 @@ html.light-mode .speed-display {
   border-color: rgba(30, 122, 94, 0.25);
   color: #1e7a5e;
 }
+
+html.light-mode .controller-info {
+  color: #8b6914;
+}
+
+html.light-mode .brand-row {
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}

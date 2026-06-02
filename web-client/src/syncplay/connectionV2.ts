@@ -9,6 +9,7 @@ import {
   encodeDisconnect,
   type P2PTransport,
   type SyncEvent,
+  type PeerState,
 } from 'syncplay-p2p-client';
 
 export type ConnectionStatus =
@@ -119,6 +120,7 @@ export class SyncplayP2PConnection {
   private lastConfig: ConnectionConfig | null = null;
   private _intentionalDisconnect = false;
   private _sfuMode = false;
+  private _webrtcTimeout: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly onStatus: (status: ConnectionStatus, error?: string | null) => void,
@@ -251,6 +253,43 @@ export class SyncplayP2PConnection {
         iceServers,
       });
 
+      // ── ICE connection state tracking ──────────────────────────
+      let iceTimeout: ReturnType<typeof setTimeout> | null = null;
+
+      this.pc.addEventListener('iceconnectionstatechange', () => {
+        if (!this.pc) return;
+        const iceState = this.pc.iceConnectionState as RTCIceConnectionState;
+        // Map RTCIceConnectionState to PeerState.iceState values
+        const mapped = iceState as PeerState['iceState'];
+        // Call stateManager to update all known peers' ICE state
+        for (const stat of this.stateManager.getPeerStats()) {
+          this.stateManager.updateIceState(stat.peerId, mapped);
+        }
+
+        // ICE connection timeout warning (30s in checking/new)
+        if (iceState === 'checking' || iceState === 'new') {
+          if (!iceTimeout) {
+            iceTimeout = setTimeout(() => {
+              console.warn('[P2P] ICE connection still in ' + iceState + ' after 30s');
+            }, 30000);
+          }
+        } else {
+          if (iceTimeout) {
+            clearTimeout(iceTimeout);
+            iceTimeout = null;
+          }
+        }
+      });
+
+      // ── WebRTC connection timeout (30s) ────────────────────────
+      this._webrtcTimeout = setTimeout(() => {
+        if (this.dc?.readyState !== 'open') {
+          const msg = 'ICE connection timed out';
+          this.stateManager.transit('error', msg);
+          this.onStatus('error', msg);
+        }
+      }, 30000);
+
       // ICE candidate → signaling server
       this.pc.addEventListener('icecandidate', (e) => {
         if (e.candidate && this.ws) {
@@ -300,6 +339,10 @@ export class SyncplayP2PConnection {
       this.stateManager.transit('handshaking');
 
     } catch (e) {
+      if (this._webrtcTimeout) {
+        clearTimeout(this._webrtcTimeout);
+        this._webrtcTimeout = null;
+      }
       const { message } = humanReadableError(String(e));
       this.stateManager.transit('error', message);
       this.onStatus('error', message);
@@ -312,6 +355,12 @@ export class SyncplayP2PConnection {
     if (!this.dc) return;
 
     const onOpen = () => {
+      // Clear the WebRTC connection timeout
+      if (this._webrtcTimeout) {
+        clearTimeout(this._webrtcTimeout);
+        this._webrtcTimeout = null;
+      }
+
       // Transport bridge: DataChannel → StateManager
       this._transport = {
         send: (msgType: MessageType, payload: unknown) => {
@@ -546,6 +595,12 @@ export class SyncplayP2PConnection {
 
   disconnect(): void {
     this._intentionalDisconnect = true;
+
+    // Clear WebRTC timeout
+    if (this._webrtcTimeout) {
+      clearTimeout(this._webrtcTimeout);
+      this._webrtcTimeout = null;
+    }
 
     // Send PeerDisconnect if data channel is open
     if (this.dc?.readyState === 'open') {

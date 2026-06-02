@@ -1,6 +1,10 @@
 // P2P v2.0.0 State Manager — mirrors Rust SyncManager
 // Handles all 20 message types, peer tracking, host election,
 // latency per-peer, controllers, speed sync, state replay, chat relay
+//
+// Security: Data channels use DTLS (WebRTC built-in).
+// For additional app-layer encryption, consider AES-GCM on
+// Chat and FileTransfer payloads using a pre-shared room key.
 
 import {
   MessageType,
@@ -187,6 +191,31 @@ export class P2PStateManager {
     return Object.fromEntries(this.latencyMap);
   }
 
+  /** Update a peer's ICE connection state */
+  updateIceState(peerId: string, state: PeerState['iceState']): void {
+    const peer = this.room.peers.get(peerId);
+    if (peer) {
+      peer.iceState = state;
+      if (state === 'disconnected') {
+        console.warn(`[P2PState] ICE disconnected for peer ${peer.username} (${peerId})`);
+      } else if (state === 'failed') {
+        console.warn(`[P2PState] ICE connection failed for peer ${peer.username} (${peerId})`);
+      }
+    }
+  }
+
+  /** Returns formatted peer stats for UI consumption */
+  getPeerStats(): Array<{ peerId: string; username: string; iceState: string; rtt: number; muted: boolean; isReady: boolean }> {
+    return [...this.room.peers.values()].map(p => ({
+      peerId: p.id,
+      username: p.username,
+      iceState: p.iceState,
+      rtt: p.rtt,
+      muted: p.muted,
+      isReady: p.isReady,
+    }));
+  }
+
   /** Serializable snapshot for UI consumption */
   getSnapshot(): RoomStateSnapshot {
     return {
@@ -273,6 +302,18 @@ export class P2PStateManager {
 
   // ── Event system ─────────────────────────────────────────────────
 
+  /**
+   * Register an event handler for sync events (chat, playstate, user-join,
+   * user-leave, host-change, error, transfer-complete, transfer-progress).
+   *
+   * This behaves like Rust's `Vec<PeerFn>` — multiple handlers can be
+   * registered and **all** fire on each emitted event. Handlers are called
+   * in registration order via a simple for-loop.
+   *
+   * This enables TUI-like callback chains: independent subsystems (chat UI,
+   * media controller, file-transfer progress bar, toast notifications) can
+   * each subscribe to the same events without coordinating.
+   */
   onSyncEvent(handler: EventHandler): void {
     this.eventHandlers.push(handler);
   }
