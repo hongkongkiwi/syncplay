@@ -560,7 +560,7 @@ impl ConnectionManager {
             }
             "room_list" => {
                 if let Some(tx) = self.0.room_list_tx.lock().take() {
-                    if let Err(_) = tx.send(text.to_string()) {
+                    if tx.send(text.to_string()).is_err() {
                         warn!("room_list oneshot receiver dropped");
                     }
                 }
