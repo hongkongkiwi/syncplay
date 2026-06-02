@@ -602,7 +602,9 @@ impl SyncManager {
                         tokio::spawn(async move {
                             let p = HelloPayload::new(&c.uname(), PROTOCOL_VERSION, "", f2);
                             if let Ok(data) = wire::encode(&p) {
-                                let _ = c.send_one(&f, &data).await;
+                                if let Err(e) = c.send_one(&f, &data).await {
+                                    warn!("Failed to send hello response to {f}: {e}");
+                                }
                             }
                         });
                     }

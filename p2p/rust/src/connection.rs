@@ -560,7 +560,9 @@ impl ConnectionManager {
             }
             "room_list" => {
                 if let Some(tx) = self.0.room_list_tx.lock().take() {
-                    let _ = tx.send(text.to_string());
+                    if let Err(_) = tx.send(text.to_string()) {
+                        warn!("room_list oneshot receiver dropped");
+                    }
                 }
             }
             unknown => {
@@ -1014,7 +1016,9 @@ impl ConnectionManager {
         if let Some((_, p)) = self.0.peers.remove(pid) {
             let pc = p.pc.clone();
             tokio::spawn(async move {
-                let _ = pc.close().await;
+                if let Err(e) = pc.close().await {
+                    warn!("Error closing stale peer connection: {e}");
+                }
             });
         }
 

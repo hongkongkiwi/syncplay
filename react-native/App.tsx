@@ -196,7 +196,13 @@ function parseSlashCommand(input: string, username: string): SlashCommandResult 
       '/help — Show this help',
       '/me <action> — Send an action message',
       '/nick <username> — Change your username',
-      '/topic <text> — Set room topic'
+      '/topic <text> — Set room topic',
+      '/users — List connected users',
+      '/ready — Toggle ready state',
+      '/playlist add/index/clear/shuffle — Manage playlist',
+      '/version — Show version',
+      '/shrug /tableflip /unflip /lenny — Emotes',
+      '/react <n> :emoji: — React to message n'
     ].join('\n');
     return { kind: 'help', commands };
   }
@@ -217,6 +223,24 @@ function parseSlashCommand(input: string, username: string): SlashCommandResult 
   }
   if (trimmed.startsWith('/')) return { kind: 'chat', text: trimmed };
   return null;
+}
+
+// Emoji shortcode expansion (matches Rust TUI expand_emojis)
+const EMOJI_MAP: Record<string, string> = {
+  ':smile:': '😊', ':joy:': '😂', ':heart:': '❤️', ':thumbsup:': '👍',
+  ':thumbsdown:': '👎', ':clap:': '👏', ':wave:': '👋', ':fire:': '🔥',
+  ':star:': '⭐', ':tada:': '🎉', ':100:': '💯', ':ok_hand:': '👌',
+  ':sob:': '😭', ':cry:': '😢', ':angry:': '😠', ':skull:': '💀',
+  ':rocket:': '🚀', ':check:': '✅', ':x:': '❌', ':warning:': '⚠️',
+  ':popcorn:': '🍿', ':movie_camera:': '🎥', ':beer:': '🍺', ':coffee:': '☕',
+  ':sunglasses:': '😎', ':wink:': '😉', ':pray:': '🙏', ':muscle:': '💪',
+  ':party:': '🥳', ':robot:': '🤖', ':alien:': '👽', ':ghost:': '👻',
+  ':sleepy:': '😴', ':zap:': '⚡', ':bulb:': '💡', ':lock:': '🔒',
+  ':headphones:': '🎧', ':mic:': '🎤', ':mute:': '🔇',
+};
+
+function expandEmojis(text: string): string {
+  return text.replace(/\:\\w+\:/g, match => EMOJI_MAP[match] ?? match);
 }
 
 // -- Shuffle --
@@ -467,7 +491,7 @@ export default function App() {
         if (data.from === usernameRef.current) break;
         setMessages(prev => [...prev, {
           id: nextMessageId(),
-          text: data.message,
+          text: expandEmojis(data.message),
           username: data.from,
           kind: 'chat',
           createdAt: data.timestamp || Date.now(),
@@ -1016,7 +1040,7 @@ export default function App() {
     if (commandResult) {
       switch (commandResult.kind) {
         case 'chat':
-          connection.sendChat(commandResult.text);
+          connection.sendChat(expandEmojis(commandResult.text));
           break;
         case 'me':
           connection.sendChat(`* ${form.username} ${commandResult.action}`);
@@ -1038,7 +1062,7 @@ export default function App() {
           break;
       }
     } else {
-      // Try P2P slash commands
+      // Try P2P slash commands (shrug/tableflip/lenny etc)
       const p2pResult = connection.sendSlashCommand(trimmed);
       if (p2pResult) {
         setMessages(prev => [...prev, {
@@ -1048,15 +1072,17 @@ export default function App() {
           createdAt: Date.now(),
         }].slice(-500));
       } else {
+        // Expand emojis before sending
+        const expanded = expandEmojis(trimmed);
         // Add locally before sending (so sender sees own message)
         setMessages(prev => [...prev, {
           id: nextMessageId(),
-          text: trimmed,
+          text: expanded,
           username: form.username,
           kind: 'chat',
           createdAt: Date.now(),
         }].slice(-500));
-        connection.sendChat(trimmed);
+        connection.sendChat(expanded);
       }
     }
 

@@ -9,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use rand::Rng;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
@@ -212,14 +212,19 @@ impl PlayerController {
             let handle = tokio::spawn(async move {
                 let status = child.wait();
                 let code = status.ok().and_then(|s| s.code());
-                let _ = tx3.send(PlayerEvent::PlayerExited { code }).await;
+                if let Err(e) = tx3.send(PlayerEvent::PlayerExited { code }).await {
+                    warn!("Failed to send PlayerExited event: {e}");
+                }
             });
             self.watcher_handle = Some(handle);
         } else {
             error!("No child process to watch — launch may have failed");
-            let _ = tx
+            if let Err(e) = tx
                 .send(PlayerEvent::Error("player process not started".into()))
-                .await;
+                .await
+            {
+                warn!("Failed to send player error event: {e}");
+            }
         }
 
         Ok(rx)
@@ -398,7 +403,12 @@ async fn mpv_ipc_loop(socket_path: &str, tx: mpsc::Sender<PlayerEvent>) -> Resul
                                 }
                                 _ => {}
                             }
-                            let _ = tx.send(PlayerEvent::StateUpdated(state.clone())).await;
+                            let _ = tx
+                                .send(PlayerEvent::StateUpdated(state.clone()))
+                                .await
+                                .inspect_err(|e| {
+                                    warn!("Failed to send StateUpdated event: {e}");
+                                });
                         }
                         // File loaded event
                         else if msg["event"].as_str() == Some("file-loaded") {
@@ -407,11 +417,16 @@ async fn mpv_ipc_loop(socket_path: &str, tx: mpsc::Sender<PlayerEvent>) -> Resul
                                     filename: state.filename.clone().unwrap_or_default(),
                                     duration: state.duration,
                                 })
-                                .await;
+                                .await
+                                .inspect_err(|e| {
+                                    warn!("Failed to send FileLoaded event: {e}");
+                                });
                         }
                         // End file
                         else if msg["event"].as_str() == Some("end-file") {
-                            let _ = tx.send(PlayerEvent::EndOfFile).await;
+                            let _ = tx.send(PlayerEvent::EndOfFile).await.inspect_err(|e| {
+                                warn!("Failed to send EndOfFile event: {e}");
+                            });
                         }
                     }
                     Err(e) => {
@@ -514,7 +529,12 @@ async fn vlc_ipc_loop(
             state.duration = len;
         }
 
-        let _ = tx.send(PlayerEvent::StateUpdated(state.clone())).await;
+        let _ = tx
+            .send(PlayerEvent::StateUpdated(state.clone()))
+            .await
+            .inspect_err(|e| {
+                warn!("VLC: Failed to send StateUpdated event: {e}");
+            });
 
         // Emit FileLoaded once when duration becomes available
         if !first_file_emitted && state.duration > 0.0 {
@@ -524,7 +544,10 @@ async fn vlc_ipc_loop(
                     filename: String::new(),
                     duration: state.duration,
                 })
-                .await;
+                .await
+                .inspect_err(|e| {
+                    warn!("VLC: Failed to send FileLoaded event: {e}");
+                });
         }
 
         time::sleep(std::time::Duration::from_millis(500)).await;

@@ -277,7 +277,9 @@ impl SfuServer {
 
             // Remove the peer
             if let Some((_, peer)) = room_obj.peers.remove(peer_id) {
-                let _ = peer.pc.close().await;
+                if let Err(e) = peer.pc.close().await {
+                    warn!("[sfu] Error closing peer connection: {e}");
+                }
             }
 
             // Update join order

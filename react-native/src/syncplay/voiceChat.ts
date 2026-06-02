@@ -145,7 +145,9 @@ export class VoiceChat {
     try {
       // 1. Unload existing sound
       if (this.sound) {
-        await this.sound.unloadAsync().catch(() => {});
+        await this.sound.unloadAsync().catch((err) => {
+        console.warn('[VoiceChat] Failed to unload prior sound:', err);
+      });
         this.sound = null;
       }
 
@@ -162,7 +164,9 @@ export class VoiceChat {
       // Clean up after playback finishes
       sound.setOnPlaybackStatusUpdate((status: any) => {
         if (status.didJustFinish) {
-          sound.unloadAsync().catch(() => {});
+          sound.unloadAsync().catch((err) => {
+            console.warn('[VoiceChat] Failed to unload finished sound:', err);
+          });
           this.sound = null;
         }
       });
@@ -208,9 +212,13 @@ export class VoiceChat {
    * Clean up all resources: stop capture, unload sounds, clear timers.
    */
   destroy(): void {
-    this.stopCapture().catch(() => {});
+    this.stopCapture().catch((err) => {
+      console.warn('[VoiceChat] Failed to stop capture during destroy:', err);
+    });
     if (this.sound) {
-      this.sound.unloadAsync().catch(() => {});
+      this.sound.unloadAsync().catch((err) => {
+        console.warn('[VoiceChat] Failed to unload sound during destroy:', err);
+      });
       this.sound = null;
     }
     // Remove the voice frame handler

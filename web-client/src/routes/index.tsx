@@ -32,6 +32,7 @@ import { SyncplayP2PConnection } from '~/syncplay/connectionV2';
 import type { SyncEvent } from 'syncplay-p2p-client';
 import type { ConnectionConfig } from '~/syncplay/connectionV2';
 import { calculateSyncCorrection } from '~/syncplay/syncControl';
+import { VoiceChat } from '~/syncplay/voiceChat';
 
 export const Route = createFileRoute('/')({
   component: WebClient,
@@ -63,6 +64,7 @@ type RoomUser = {
   file?: { name: string };
   rtt: number;
   iceState: 'new' | 'checking' | 'connected' | 'disconnected' | 'failed' | 'closed';
+  muted: boolean;
 };
 
 type RemotePlaystate = {
@@ -204,6 +206,8 @@ function WebClient() {
   const chatInputRef = useRef<HTMLInputElement | null>(null);
   const chatFocusedRef = useRef(false);
   const prevMessageCountRef = useRef(0);
+  const voiceChatRef = useRef<VoiceChat | null>(null);
+  const latencyWarningsRef = useRef<string[]>([]);
 
   // Current identity
   const currentUsername = form.username.trim() || defaultForm.username;
@@ -280,6 +284,7 @@ function WebClient() {
         // Rebuild room users from snapshot
         try {
           const snap = connection.manager.getSnapshot();
+          const latencies = connection.manager.getLatencies();
           const users: RoomUser[] = snap.peers.map(p => ({
             username: p.username,
             isReady: p.isReady,
@@ -287,6 +292,7 @@ function WebClient() {
             file: p.file ? { name: p.file.name } : undefined,
             rtt: p.rtt,
             iceState: p.iceState,
+            muted: p.muted,
           }));
           setRoomUsers(users);
 
@@ -296,6 +302,15 @@ function WebClient() {
             index: snap.playlistIndex,
             updatedBy: '', // snapshot doesn't track who updated the playlist
           });
+
+          // Track latency warnings
+          const warnings: string[] = [];
+          for (const [name, rtt] of Object.entries(latencies)) {
+            if (rtt > 500) {
+              warnings.push(`High latency to ${name}: ${rtt.toFixed(0)}ms`);
+            }
+          }
+          latencyWarningsRef.current = warnings;
         } catch {
           // manager may not be ready
         }
@@ -314,6 +329,7 @@ function WebClient() {
             file: p.file ? { name: p.file.name } : undefined,
             rtt: p.rtt,
             iceState: p.iceState,
+            muted: p.muted,
           }));
           setRoomUsers(users);
         } catch {
@@ -537,7 +553,45 @@ function WebClient() {
     };
   }, [connection, connectionStatus]);
 
+  // ── VoiceChat ────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    // Create VoiceChat once connection exists
+    if (!voiceChatRef.current) {
+      voiceChatRef.current = new VoiceChat(connection.manager);
+    }
+    return () => {
+      voiceChatRef.current?.destroy();
+      voiceChatRef.current = null;
+    };
+  }, [connection]);
+
+  // Auto-start voice capture when connected and not muted
+  useEffect(() => {
+    if (connectionStatus === 'connected' && !voiceMuted) {
+      voiceChatRef.current?.startCapture().catch(() => {});
+    }
+  }, [connectionStatus, voiceMuted]);
+
   // ── Helpers ──────────────────────────────────────────────────────────
+
+  // Emoji shortcode expansion (matches Rust TUI expand_emojis)
+  const EMOJIS: Record<string, string> = {
+    ':smile:': '😊', ':joy:': '😂', ':heart:': '❤️', ':thumbsup:': '👍',
+    ':thumbsdown:': '👎', ':clap:': '👏', ':wave:': '👋', ':fire:': '🔥',
+    ':star:': '⭐', ':tada:': '🎉', ':100:': '💯', ':ok_hand:': '👌',
+    ':sob:': '😭', ':cry:': '😢', ':angry:': '😠', ':skull:': '💀',
+    ':rocket:': '🚀', ':check:': '✅', ':x:': '❌', ':warning:': '⚠️',
+    ':popcorn:': '🍿', ':movie_camera:': '🎥', ':beer:': '🍺', ':coffee:': '☕',
+    ':sunglasses:': '😎', ':wink:': '😉', ':pray:': '🙏', ':muscle:': '💪',
+    ':party:': '🥳', ':robot:': '🤖', ':alien:': '👽', ':ghost:': '👻',
+    ':sleepy:': '😴', ':zap:': '⚡', ':bulb:': '💡', ':lock:': '🔒',
+    ':headphones:': '🎧', ':mic:': '🎤', ':mute:': '🔇',
+  };
+
+  function expandEmojis(text: string): string {
+    return text.replace(/\\:\\w+\\:/g, match => EMOJIS[match] ?? match);
+  }
 
   function addSystemMessage(text: string) {
     const msg: ChatMessage = {
@@ -600,9 +654,9 @@ function WebClient() {
     }
 
     if (text.startsWith('/')) {
-      const result = connection.sendSlashCommand(text);
-      setChatDraft('');
-      if (typeof result === 'string') {
+      const result = handleSlashCommand(text);
+      if (result !== null) {
+        setChatDraft('');
         addSystemMessage(result);
       }
       return;
@@ -614,9 +668,12 @@ function WebClient() {
       return;
     }
 
+    // Expand emojis before sending
+    const expanded = expandEmojis(text);
+
     // Add message locally BEFORE sending (so sender sees their own message)
-    addChatMessage(currentUsername, text);
-    connection.sendChat(text);
+    addChatMessage(currentUsername, expanded);
+    connection.sendChat(expanded);
     setChatDraft('');
   };
 
@@ -716,8 +773,9 @@ function WebClient() {
 
   const toggleVoiceMute = () => {
     if (!connected) return;
-    const newMuted = connection.toggleMute();
+    const newMuted = voiceChatRef.current?.toggleMute() ?? !voiceMuted;
     setVoiceMuted(newMuted);
+    connection.sendVoiceMute(newMuted);
   };
 
   // Playlist actions
@@ -754,6 +812,135 @@ function WebClient() {
     if (!connected) return;
     connection.setPlaylistIndex(index);
   };
+
+  // ── Slash commands ──────────────────────────────────────────────────
+
+  function handleSlashCommand(input: string): string | null {
+    const parts = input.split(/\s+/);
+    const cmd = (parts[0] ?? '').toLowerCase();
+    const arg1 = parts[1] ?? '';
+    const rest = parts.slice(1).join(' ');
+
+    switch (cmd) {
+      case '/help':
+      case '/h':
+        return '/me <action> /send <file> /download <file> /playlist add/index/clear/shuffle\n/controller add/remove /ready /leave /version /users /rooms\n/settings /cancel /shrug /tableflip /unflip /lenny';
+
+      case '/me':
+        if (!rest) return 'Usage: /me <action>';
+        sendExpandedChat(`* ${currentUsername} ${rest}`);
+        return null;
+
+      case '/users':
+      case '/who':
+        if (!connected) return 'Not connected.';
+        const users = roomUsers.map(u => `${u.username}${u.isController ? '★' : ''}${u.isReady ? '✓' : ''}`).join(', ');
+        return `${roomUsers.length} peers: ${users}`;
+
+      case '/rooms':
+        if (!connected) return 'Not connected.';
+        return 'Use the server connection panel to see available rooms.';
+
+      case '/settings':
+        if (!connected) return 'Not connected.';
+        return `Room: ${currentRoom} | Host: ${connection.isHost ? 'yes' : 'no'} | Voice: ${voiceChatRef.current?.isActive ? 'on' : 'off'} | Dark: ${darkMode ? 'on' : 'off'}`;
+
+      case '/leave':
+        if (!connected) return 'Not connected.';
+        disconnect();
+        return 'Disconnected from room.';
+
+      case '/version':
+        return 'syncplay-web v2.0.0 (protocol v2.0.0)';
+
+      case '/ready':
+        if (!connected) return 'Not connected.';
+        connection.sendReady(true);
+        return 'You are now ready';
+
+      case '/controller':
+        if (!connected) return 'Not connected.';
+        if (!connection.isHost) return 'Only host can manage controllers.';
+        if (arg1 === 'add' && parts[2]) {
+          connection.addController(parts[2]);
+          return `${parts[2]} can now control playback`;
+        }
+        if (arg1 === 'remove' && parts[2]) {
+          connection.removeController(parts[2]);
+          return `${parts[2]} removed from controllers`;
+        }
+        return 'Usage: /controller add <name> or /controller remove <name>';
+
+      case '/playlist':
+        if (!connected) return 'Not connected.';
+        if (arg1 === 'add' && rest) {
+          connection.addToPlaylist(rest.split(',').map(f => f.trim()));
+          return `Added ${rest.split(',').length} file(s) to playlist`;
+        }
+        if (arg1 === 'index' && parts[2]) {
+          const idx = parseInt(parts[2], 10);
+          if (isNaN(idx)) return 'Usage: /playlist index <n>';
+          connection.setPlaylistIndex(idx);
+          return `Jumping to item ${idx}`;
+        }
+        if (arg1 === 'clear') {
+          connection.clearPlaylist();
+          return 'Playlist cleared';
+        }
+        if (arg1 === 'shuffle') {
+          const files = [...playlist.files];
+          for (let i = files.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [files[i], files[j]] = [files[j], files[i]];
+          }
+          connection.clearPlaylist();
+          connection.addToPlaylist(files);
+          return 'Playlist shuffled';
+        }
+        return 'Usage: /playlist add/index/clear/shuffle';
+
+      case '/send':
+      case '/download':
+      case '/dl':
+        if (!rest) return 'Usage: /send <filepath>';
+        return 'File transfer requires direct peer connections. Use the media upload button to share files as host.';
+
+      case '/cancel':
+        return 'Transfers cannot be cancelled mid-flight. Close and reopen the page to abort.';
+
+      case '/react':
+        if (!arg1) return 'Usage: /react <n> :emoji:';
+        const msgIdx = parseInt(arg1, 10);
+        if (isNaN(msgIdx)) return 'Usage: /react <n> :emoji:';
+        const emoji = parts[2] ?? '👍';
+        const expandedEmoji = expandEmojis(emoji);
+        const targetMsg = messages[messages.length - 1 - msgIdx];
+        if (!targetMsg) return `No message at index ${msgIdx}`;
+        const preview = targetMsg.text.length > 30 ? targetMsg.text.slice(0, 30) + '...' : targetMsg.text;
+        addSystemMessage(`You reacted with ${expandedEmoji} to "${preview}"`);
+        sendExpandedChat(`reaction: ${expandedEmoji}`);
+        return null;
+
+      // Emote commands
+      case '/shrug': sendExpandedChat('¯\\_(ツ)_/¯'); return null;
+      case '/tableflip':
+      case '/flip': sendExpandedChat('(╯°□°）╯︵ ┻━┻'); return null;
+      case '/unflip': sendExpandedChat('┬─┬ ノ( ゜-゜ノ)'); return null;
+      case '/lenny': sendExpandedChat('( ͡° ͜ʖ ͡°)'); return null;
+
+      default:
+        // Unknown command — send as regular chat
+        if (!connected) return 'You are not connected.';
+        sendExpandedChat(input);
+        return null;
+    }
+  }
+
+  function sendExpandedChat(text: string) {
+    const expanded = expandEmojis(text);
+    addChatMessage(currentUsername, expanded);
+    connection.sendChat(expanded);
+  }
 
   // Derived
   const currentUser = roomUsers.find(u => u.username === currentUsername);
@@ -961,6 +1148,14 @@ function WebClient() {
           {connectionError ? <p className="error-line">{connectionError}</p> : null}
         </form>
 
+        {latencyWarningsRef.current.length > 0 ? (
+          <div className="latency-warnings">
+            {latencyWarningsRef.current.slice(-5).map((w, i) => (
+              <p key={i} className="warning-line">⚠️ {w}</p>
+            ))}
+          </div>
+        ) : null}
+
         <section className="room-card">
           <div className="card-title">
             <UsersRound size={20} />
@@ -1017,6 +1212,9 @@ function WebClient() {
                     >
                       {user.isController ? <X size={14} /> : <Crown size={14} />}
                     </button>
+                  ) : null}
+                  {user.muted ? (
+                    <span title="Mic muted" style={{ opacity: 0.6, marginLeft: 4 }}>🔇</span>
                   ) : null}
                 </div>
                 );

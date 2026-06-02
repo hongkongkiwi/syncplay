@@ -616,7 +616,7 @@ export class P2PStateManager {
     if (!this._transport || !this._connected) return;
     this.voiceMutes.set(this.username, muted);
     // Persist mute preference to localStorage for reconnection
-    try { localStorage.setItem('syncplay-voice-mute', JSON.stringify(muted)); } catch { /* storage unavailable */ }
+    try { localStorage.setItem('syncplay-voice-mute', JSON.stringify(muted)); } catch (err) { console.warn('[P2PState] Failed to persist voice mute:', err); }
     this._transport.send(MessageType.VoiceMute, { muted });
   }
 
@@ -854,8 +854,8 @@ export class P2PStateManager {
             this.incomingTransfers.delete(tid);
             console.log(`[P2PState] File transfer ${tid} cancelled by user`);
           }
-        }).catch(() => {
-          // callback failed — proceed with transfer
+        }).catch((err) => {
+          console.warn(`[P2PState] onFileTransferWarning callback failed: ${err}`);
         });
       }
     }
@@ -1610,7 +1610,9 @@ export class P2PStateManager {
           return parsed;
         }
       }
-    } catch { /* ignore */ }
+    } catch (err) {
+      console.warn('[P2PState] Failed to load config from localStorage:', err);
+    }
     return { host: 'localhost', username: '', room: '' };
   }
 

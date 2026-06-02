@@ -99,9 +99,11 @@ impl VoiceBuffer {
                 if total >= 1000 {
                     self.dropped_samples.store(0, Ordering::Relaxed);
                     if let Some(tx) = self.events_tx.lock().as_ref() {
-                        let _ = tx.try_send(VoiceEvent::Error(format!(
+                        if let Err(e) = tx.try_send(VoiceEvent::Error(format!(
                             "Voice buffer overrun: {total} samples dropped"
-                        )));
+                        ))) {
+                            warn!("Failed to send voice buffer overrun event: {e}");
+                        }
                     }
                 }
             }
@@ -165,7 +167,9 @@ impl VoiceChat {
         self.muted.store(muted, Ordering::SeqCst);
         info!("Mic muted: {muted}");
         if let Some(tx) = self.events_tx.lock().as_ref() {
-            let _ = tx.try_send(VoiceEvent::MuteChanged(muted));
+            if let Err(e) = tx.try_send(VoiceEvent::MuteChanged(muted)) {
+                warn!("Failed to send mute changed event: {e}");
+            }
         }
     }
 
@@ -267,7 +271,9 @@ impl VoiceChat {
                             });
                             let sender = { e2.lock().clone() };
                             if let Some(tx) = sender {
-                                let _ = tx.send(VoiceEvent::TrackAdded { peer_id }).await;
+                                if let Err(e) = tx.send(VoiceEvent::TrackAdded { peer_id }).await {
+                                    warn!("Failed to send TrackAdded event: {e}");
+                                }
                             }
                         }
                         Err(e) => {
@@ -332,7 +338,9 @@ impl VoiceChat {
             },
             move |err| {
                 error!("Voice capture error: {err}");
-                let _ = tx_err.try_send(VoiceEvent::Error(format!("{err}")));
+                if let Err(e) = tx_err.try_send(VoiceEvent::Error(format!("{err}"))) {
+                    warn!("Failed to send voice capture error event: {e}");
+                }
             },
             None,
         )?;
@@ -353,7 +361,9 @@ impl VoiceChat {
         if let Err(e) = self.ensure_output_started() {
             error!("Failed to start voice output: {e}");
             if let Some(tx) = self.events_tx.lock().as_ref() {
-                let _ = tx.try_send(VoiceEvent::Error(format!("Output init failed: {e}")));
+                if let Err(e) = tx.try_send(VoiceEvent::Error(format!("Output init failed: {e}"))) {
+                    warn!("Failed to send output init error event: {e}");
+                }
             }
             return;
         }
@@ -368,9 +378,11 @@ impl VoiceChat {
                 track_id: Some("remote".into()),
             });
         if let Some(tx) = self.events_tx.lock().as_ref() {
-            let _ = tx.try_send(VoiceEvent::TrackAdded {
+            if let Err(e) = tx.try_send(VoiceEvent::TrackAdded {
                 peer_id: pid.clone(),
-            });
+            }) {
+                warn!("Failed to send TrackAdded event for {pid}: {e}");
+            }
         }
 
         let voices = self.peer_voices.clone();
@@ -416,10 +428,12 @@ impl VoiceChat {
                     }
                 }
                 if let Some(tx) = ev_tx.lock().as_ref() {
-                    let _ = tx.try_send(VoiceEvent::PeerSpeaking {
+                    if let Err(e) = tx.try_send(VoiceEvent::PeerSpeaking {
                         peer_id: pid2.clone(),
                         speaking: true,
-                    });
+                    }) {
+                        warn!("Failed to send PeerSpeaking event for {pid2}: {e}");
+                    }
                 }
 
                 // Decode Opus → PCM. FEC enabled for packet loss resilience.
@@ -446,10 +460,12 @@ impl VoiceChat {
                 }
             }
             if let Some(tx) = ev_tx.lock().as_ref() {
-                let _ = tx.try_send(VoiceEvent::PeerSpeaking {
+                if let Err(e) = tx.try_send(VoiceEvent::PeerSpeaking {
                     peer_id: pid2.clone(),
                     speaking: false,
-                });
+                }) {
+                    warn!("Failed to send PeerSpeaking(stop) event for {pid2}: {e}");
+                }
             }
             info!("Voice track ended for {pid2}");
         });

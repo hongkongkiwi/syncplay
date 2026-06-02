@@ -19,11 +19,12 @@
 //!   q/Esc  quit           space  toggle ready
 //!   p      pause/play      s     seek +10s
 //!   a      seek -10s       m     toggle voice mute
-//!   Tab    toggle voice    ?     toggle help screen
+//!   <      speed 0.5x      >     speed 2x
+//!   /      speed 1x        ?     toggle help screen
 //!   Enter  send chat       ↑↓PgUp/Dn scroll chat
 //!   j/k    scroll playlist
-//!   Commands: /help /send /download /playlist add /playlist index /react /ready
-//!             /shrug /tableflip /unflip /lenny
+//!   Commands: /help /send /playlist add/remove/index/clear /react /ready
+//!             /file /users /controller /shrug /tableflip /unflip /lenny
 
 use std::sync::Arc;
 
@@ -315,7 +316,20 @@ async fn main() -> anyhow::Result<()> {
                 if chat.from == my_name {
                     return;
                 }
-                let msg = format!("<{}> {}", chat.from, chat.message);
+                let now = {
+                    use std::time::SystemTime;
+                    let dur = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    let total = dur.as_secs();
+                    format!(
+                        "{:02}:{:02}:{:02}",
+                        (total / 3600) % 24,
+                        (total / 60) % 60,
+                        total % 60
+                    )
+                };
+                let msg = format!("[{}] <{}> {}", now, chat.from, chat.message);
                 let mut s = chat_state.lock();
                 s.chat.push(msg);
                 if s.chat.len() > 500 {

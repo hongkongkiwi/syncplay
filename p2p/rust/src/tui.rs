@@ -111,7 +111,6 @@ pub struct UiState {
     pub latency_warnings: Vec<String>,
     pub help_expanded: bool,
     pub has_turn: bool,
-    pub reconnecting: bool,
 }
 
 impl Default for UiState {
@@ -144,7 +143,6 @@ impl Default for UiState {
             latency_warnings: vec![],
             help_expanded: false,
             has_turn: false,
-            reconnecting: false,
         }
     }
 }
@@ -408,7 +406,8 @@ async fn handle_input(
                             let expanded = expand_emojis(&msg);
                             sync.send_chat(&expanded).await;
                             let mut s2 = state.lock();
-                            s2.chat.push(format!("<you> {expanded}"));
+                            let ts = timestamp();
+                            s2.chat.push(format!("[{ts}] <you> {expanded}"));
                             if s2.chat.len() > 500 {
                                 s2.chat.remove(0);
                             }
@@ -432,10 +431,10 @@ async fn handle_input(
                     s.input_cursor = s.input_cursor.saturating_sub(1);
                 }
                 KeyCode::Right => {
-                    s.input_cursor = (s.input_cursor + 1).min(s.input.len());
+                    s.input_cursor = (s.input_cursor + 1).min(s.input.chars().count());
                 }
                 KeyCode::Home => s.input_cursor = 0,
-                KeyCode::End => s.input_cursor = s.input.len(),
+                KeyCode::End => s.input_cursor = s.input.chars().count(),
                 KeyCode::Char('j') => {
                     if !s.playlist.is_empty() {
                         s.playlist_scroll = (s.playlist_scroll + 1)
@@ -453,7 +452,11 @@ async fn handle_input(
                     }
                 }
                 KeyCode::Tab => {
-                    s.voice_enabled = !s.voice_enabled;
+                    s.chat
+                        .push("--- Voice requires --voice flag at startup".to_string());
+                    if s.chat.len() > 500 {
+                        s.chat.remove(0);
+                    }
                 }
                 _ => {}
             }
@@ -560,6 +563,10 @@ fn draw_status(f: &mut Frame, area: Rect, state: &UiState) {
                 &state.room,
                 Style::default().fg(theme::ACCENT),
             ));
+            if state.has_turn {
+                spans.push(Span::styled("  ", Style::default().fg(theme::DIM)));
+                spans.push(Span::styled("⟳ TURN", Style::default().fg(theme::SEEK)));
+            }
         }
         ConnectionState::Reconnecting {
             attempt,
@@ -675,7 +682,12 @@ fn draw_peers(f: &mut Frame, area: Rect, state: &UiState) {
             }
             spans.push(Span::styled(format!(" {ready}"), Style::default().fg(rc)));
             if !p.file.is_empty() {
-                spans.push(Span::styled(" 📁", Style::default().fg(theme::DIM)));
+                let file_display = if p.file.len() > 20 {
+                    format!(" {:.17}...", p.file)
+                } else {
+                    format!(" {}", p.file)
+                };
+                spans.push(Span::styled(file_display, Style::default().fg(theme::DIM)));
             }
             if p.muted {
                 spans.push(Span::styled(" 🔇", Style::default().fg(theme::ERROR)));
@@ -752,6 +764,22 @@ fn draw_playlist(f: &mut Frame, area: Rect, state: &UiState) {
             })
             .collect();
         f.render_widget(List::new(items).block(block), area);
+        if state.playlist_scroll > 0 {
+            let indicator = format!(" ↑ +{}", state.playlist_scroll);
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    indicator,
+                    Style::default().fg(theme::WARN),
+                )))
+                .alignment(Alignment::Right),
+                Rect {
+                    y: area.y,
+                    x: area.x + area.width.saturating_sub(12),
+                    width: 11,
+                    height: 1,
+                },
+            );
+        }
     }
 }
 
@@ -821,16 +849,18 @@ fn draw_input(f: &mut Frame, area: Rect, state: &UiState) {
             Style::default().fg(theme::DIM),
         ));
     } else {
-        let cur = state.input_cursor.min(state.input.len());
-        let pre = &state.input[..cur];
+        let cur = state.input_cursor.min(state.input.chars().count());
+        let byte_cur = char_to_byte(&state.input, cur);
+        let pre = &state.input[..byte_cur];
         let at_char = state
             .input
             .chars()
             .nth(cur)
             .map(|c| c.to_string())
             .unwrap_or_else(|| " ".to_string());
-        let post = if cur < state.input.len() {
-            &state.input[cur + 1..]
+        let post = if cur < state.input.chars().count() {
+            let byte_next = char_to_byte(&state.input, cur + 1);
+            &state.input[byte_next..]
         } else {
             ""
         };
@@ -857,9 +887,11 @@ fn draw_help(f: &mut Frame, area: Rect, state: &UiState) {
             Line::from(vec![Span::styled(" space  ", Style::default().fg(theme::DIM)), Span::raw("toggle ready         "), Span::styled(" p      ", Style::default().fg(theme::DIM)), Span::raw("pause/play")]),
             Line::from(vec![Span::styled(" s/a    ", Style::default().fg(theme::DIM)), Span::raw("seek ±10s           "), Span::styled(" m      ", Style::default().fg(theme::DIM)), Span::raw("mute mic")]),
             Line::from(vec![Span::styled(" ↑↓PgUp ", Style::default().fg(theme::DIM)), Span::raw("scroll chat         "), Span::styled(" j/k    ", Style::default().fg(theme::DIM)), Span::raw("scroll playlist")]),
-            Line::from(vec![Span::styled(" Enter  ", Style::default().fg(theme::DIM)), Span::raw("send chat           "), Span::styled(" Tab    ", Style::default().fg(theme::DIM)), Span::raw("toggle voice")]),
+            Line::from(vec![Span::styled(" Enter  ", Style::default().fg(theme::DIM)), Span::raw("send chat           "), Span::styled(" Tab    ", Style::default().fg(theme::DIM)), Span::raw("voice info")]),
+            Line::from(vec![Span::styled(" <      ", Style::default().fg(theme::DIM)), Span::raw("speed 0.5x          "), Span::styled(" >      ", Style::default().fg(theme::DIM)), Span::raw("speed 2x")]),
+            Line::from(vec![Span::styled(" /      ", Style::default().fg(theme::DIM)), Span::raw("speed 1x (reset)    "), Span::styled("        ", Style::default().fg(theme::DIM)), Span::raw("")]),
             Line::from(Span::styled("COMMANDS", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))),
-            Line::from(Span::styled(" /send <file>  /playlist add/index/clear  /users  /nick <name>  /ready  /controller add/remove <name>  /cancel", Style::default().fg(theme::DIM))),
+            Line::from(Span::styled(" /send <file>  /playlist add/remove/index/clear/shuffle  /users  /nick <name>  /ready  /controller add/remove <name>  /cancel", Style::default().fg(theme::DIM))),
             Line::from(Span::styled(" /react <n> :emoji:  /shrug  /tableflip  /lenny  /file <path>  /help  /settings", Style::default().fg(theme::DIM))),
         ];
         f.render_widget(
@@ -881,6 +913,27 @@ fn draw_help(f: &mut Frame, area: Rect, state: &UiState) {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
+
+/// Convert a char index into a byte offset in a UTF-8 string.
+/// Panic-free: if char_pos exceeds the number of chars, returns the byte length.
+fn char_to_byte(s: &str, char_pos: usize) -> usize {
+    s.char_indices()
+        .nth(char_pos)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(s.len())
+}
+
+fn timestamp() -> String {
+    use std::time::SystemTime;
+    let dur = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let total = dur.as_secs();
+    let h = (total / 3600) % 24;
+    let m = (total / 60) % 60;
+    let s = total % 60;
+    format!("{:02}:{:02}:{:02}", h, m, s)
+}
 
 fn fmt_time(secs: f64) -> String {
     if secs <= 0.0 || !secs.is_finite() {
@@ -964,8 +1017,8 @@ async fn handle_command(input: &str, state: &Arc<Mutex<UiState>>, sync: &SyncMan
     let arg1 = parts.get(1).copied().unwrap_or("");
     let arg2 = parts.get(2).copied().unwrap_or("");
     let response = match cmd {
-        "/help" | "/h" => "/send <file> [peer] /playlist add/index/clear /controller add/remove /ready /leave /version /users /nick <name> /cancel /shrug /tableflip /lenny /file <path> /settings".to_string(),
-        "/send" | "/download" | "/dl" => {
+        "/help" | "/h" => "/send <file> [peer] /playlist add/remove/index/clear/shuffle /controller add/remove /ready /leave /version /users /nick <name> /cancel /shrug /tableflip /lenny /file <path> /settings".to_string(),
+        "/send" => {
             if arg1.is_empty() { "Usage: /send <filepath>".to_string() }
             else {
                 let conn = sync.get_connection();
@@ -977,6 +1030,7 @@ async fn handle_command(input: &str, state: &Arc<Mutex<UiState>>, sync: &SyncMan
                 } else { "No peers connected".to_string() }
             }
         }
+        "/download" | "/dl" => "Use /send to push files to peers. Pull-based download is not yet implemented.".to_string(),
         "/file" => {
             if arg1.is_empty() { "Usage: /file <path> — load file in player".to_string() }
             else {
@@ -1004,6 +1058,29 @@ async fn handle_command(input: &str, state: &Arc<Mutex<UiState>>, sync: &SyncMan
         "/playlist" if arg1 == "clear" => {
             sync.set_playlist(vec![]).await;
             "Playlist cleared".to_string()
+        }
+        "/playlist" if arg1 == "shuffle" => {
+            let mut files = state.lock().playlist.clone();
+            use rand::seq::SliceRandom;
+            let mut rng = rand::thread_rng();
+            files.shuffle(&mut rng);
+            sync.set_playlist(files).await;
+            "Playlist shuffled".to_string()
+        }
+
+        "/playlist" if arg1 == "remove" => {
+            if arg2.is_empty() { "Usage: /playlist remove <index>".to_string() }
+            else if let Ok(n) = arg2.parse::<usize>() {
+                let snapshot = sync.get_room_state();
+                let mut files = snapshot.playlist;
+                if n > 0 && n <= files.len() {
+                    let removed = files.remove(n - 1).name;
+                    sync.set_playlist(files).await;
+                    format!("Removed: {removed}")
+                } else {
+                    format!("Index {n} out of range (1-{})", files.len())
+                }
+            } else { "Usage: /playlist remove <index>".to_string() }
         }
         "/ready" => { sync.set_ready(true, None).await; "You are now ready".to_string() }
         "/users" | "/who" => {

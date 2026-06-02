@@ -152,7 +152,13 @@ async fn main() {
         }
     };
 
-    let local_addr = conn.local_addr().expect("local addr");
+    let local_addr = match conn.local_addr() {
+        Ok(addr) => addr,
+        Err(e) => {
+            eprintln!("Failed to get local address: {e}");
+            std::process::exit(1);
+        }
+    };
     log::info!("TURN relay listening on {local_addr}");
     log::info!("Public IP: {public_ip}");
     log::info!("Realm: {realm}");

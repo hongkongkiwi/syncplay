@@ -651,8 +651,12 @@ where
         }
     }
 
-    let _ = done_tx.try_send(());
-    let _ = write_handle.await;
+    if let Err(e) = done_tx.try_send(()) {
+        warn!("[room] cleanup done signal send failed (receiver dropped): {e}");
+    }
+    if let Err(e) = write_handle.await {
+        warn!("[room] write task join error during cleanup: {e}");
+    }
     Ok(())
 }
 
