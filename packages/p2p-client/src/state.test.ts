@@ -121,6 +121,26 @@ describe('Connection state machine', () => {
     assertTransition('reconnecting', 'offline', 'offline', true);
   });
 
+  it('connecting → reconnecting (valid - retry during connect)', () => {
+    assertTransition('connecting', 'reconnecting', 'reconnecting', true);
+  });
+
+  it('handshaking → reconnecting (valid - retry during handshake)', () => {
+    assertTransition('handshaking', 'reconnecting', 'reconnecting', true);
+  });
+
+  it('reconnecting → handshaking (valid - resume handshake)', () => {
+    assertTransition('reconnecting', 'handshaking', 'handshaking', true);
+  });
+
+  it('reconnecting → connecting_peers (valid - reconnect peers)', () => {
+    assertTransition('reconnecting', 'connecting_peers', 'connecting_peers', true);
+  });
+
+  it('offline → reconnecting (valid - explicit reconnect from offline)', () => {
+    assertTransition('offline', 'reconnecting', 'reconnecting', true);
+  });
+
   it('any → error (valid - always allowed)', () => {
     assertTransition('connecting', 'error', 'error', true);
     // Error fires an event
@@ -171,6 +191,54 @@ describe('Connection state machine', () => {
     manager.transit('offline');
     expect(cancelSpy).toHaveBeenCalled();
     cancelSpy.mockRestore();
+  });
+
+  it('onConnected validates state before transiting', () => {
+    // from handshaking → should transit to ready
+    const m1 = new P2PStateManager('u1');
+    const { transport } = mockTransport();
+    forceState(m1, 'handshaking');
+    m1.onConnected('id1', 'host1', transport);
+    expect(m1.connectionState).toBe('ready');
+
+    // from connecting_peers → should transit to ready
+    const m2 = new P2PStateManager('u2');
+    const { transport: t2 } = mockTransport();
+    forceState(m2, 'connecting_peers');
+    m2.onConnected('id2', 'host2', t2);
+    expect(m2.connectionState).toBe('ready');
+
+    // from reconnecting → should transit to ready and reset counter
+    const m3 = new P2PStateManager('u3');
+    const { transport: t3 } = mockTransport();
+    forceState(m3, 'reconnecting');
+    m3.reconnectAttempt = 5;
+    m3.onConnected('id3', 'host3', t3);
+    expect(m3.connectionState).toBe('ready');
+    expect(m3.reconnectAttempt).toBe(0);
+
+    // from unexpected state → should warn and not change
+    const m4 = new P2PStateManager('u4');
+    const { transport: t4 } = mockTransport();
+    forceState(m4, 'offline');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    m4.onConnected('id4', 'host4', t4);
+    expect(m4.connectionState).toBe('offline');
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('onConnected called in unexpected state'),
+    );
+    warnSpy.mockRestore();
+  });
+
+  it('offSyncEvent deregisters handler', () => {
+    const handler = vi.fn();
+    manager.onSyncEvent(handler);
+    manager.offSyncEvent(handler);
+
+    // Emit should not call the handler
+    (manager as any)._connectionState = 'connecting';
+    manager.transit('error', 'test');
+    expect(handler).not.toHaveBeenCalled();
   });
 });
 
@@ -687,12 +755,22 @@ describe('Connection lifecycle', () => {
     // Set up some state
     manager.dispatch(MessageType.UserInfo, { username: 'peer99', features: [] }, 'peer99');
 
+    // Set up avatar, status, and transfer state
+    (manager as any).avatarMap.set('peer99', { presetId: 'cool-cat', customUrl: '', accent: '#FF0000' });
+    (manager as any).statusMap.set('peer99', { statusText: 'watching', timestamp: Date.now() });
+    (manager as any).incomingTransfers.set('tx1', { transferId: 'tx1', filename: 'test', totalSize: 1000, chunkSize: 256, chunks: new Map(), expectedChunks: 4, expectedFingerprint: '', receivedBytes: 0 });
+
     manager.onDisconnected('test disconnect');
 
     expect(manager.connectionState).toBe('offline');
     expect(manager.connected).toBe(false);
     expect(manager.myPeerId).toBe('');
     expect(manager.getSnapshot().peers).toEqual([]);
+
+    // Verify all auxiliary maps are cleared (memory leak fix)
+    expect((manager as any).avatarMap.size).toBe(0);
+    expect((manager as any).statusMap.size).toBe(0);
+    expect((manager as any).incomingTransfers.size).toBe(0);
   });
 
   it('isHost returns true when peerId matches hostId', () => {
@@ -756,15 +834,31 @@ describe('Reconnection', () => {
     vi.useRealTimers();
   });
 
-  it('reconnect resets counter on cancelReconnect (design note)', () => {
-    // NOTE: cancelReconnect resets reconnectAttempt to 0, and reconnect()
-    // calls cancelReconnect first. This means maxReconnectAttempts is
-    // effectively never reached in recursive calls. Documenting actual behavior.
+  it('reconnect preserves counter across recursive calls', () => {
+    // reconnect() no longer calls cancelReconnect(), so the attempt counter
+    // increments properly through recursive retries, allowing maxReconnectAttempts
+    // to be reached and the error state to be triggered.
     const manager = new P2PStateManager('testuser');
 
-    manager.reconnectAttempt = 5;
-    manager.cancelReconnect();
-    expect(manager.reconnectAttempt).toBe(0);
+    manager.reconnectAttempt = 0;
+    manager.maxReconnectAttempts = 3;
+
+    // First call should increment to 1
+    const connectFn = vi.fn().mockRejectedValue(new Error('fail'));
+    manager.reconnect(connectFn, 'disconnected');
+    expect(manager.reconnectAttempt).toBe(1);
+
+    // Second call should increment to 2
+    manager.reconnect(connectFn, 'retry');
+    expect(manager.reconnectAttempt).toBe(2);
+
+    // Third call should increment to 3
+    manager.reconnect(connectFn, 'retry');
+    expect(manager.reconnectAttempt).toBe(3);
+
+    // Fourth call should hit max and transition to error
+    manager.reconnect(connectFn, 'retry');
+    expect(manager.connectionState).toBe('error');
   });
 
   it('cancelReconnect clears timer and resets attempt count', () => {

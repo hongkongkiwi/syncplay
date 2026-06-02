@@ -272,12 +272,12 @@ export class P2PStateManager {
     if (to === 'error' || to === 'offline') return true;
 
     const allowed: Partial<Record<ConnectionState, ConnectionState[]>> = {
-      offline: ['connecting'],
-      connecting: ['handshaking'],
-      handshaking: ['ready', 'connecting_peers'],
+      offline: ['connecting', 'reconnecting'],
+      connecting: ['handshaking', 'reconnecting'],
+      handshaking: ['ready', 'connecting_peers', 'reconnecting'],
       connecting_peers: ['ready'],
       ready: ['reconnecting'],
-      reconnecting: ['ready', 'offline'],
+      reconnecting: ['ready', 'offline', 'handshaking', 'connecting_peers'],
     };
 
     return allowed[from]?.includes(to) ?? false;
@@ -289,7 +289,16 @@ export class P2PStateManager {
     this.hostId = hostId;
     this._transport = transport;
     this._connected = true;
-    this.transit('ready');
+    if (this._connectionState === 'handshaking') {
+      this.transit('ready');
+    } else if (this._connectionState === 'connecting_peers') {
+      this.transit('ready');
+    } else if (this._connectionState === 'reconnecting') {
+      this.transit('ready');
+      this.reconnectAttempt = 0;
+    } else {
+      console.warn(`[P2PState] onConnected called in unexpected state: ${this._connectionState}`);
+    }
     this.startLoop();
   }
 
@@ -304,6 +313,9 @@ export class P2PStateManager {
     this.room.readyStates.clear();
     this.room.controllers.clear();
     this.latencyMap.clear();
+    this.avatarMap.clear();
+    this.statusMap.clear();
+    this.incomingTransfers.clear();
     this.peerCount = 0;
     this.transit('offline');
   }
@@ -326,6 +338,12 @@ export class P2PStateManager {
     this.eventHandlers.push(handler);
   }
 
+  /** Deregister an event handler previously registered with onSyncEvent. */
+  offSyncEvent(handler: EventHandler): void {
+    const idx = this.eventHandlers.indexOf(handler);
+    if (idx !== -1) this.eventHandlers.splice(idx, 1);
+  }
+
   private emit(event: SyncEvent): void {
     for (const h of this.eventHandlers) h(event);
   }
@@ -344,8 +362,10 @@ export class P2PStateManager {
   }
 
   private hostTick(): void {
-    if (!this.isHost || !this._transport || !this._connected) return;
-    this._transport.send(MessageType.Playstate, playstatePayload(
+    if (!this.isHost || !this._connected) return;
+    const transport = this._transport;
+    if (!transport) return;
+    transport.send(MessageType.Playstate, playstatePayload(
       this.room.position, this.room.paused, false,
       this.username, ++this.room.seq, this.room.speed,
     ));
@@ -768,7 +788,7 @@ export class P2PStateManager {
       const expectedChunks = Math.ceil(p.totalSize / p.chunkSize);
       transfer = {
         transferId: p.transferId,
-        filename: p.filename,
+        filename: (p as any).filename ?? 'unknown',
         totalSize: p.totalSize,
         chunkSize: p.chunkSize,
         chunks: new Map(),
@@ -1096,7 +1116,6 @@ export class P2PStateManager {
           offset,
           totalSize,
           chunkSize,
-          filename,
           data: chunk,
         };
 
@@ -1135,7 +1154,6 @@ export class P2PStateManager {
         offset: totalSize,
         totalSize,
         chunkSize,
-        filename,
         data: new Uint8Array(0),
       } as FileTransferPayload);
     }
@@ -1397,7 +1415,10 @@ export class P2PStateManager {
    * After maxReconnectAttempts, transit to 'error'.
    */
   reconnect(connectFn: () => Promise<void>, reason?: string): void {
-    this.cancelReconnect();
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
 
     if (this.reconnectAttempt >= this.maxReconnectAttempts) {
       this.transit('error', `Max reconnect attempts (${this.maxReconnectAttempts}) reached`);

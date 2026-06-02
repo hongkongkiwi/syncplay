@@ -111,7 +111,6 @@ export interface FileTransferPayload {
   offset: number;
   totalSize: number;
   chunkSize: number;
-  filename: string;
   data: Uint8Array;
 }
 

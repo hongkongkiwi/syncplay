@@ -27,7 +27,7 @@ import {
   UsersRound,
   X,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, Component } from 'react';
 import { SyncplayP2PConnection } from '~/syncplay/connectionV2';
 import type { SyncEvent } from 'syncplay-p2p-client';
 import type { ConnectionConfig } from '~/syncplay/connectionV2';
@@ -102,7 +102,8 @@ function loadForm(): ConnectForm {
 
 function saveForm(form: ConnectForm): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(form));
+    const { password, ...safe } = form;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
   } catch {
     // ignore
   }
@@ -118,6 +119,15 @@ function makeMessageId(): string {
 }
 
 // ── Component ──────────────────────────────────────────────────────────
+
+class ErrorFallback extends Component<{children: React.ReactNode}, {hasError: boolean}> {
+  constructor(props: {children: React.ReactNode}) { super(props); this.state = {hasError: false}; }
+  static getDerivedStateFromError() { return {hasError: true}; }
+  render() {
+    if (this.state.hasError) return <div className="error-boundary"><p>Something went wrong.</p><button onClick={() => this.setState({hasError: false})}>Retry</button></div>;
+    return this.props.children;
+  }
+}
 
 function WebClient() {
   // Connection
@@ -205,6 +215,8 @@ function WebClient() {
 
   // ── Connection ───────────────────────────────────────────────────────
 
+  const handleSyncEventRef = useRef(handleSyncEvent);
+
   const connection = useMemo(() => {
     return new SyncplayP2PConnection(
       (status, error) => {
@@ -216,11 +228,13 @@ function WebClient() {
         }
       },
       (event: SyncEvent) => {
-        handleSyncEvent(event);
+        handleSyncEventRef.current(event);
       },
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  handleSyncEventRef.current = handleSyncEvent;
 
   // Handle incoming SyncEvent — update local state
   function handleSyncEvent(event: SyncEvent) {
@@ -741,6 +755,7 @@ function WebClient() {
   // ── Render ───────────────────────────────────────────────────────────
 
   return (
+    <ErrorFallback>
     <main className="client-shell">
       <section className="stage-panel">
         <div className="brand-row">
@@ -1185,6 +1200,7 @@ function WebClient() {
         </div>
       ) : null}
     </main>
+    </ErrorFallback>
   );
 }
 

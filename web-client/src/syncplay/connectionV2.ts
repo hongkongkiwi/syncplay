@@ -26,6 +26,7 @@ export type ConnectionConfig = {
   password?: string;
   turnUrl?: string;
   sfu?: boolean;
+  secure?: boolean;
 };
 
 // ── Error UX ────────────────────────────────────────────────────────
@@ -176,7 +177,9 @@ export class SyncplayP2PConnection {
 
     try {
       // 1. Connect WebSocket to signaling server
-      const wsUrl = `ws://${config.host}:8998`;
+      const isLocal = config.host.startsWith('localhost') || config.host.startsWith('127.');
+      const protocol = config.secure === true ? 'wss' : config.secure === false ? 'ws' : isLocal ? 'ws' : 'wss';
+      const wsUrl = `${protocol}://${config.host}:8998`;
       this.ws = new WebSocket(wsUrl);
 
       await new Promise<void>((resolve, reject) => {

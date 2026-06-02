@@ -384,14 +384,18 @@ export default function App() {
   });
   const statusEvent = useEvent(player, 'statusChange', { status: player.status });
 
+  const handleSyncEventRef = useRef(handleSyncEvent);
+
   const connection = useMemo(() => {
     const conn = new P2PConnection(form.username);
     // Subscribe to state manager events
     conn.stateManager.onSyncEvent((event: SyncEvent) => {
-      handleSyncEvent(event, conn);
+      handleSyncEventRef.current(event, conn);
     });
     return conn;
   }, []);
+
+  handleSyncEventRef.current = handleSyncEvent;
 
   // Keep username ref in sync
   useEffect(() => {
@@ -554,8 +558,9 @@ export default function App() {
 
   useEffect(() => {
     if (!preferencesLoaded) return;
+    const { password: _pw, ...safeForm } = form;
     const prefs = createPersistedPreferences({
-      form: form as unknown as Parameters<typeof createPersistedPreferences>[0]['form'],
+      form: safeForm as unknown as Parameters<typeof createPersistedPreferences>[0]['form'],
       savedRooms,
       mediaLibrary,
       controlPasswords: {},
@@ -595,31 +600,6 @@ export default function App() {
     });
     return () => subscription.remove();
   }, [connection, keepPlayingInBackground, player, media]);
-
-  // ── Auto-reconnect ──────────────────────────────────────────────────────
-
-  useEffect(() => {
-    if (connectionState !== 'error' && connectionState !== 'offline') return;
-    if (!autoReconnect || manualDisconnectRef.current || !lastConnectionConfigRef.current) return;
-    if (reconnectTimerRef.current) return;
-
-    reconnectTimerRef.current = setTimeout(() => {
-      reconnectTimerRef.current = null;
-      const config = lastConnectionConfigRef.current;
-      if (config && autoReconnect && !manualDisconnectRef.current) {
-        connection.connect(config).catch(err => {
-          setConnectionError(String(err));
-        });
-      }
-    }, 2500);
-
-    return () => {
-      if (reconnectTimerRef.current) {
-        clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = null;
-      }
-    };
-  }, [autoReconnect, connection, connectionState]);
 
   // ── Sync correction ─────────────────────────────────────────────────────
 
@@ -739,8 +719,10 @@ export default function App() {
       return;
     }
 
+    const isLocal = host.startsWith('localhost') || host.startsWith('127.');
+    const protocol = isLocal ? 'ws' : 'wss';
     const config: P2PConnectionConfig = {
-      signalingUrl: `ws://${host}:8998`,
+      signalingUrl: `${protocol}://${host}:8998`,
       username: form.username.trim() || 'Mobile',
       room: form.room.trim() || 'default',
       ...(form.password.trim() ? { password: form.password.trim() } : {}),
