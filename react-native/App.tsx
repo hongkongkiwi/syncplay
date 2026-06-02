@@ -1029,6 +1029,14 @@ export default function App() {
           createdAt: Date.now(),
         }].slice(-500));
       } else {
+        // Add locally before sending (so sender sees own message)
+        setMessages(prev => [...prev, {
+          id: nextMessageId(),
+          text: trimmed,
+          username: form.username,
+          kind: 'chat',
+          createdAt: Date.now(),
+        }].slice(-500));
         connection.sendChat(trimmed);
       }
     }

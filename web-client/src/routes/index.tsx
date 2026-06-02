@@ -589,9 +589,25 @@ function WebClient() {
       return;
     }
 
+    // Add message locally BEFORE sending (so sender sees their own message)
+    addChatMessage(currentUsername, text);
     connection.sendChat(text);
     setChatDraft('');
   };
+
+  function addChatMessage(from: string, text: string) {
+    const msg: ChatMessage = {
+      id: makeMessageId(),
+      kind: 'chat',
+      username: from,
+      text,
+      createdAt: Date.now(),
+    };
+    setMessages(prev => {
+      const next = [...prev, msg];
+      return next.length > MAX_MESSAGES ? next.slice(next.length - MAX_MESSAGES) : next;
+    });
+  }
 
   const sendPlayback = useCallback(
     (doSeek = false) => {
@@ -877,7 +893,7 @@ function WebClient() {
               <input
                 value={form.room}
                 onChange={event => updateForm('room', event.target.value)}
-                placeholder="room:password"
+                placeholder="default"
               />
             </label>
           </div>

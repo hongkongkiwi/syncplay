@@ -1582,7 +1582,7 @@ export class P2PConnection implements P2PTransport {
       // ── WebRTC connection timeout (30s) ────────────────────────
       this._webrtcTimeout = setTimeout(() => {
         if (this.dc?.readyState !== 'open') {
-          const msg = 'ICE connection timed out';
+          const msg = 'Connection timed out — could not establish media channel. Check your network or try TURN relay.';
           this.stateManager.setConnectionState('error', msg);
           this._connectionState = 'error';
         }
