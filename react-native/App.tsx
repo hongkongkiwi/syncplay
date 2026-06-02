@@ -1947,7 +1947,8 @@ function BottomTabs({
   connected: boolean;
   onSelect: (screen: AppScreenId) => void;
 }) {
-  const screens = APP_SCREENS.filter(s => s.id !== 'transfers'); // Remove transfers tab
+  // transfers: planned future feature, hidden until file transfer UI is complete
+  const screens = APP_SCREENS.filter(s => s.id !== 'transfers');
   return (
     <View style={styles.bottomTabs}>
       {screens.map(screen => {

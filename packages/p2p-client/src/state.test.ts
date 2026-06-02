@@ -508,6 +508,384 @@ describe('Message handlers', () => {
 
     expect(manager.getSnapshot().peers.some((p) => p.username === 'leaver')).toBe(false);
   });
+
+  // ── 7 uncovered handler types ─────────────────────────────────
+
+  it('AvatarSet handler: stores avatar in avatarMap and snapshot', () => {
+    const { manager } = setupHost();
+
+    // Add a peer first
+    manager.dispatch(MessageType.UserInfo, {
+      username: 'avataruser',
+      features: [],
+    }, 'avataruser');
+
+    manager.dispatch(MessageType.AvatarSet, {
+      username: 'avataruser',
+      preset_id: 'cool-cat',
+      custom_url: '',
+      accent: '#FF6B6B',
+    });
+
+    // Verify avatarMap (internal)
+    const av = (manager as any).avatarMap.get('avataruser');
+    expect(av).toBeDefined();
+    expect(av.presetId).toBe('cool-cat');
+    expect(av.accent).toBe('#FF6B6B');
+
+    // Verify snapshot reflects it
+    const snap = manager.getSnapshot();
+    expect(snap.avatars['avataruser']).toBeDefined();
+    expect(snap.avatars['avataruser'].presetId).toBe('cool-cat');
+    expect(snap.avatars['avataruser'].accent).toBe('#FF6B6B');
+  });
+
+  it('AvatarSet handler: clearing avatar with empty preset_id', () => {
+    const { manager } = setupHost();
+
+    manager.dispatch(MessageType.UserInfo, {
+      username: 'clearuser',
+      features: [],
+    }, 'clearuser');
+
+    // Set then clear
+    manager.dispatch(MessageType.AvatarSet, {
+      username: 'clearuser',
+      preset_id: 'foxy',
+      custom_url: '',
+      accent: '#FF8C42',
+    });
+    manager.dispatch(MessageType.AvatarSet, {
+      username: 'clearuser',
+      preset_id: '',
+      custom_url: '',
+      accent: '',
+    });
+
+    const av = (manager as any).avatarMap.get('clearuser');
+    expect(av.presetId).toBe('');
+    expect(av.accent).toBe('');
+  });
+
+  it('StatusUpdate handler: stores status in statusMap and snapshot', () => {
+    const { manager } = setupHost();
+
+    manager.dispatch(MessageType.UserInfo, {
+      username: 'statususer',
+      features: [],
+    }, 'statususer');
+
+    const ts = Date.now();
+    manager.dispatch(MessageType.StatusUpdate, {
+      username: 'statususer',
+      status_text: 'watching intently 👀',
+      timestamp: ts,
+    });
+
+    // Verify statusMap (internal)
+    const st = (manager as any).statusMap.get('statususer');
+    expect(st).toBeDefined();
+    expect(st.statusText).toBe('watching intently 👀');
+    expect(st.timestamp).toBe(ts);
+
+    // Verify snapshot
+    const snap = manager.getSnapshot();
+    expect(snap.statuses['statususer']).toBeDefined();
+    expect(snap.statuses['statususer'].statusText).toBe('watching intently 👀');
+  });
+
+  it('StatusUpdate handler: overwrites previous status', () => {
+    const { manager } = setupHost();
+
+    manager.dispatch(MessageType.UserInfo, {
+      username: 'multi',
+      features: [],
+    }, 'multi');
+
+    manager.dispatch(MessageType.StatusUpdate, {
+      username: 'multi', status_text: 'first status', timestamp: 1000,
+    });
+    manager.dispatch(MessageType.StatusUpdate, {
+      username: 'multi', status_text: 'second status', timestamp: 2000,
+    });
+
+    const st = (manager as any).statusMap.get('multi');
+    expect(st.statusText).toBe('second status');
+    expect(st.timestamp).toBe(2000);
+  });
+
+  it('FileInfo handler: stores file metadata on peer', () => {
+    const { manager } = setupHost();
+
+    // Add a peer first
+    manager.dispatch(MessageType.UserInfo, {
+      username: 'filepeer',
+      features: [],
+    }, 'filepeer');
+
+    manager.dispatch(MessageType.FileInfo, {
+      username: 'filepeer',
+      file: { name: 'movie.mkv', duration: 7200, size: 2_000_000_000 },
+    });
+
+    const snap = manager.getSnapshot();
+    const peer = snap.peers.find(p => p.username === 'filepeer');
+    expect(peer?.file).toBeDefined();
+    expect(peer!.file!.name).toBe('movie.mkv');
+    expect(peer!.file!.duration).toBe(7200);
+    expect(peer!.file!.size).toBe(2_000_000_000);
+  });
+
+  it('FileInfo handler: clears file metadata when file is undefined', () => {
+    const { manager } = setupHost();
+
+    manager.dispatch(MessageType.UserInfo, {
+      username: 'clearfile',
+      features: [],
+    }, 'clearfile');
+
+    // Set file
+    manager.dispatch(MessageType.FileInfo, {
+      username: 'clearfile',
+      file: { name: 'temp.mkv', duration: 100, size: 500 },
+    });
+    expect(manager.getSnapshot().peers.find(p => p.username === 'clearfile')?.file?.name).toBe('temp.mkv');
+
+    // Clear file
+    manager.dispatch(MessageType.FileInfo, {
+      username: 'clearfile',
+    });
+    expect(manager.getSnapshot().peers.find(p => p.username === 'clearfile')?.file).toBeUndefined();
+  });
+
+  it('FileTransfer handler: creates incoming transfer and stores chunk', () => {
+    const { manager } = setupHost();
+
+    const data = new Uint8Array([0x01, 0x02, 0x03, 0x04]);
+    const payload = {
+      transferId: 'tx-001',
+      chunkIndex: 0,
+      offset: 0,
+      totalSize: 8,
+      chunkSize: 4,
+      data,
+    };
+
+    manager.dispatch(MessageType.FileTransfer, payload);
+
+    const transfers = (manager as any).incomingTransfers;
+    expect(transfers.has('tx-001')).toBe(true);
+    const t = transfers.get('tx-001');
+    expect(t.chunkSize).toBe(4);
+    expect(t.totalSize).toBe(8);
+    expect(t.expectedChunks).toBe(2);
+    expect(t.chunks.get(0)).toBe(data);
+    expect(t.receivedBytes).toBe(4);
+  });
+
+  it('FileTransfer handler: emits transfer-complete event on final chunk', async () => {
+    const { manager } = setupHost();
+
+    // Stub browser APIs needed by assembleTransfer (only for this test)
+    const digestSpy = vi.spyOn(crypto.subtle, 'digest').mockResolvedValue(new Uint8Array(32).buffer as ArrayBuffer);
+    const origDocument = globalThis.document;
+    const origURL = globalThis.URL;
+    const origBlob = globalThis.Blob;
+    vi.stubGlobal('document', { body: { appendChild: vi.fn(), removeChild: vi.fn() }, createElement: vi.fn(() => ({ href: '', download: '', click: vi.fn() })) });
+    vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:test'), revokeObjectURL: vi.fn() });
+    vi.stubGlobal('Blob', class { constructor(_parts: any[], _opts: any) {} });
+
+    const events: SyncEvent[] = [];
+    manager.onSyncEvent(e => events.push(e));
+
+    const data = new Uint8Array([0x01, 0x02, 0x03, 0x04]);
+    manager.dispatch(MessageType.FileTransfer, {
+      transferId: 'tx-prog', chunkIndex: 0, offset: 0,
+      totalSize: 4, chunkSize: 4, data,
+    });
+
+    // assembleTransfer is async — wait for it to complete
+    await vi.waitFor(() => {
+      const completeEvents = events.filter(e => e.type === 'transfer-complete');
+      expect(completeEvents.length).toBe(1);
+      expect((completeEvents[0].data as any).transferId).toBe('tx-prog');
+      expect((completeEvents[0].data as any).size).toBe(4);
+    });
+
+    digestSpy.mockRestore();
+    // Restore originals (or undefined) without trashing localStorage stub
+    if (origDocument !== undefined) vi.stubGlobal('document', origDocument);
+    if (origURL !== undefined) vi.stubGlobal('URL', origURL);
+    if (origBlob !== undefined) vi.stubGlobal('Blob', origBlob);
+  });
+
+  it('FileTransfer handler: rejects chunkSize 0', () => {
+    const { manager } = setupHost();
+
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    manager.dispatch(MessageType.FileTransfer, {
+      transferId: 'bad-tx', chunkIndex: 0, offset: 0,
+      totalSize: 100, chunkSize: 0, data: new Uint8Array(0),
+    });
+
+    expect((manager as any).incomingTransfers.has('bad-tx')).toBe(false);
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('chunkSize is 0'),
+    );
+    errSpy.mockRestore();
+  });
+
+  it('FileResponse handler: accepted response stores fingerprint and chunkSize', () => {
+    const { manager } = setupHost();
+
+    // Set up an incoming transfer first
+    (manager as any).incomingTransfers.set('tx-resp', {
+      transferId: 'tx-resp',
+      filename: 'file.bin',
+      totalSize: 1000,
+      chunkSize: 256,
+      chunks: new Map(),
+      expectedChunks: 4,
+      expectedFingerprint: '',
+      receivedBytes: 0,
+    });
+
+    manager.dispatch(MessageType.FileResponse, {
+      transferId: 'tx-resp',
+      accepted: true,
+      reason: '',
+      fingerprint: 'abc123def',
+      chunkSize: 500,
+    });
+
+    const t = (manager as any).incomingTransfers.get('tx-resp');
+    expect(t.expectedFingerprint).toBe('abc123def');
+    expect(t.chunkSize).toBe(500);
+    expect(t.expectedChunks).toBe(2); // ceil(1000/500)
+  });
+
+  it('FileResponse handler: rejection deletes incoming transfer', () => {
+    const { manager } = setupHost();
+
+    (manager as any).incomingTransfers.set('tx-rej', {
+      transferId: 'tx-rej',
+      filename: 'bigfile.bin',
+      totalSize: 5000,
+      chunkSize: 256,
+      chunks: new Map(),
+      expectedChunks: 20,
+      expectedFingerprint: '',
+      receivedBytes: 0,
+    });
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    manager.dispatch(MessageType.FileResponse, {
+      transferId: 'tx-rej',
+      accepted: false,
+      reason: 'file too large',
+      fingerprint: '',
+      chunkSize: 0,
+    });
+
+    expect((manager as any).incomingTransfers.has('tx-rej')).toBe(false);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('rejected'),
+    );
+    warnSpy.mockRestore();
+  });
+
+  it('FileResponse handler: warns for unknown transfer', () => {
+    const { manager } = setupHost();
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    manager.dispatch(MessageType.FileResponse, {
+      transferId: 'nonexistent',
+      accepted: true,
+      reason: '',
+      fingerprint: '',
+      chunkSize: 256,
+    });
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('unknown transfer'),
+    );
+    warnSpy.mockRestore();
+  });
+
+  it('SubtitleInfo handler: emits chat event with subtitle list', () => {
+    const { manager } = setupHost();
+
+    const events: SyncEvent[] = [];
+    manager.onSyncEvent(e => events.push(e));
+
+    manager.dispatch(MessageType.SubtitleInfo, {
+      subtitles: [
+        { filename: 'movie.en.srt', size: 4096, language: 'en' },
+        { filename: 'movie.fr.srt', size: 3800, language: 'fr' },
+      ],
+    });
+
+    const chatEvents = events.filter(e => e.type === 'chat');
+    expect(chatEvents.length).toBe(1);
+    const chatData = chatEvents[0].data as any;
+    expect(chatData.from).toBe('system');
+    expect(chatData.message).toContain('Subtitles available');
+    expect(chatData.message).toContain('movie.en.srt');
+    expect(chatData.message).toContain('movie.fr.srt');
+  });
+
+  it('VoiceFrame handler: calls onVoiceFrame callback', () => {
+    const { manager } = setupHost();
+
+    let receivedData: Uint8Array | null = null;
+    let receivedFrom = '';
+    manager.onVoiceFrame = (data, from) => {
+      receivedData = data;
+      receivedFrom = from;
+    };
+
+    const audioData = new Uint8Array([0x10, 0x20, 0x30]);
+    manager.dispatch(MessageType.VoiceFrame, {
+      data: audioData,
+      seq: 1,
+      timestamp: Date.now(),
+      sampleRate: 48000,
+      channels: 1,
+    }, 'voicepeer');
+
+    expect(receivedData).not.toBeNull();
+    expect(receivedData!.byteLength).toBe(3);
+    expect(receivedFrom).toBe('voicepeer');
+  });
+
+  it('VoiceFrame handler: skips self (own voice)', () => {
+    const { manager } = setupHost();
+
+    let callCount = 0;
+    manager.onVoiceFrame = () => { callCount++; };
+
+    manager.dispatch(MessageType.VoiceFrame, {
+      data: new Uint8Array([0x01]),
+      seq: 1,
+      timestamp: Date.now(),
+    }, 'hostuser');
+
+    // The hostusername is 'hostuser', and 'from' matches, so it should be skipped
+    expect(callCount).toBe(0);
+  });
+
+  it('VoiceFrame handler: no-op when onVoiceFrame is not set', () => {
+    const { manager } = setupHost();
+
+    // onVoiceFrame is null by default — dispatch should not throw
+    expect(() => {
+      manager.dispatch(MessageType.VoiceFrame, {
+        data: new Uint8Array([0x01]),
+        seq: 1,
+        timestamp: Date.now(),
+      }, 'anypeer');
+    }).not.toThrow();
+  });
 });
 
 // ── 3. Playback Control ──────────────────────────────────────────
