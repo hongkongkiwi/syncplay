@@ -1182,14 +1182,17 @@ export class P2PStateManager {
     }
 
     // Send fingerprint verification chunk (chunkIndex = MAX_SAFE_INTEGER)
+    // Contains the SHA-256 hex string as UTF-8 bytes, matching Rust behavior.
+    // Receivers compare this against their own computed hash for integrity.
     if (this._transport && this._connected) {
+      const fpBytes = new TextEncoder().encode(fingerprint);
       this._transport.send(MessageType.FileTransfer, {
         transferId,
         chunkIndex: Number.MAX_SAFE_INTEGER,
         offset: totalSize,
         totalSize,
-        chunkSize,
-        data: new Uint8Array(0),
+        chunkSize: fpBytes.byteLength,
+        data: fpBytes,
       } as FileTransferPayload);
     }
 
@@ -1341,14 +1344,17 @@ export class P2PStateManager {
     }
 
     // Send fingerprint verification chunk (chunkIndex = MAX_SAFE_INTEGER)
+    // Contains the SHA-256 hex string as UTF-8 bytes, matching Rust behavior.
+    // Receivers compare this against their own computed hash for integrity.
     if (this._transport && this._connected) {
+      const fpBytes = new TextEncoder().encode(fingerprint);
       this._transport.send(MessageType.FileTransfer, {
         transferId,
         chunkIndex: Number.MAX_SAFE_INTEGER,
         offset: totalSize,
         totalSize,
-        chunkSize,
-        data: new Uint8Array(0),
+        chunkSize: fpBytes.byteLength,
+        data: fpBytes,
       } as FileTransferPayload);
     }
 

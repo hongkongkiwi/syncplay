@@ -31,7 +31,7 @@ pre-commit:
 pre-push:
   parallel: true
   commands:
-    # ── Full test suite (~3s) ──
+    # ── Full Rust test suite (~3s) ──
     test:
       run: cargo test --manifest-path p2p/rust/Cargo.toml --lib
       fail_text: "Tests failed — fix before pushing"
@@ -45,3 +45,16 @@ pre-push:
     doc:
       run: cargo doc --manifest-path p2p/rust/Cargo.toml --no-deps --features tui 2>&1 | grep -q '^error' && exit 1 || exit 0
       fail_text: "Broken doc links — fix before pushing"
+
+    # ── JS/TS tests + type check (~3s total) ──
+    js-test:
+      run: cd packages/p2p-client && npx vitest run 2>&1 > /dev/null
+      fail_text: "JS tests failed — fix before pushing"
+
+    rn-test:
+      run: cd react-native && npx jest 2>&1 > /dev/null
+      fail_text: "RN tests failed — fix before pushing"
+
+    rn-tsc:
+      run: cd react-native && npx tsc --noEmit
+      fail_text: "RN TypeScript errors — fix before pushing"
