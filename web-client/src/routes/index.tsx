@@ -6,6 +6,8 @@ import {
   Link2,
   LoaderCircle,
   MessageSquare,
+  Mic,
+  MicOff,
   Pause,
   Play,
   PlaySquare,
@@ -146,6 +148,7 @@ function WebClient() {
   const [unreadChat, setUnreadChat] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [showHelp, setShowHelp] = useState(false);
+  const [voiceMuted, setVoiceMuted] = useState(false);
 
   // Refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -592,6 +595,12 @@ function WebClient() {
     connection.sendReady(!currentlyReady);
   };
 
+  const toggleVoiceMute = () => {
+    if (!connected) return;
+    const newMuted = connection.toggleMute();
+    setVoiceMuted(newMuted);
+  };
+
   // Playlist actions
   const playlistAddCurrent = () => {
     if (!connected) return;
@@ -720,6 +729,10 @@ function WebClient() {
           <button type="button" onClick={toggleReady} disabled={!connected} className={isReady ? 'ready' : ''}>
             <Check size={18} />
             {isReady ? 'Ready' : 'Not ready'}
+          </button>
+          <button type="button" onClick={toggleVoiceMute} disabled={!connected} className={voiceMuted ? 'active' : ''}>
+            {voiceMuted ? <MicOff size={18} /> : <Mic size={18} />}
+            {voiceMuted ? 'Muted' : 'Voice'}
           </button>
           <button
             type="button"

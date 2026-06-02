@@ -16,6 +16,7 @@
     "blueimp-md5": "^2.19.0",
     "buffer": "^6.0.3",
     "expo": "~56.0.5",
+    "expo-av": "^16.0.8",
     "expo-dev-client": "~56.0.16",
     "expo-document-picker": "~56.0.4",
     "expo-file-system": "~56.0.7",

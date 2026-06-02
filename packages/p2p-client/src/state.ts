@@ -7,6 +7,7 @@ import {
   PlaystateAction,
   PlaylistAction,
   ControllerAction,
+  type AvatarSetPayload,
   type ChatPayload,
   type ControllerChangePayload,
   type FileEntry,
@@ -22,9 +23,11 @@ import {
   type PlaylistRequestPayload,
   type PlaystateRequestPayload,
   type ReadinessPayload,
+  type StatusUpdatePayload,
   type SubtitleInfoPayload,
   type UserInfoPayload,
   type VoiceMutePayload,
+  avatarSetPayload,
   chatPayload,
   playstatePayload,
   playstateRequestPause,
@@ -32,6 +35,7 @@ import {
   playstateRequestSeek,
   playstateRequestSetSpeed,
   readinessPayload,
+  statusUpdatePayload,
 } from './messages';
 
 // ── Connection interface ──────────────────────────────────────────
@@ -53,6 +57,8 @@ export interface PeerState {
   rtt: number;
   muted: boolean;
   iceState: 'new' | 'checking' | 'connected' | 'disconnected' | 'failed' | 'closed';
+  avatar?: { presetId: string; customUrl: string; accent: string };
+  status?: { text: string; timestamp: number };
 }
 
 export interface RoomStateSnapshot {
@@ -151,6 +157,9 @@ export class P2PStateManager {
 
   // Configurable callbacks for the connection layer
   onSendTransport: ((msgType: MessageType, payload: unknown) => void) | null = null;
+
+  /** Voice frame handler — set by VoiceChat to receive incoming audio */
+  onVoiceFrame: ((data: Uint8Array, from: string) => void) | null = null;
   onReconnectSuccess: (() => void) | null = null;
 
   constructor(
@@ -533,6 +542,24 @@ export class P2PStateManager {
     this._transport.send(MessageType.VoiceMute, { muted });
   }
 
+  /** Send a voice audio frame to all peers */
+  sendVoiceFrame(data: Uint8Array, seq: number): void {
+    if (!this._transport || !this._connected) return;
+    if (!this.isHost) {
+      // Non-host: send to host for relay
+      this._transport.send(MessageType.VoiceFrame, {
+        data, seq, from: this.username,
+        timestamp: Date.now(), sampleRate: 16000, channels: 1,
+      });
+    } else {
+      // Host: broadcast to all
+      this._transport.send(MessageType.VoiceFrame, {
+        data, seq, from: this.username,
+        timestamp: Date.now(), sampleRate: 16000, channels: 1,
+      });
+    }
+  }
+
   toggleMute(): boolean {
     const current = this.voiceMutes.get(this.username) ?? false;
     this.sendVoiceMute(!current);
@@ -598,6 +625,7 @@ export class P2PStateManager {
       case MessageType.VoiceMute: return this.handleVoiceMute(payload as VoiceMutePayload, from);
       case MessageType.SubtitleInfo: return this.handleSubtitleInfo(payload as SubtitleInfoPayload);
       case MessageType.ControllerChange: return this.handleControllerChange(payload as ControllerChangePayload);
+      case MessageType.VoiceFrame: return this.handleVoiceFrame(payload as any, from);
       case MessageType.FileRequest: break; // handled by file transfer module
     }
   }
@@ -871,6 +899,17 @@ export class P2PStateManager {
       this.voiceMutes.set(from, p.muted);
       const peer = this.room.peers.get(from);
       if (peer) peer.muted = p.muted;
+    }
+  }
+
+  private handleVoiceFrame(p: { data: Uint8Array; from?: string; seq: number }, from?: string): void {
+    if (!this.onVoiceFrame) return;
+    const sender = p.from ?? from ?? '';
+    if (sender === this.username) return; // skip self
+    this.onVoiceFrame(p.data, sender);
+    // Host relays to all other peers
+    if (this.isHost && this._transport && sender !== this.username) {
+      this._transport.send(MessageType.VoiceFrame, p);
     }
   }
 

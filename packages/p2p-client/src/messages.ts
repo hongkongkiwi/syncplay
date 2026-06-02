@@ -21,6 +21,9 @@ export enum MessageType {
   VoiceMute = 0x11,
   SubtitleInfo = 0x12,
   ControllerChange = 0x13,
+  AvatarSet = 0x14,
+  StatusUpdate = 0x15,
+  VoiceFrame = 0x16,
 }
 
 // ── Payload types ──────────────────────────────────────────────
@@ -174,6 +177,58 @@ export interface ControllerChangePayload {
   action: ControllerAction;
 }
 
+export interface AvatarPreset {
+  id: string;
+  emoji: string;
+  name: string;
+  accent: string;
+}
+
+export const AVATAR_PRESETS: AvatarPreset[] = [
+  { id: "cool-cat",     emoji: "😎", name: "Cool Cat",     accent: "#FF6B6B" },
+  { id: "pixel-panda",  emoji: "🐼", name: "Pixel Panda",  accent: "#4ECDC4" },
+  { id: "retro-ghost",  emoji: "👻", name: "Retro Ghost",  accent: "#FFE66D" },
+  { id: "foxy",         emoji: "🦊", name: "Foxy",         accent: "#FF8C42" },
+  { id: "octo",         emoji: "🐙", name: "Octo",         accent: "#A78BFA" },
+  { id: "bot-buddy",    emoji: "🤖", name: "Bot Buddy",    accent: "#6EE7B7" },
+  { id: "sparkle",      emoji: "🦄", name: "Sparkle",      accent: "#F472B6" },
+  { id: "cactus",       emoji: "🌵", name: "Cactus",       accent: "#34D399" },
+  { id: "pizza-pal",    emoji: "🍕", name: "Pizza Pal",    accent: "#FB923C" },
+  { id: "rocker",       emoji: "🎸", name: "Rocker",       accent: "#F87171" },
+  { id: "wizard",       emoji: "🧙", name: "Wizard",       accent: "#818CF8" },
+  { id: "dino",         emoji: "🦖", name: "Dino",         accent: "#84CC16" },
+];
+
+export const STATUS_PRESETS: [string, string][] = [
+  ["hyped",       "I'm feeling: hyped! 🔥"],
+  ["cozy",        "I'm feeling: cozy 🧋"],
+  ["sleepy",      "I'm feeling: sleepy 😴"],
+  ["excited",     "I'm feeling: excited! 🎬"],
+  ["nostalgic",   "I'm feeling: nostalgic 🥲"],
+  ["snacks",      "brb getting snacks 🍿"],
+  ["bathroom",    "brb bathroom 🚽"],
+  ["wild",        "this scene is wild 😱"],
+  ["intently",    "watching intently 👀"],
+  ["no-spoilers", "no spoilers! 🤫"],
+  ["laughing",    "LOL this part 😂"],
+  ["crying",      "not me crying rn 😭"],
+  ["mindblown",   "mind = blown 🤯"],
+  ["afk",         "afk for a moment 🏃"],
+];
+
+export interface AvatarSetPayload {
+  username: string;
+  preset_id: string;
+  custom_url: string;
+  accent: string;
+}
+
+export interface StatusUpdatePayload {
+  username: string;
+  status_text: string;
+  timestamp: number;
+}
+
 // Type mapping for encode/decode
 export const PAYLOAD_BY_TYPE: Record<MessageType, string> = {
   [MessageType.Hello]: "HelloPayload",
@@ -195,6 +250,9 @@ export const PAYLOAD_BY_TYPE: Record<MessageType, string> = {
   [MessageType.VoiceMute]: "VoiceMutePayload",
   [MessageType.SubtitleInfo]: "SubtitleInfoPayload",
   [MessageType.ControllerChange]: "ControllerChangePayload",
+  [MessageType.AvatarSet]: "AvatarSetPayload",
+  [MessageType.StatusUpdate]: "StatusUpdatePayload",
+  [MessageType.VoiceFrame]: "VoiceFramePayload",
 };
 
 // ── Builders ───────────────────────────────────────────────────
@@ -278,4 +336,51 @@ export function peerDisconnectPayload(
   reason: string,
 ): PeerDisconnectPayload {
   return { reason };
+}
+
+export function avatarSetPayload(
+  username: string,
+  presetId: string,
+  customUrl = "",
+  accent = "",
+): AvatarSetPayload {
+  return { username, preset_id: presetId, custom_url: customUrl, accent };
+}
+
+export function avatarSetPayloadClear(username: string): AvatarSetPayload {
+  return { username, preset_id: "", custom_url: "", accent: "" };
+}
+
+export function statusUpdatePayload(
+  username: string,
+  statusText: string,
+): StatusUpdatePayload {
+  return { username, status_text: statusText, timestamp: Date.now() };
+}
+
+// ── Voice frame ──────────────────────────────────────────────────
+
+export interface VoiceFramePayload {
+  /** Sender peer ID */
+  from?: string;
+  /** Audio data: encoded Opus/WebM blob bytes or raw PCM */
+  data: Uint8Array;
+  /** Sample rate of the audio (Hz) */
+  sampleRate?: number;
+  /** Number of audio channels */
+  channels?: number;
+  /** Timestamp of capture (ms) */
+  timestamp: number;
+  /** Sequence number for ordering */
+  seq: number;
+}
+
+export function voiceFramePayload(
+  data: Uint8Array,
+  seq: number,
+  sampleRate?: number,
+  channels?: number,
+  from?: string,
+): VoiceFramePayload {
+  return { data, timestamp: Date.now(), seq, sampleRate, channels, from };
 }

@@ -33,6 +33,7 @@ export enum MessageType {
   VoiceMute = 0x11,
   SubtitleInfo = 0x12,
   ControllerChange = 0x13,
+  VoiceFrame = 0x14,
 }
 
 // ── Payload interfaces ──────────────────────────────────────────────────────
@@ -784,6 +785,19 @@ export class P2PStateManager {
     return !current;
   }
 
+  /** Callback for incoming VoiceFrame payloads (raw audio data). Set by VoiceChat. */
+  voiceFrameHandler: ((data: Uint8Array) => void) | null = null;
+
+  sendVoiceFrame(data: Uint8Array, seq: number): void {
+    if (!this._connected || !this._transport) return;
+    if (this.voiceMutes.get(this.username) ?? false) return;
+    this._transport.send(MessageType.VoiceFrame, {
+      data,
+      timestamp: Date.now(),
+      seq,
+    });
+  }
+
   // ── File transfer (stub — full implementation needs chunk assembly) ───────
 
   requestFile(peerId_: string, filename: string, offset = 0): void {
@@ -816,6 +830,13 @@ export class P2PStateManager {
       case MessageType.UserInfo: return this.handleUserInfo(payload as UserInfoPayload);
       case MessageType.PeerDisconnect: return this.handlePeerDisconnect(payload as PeerDisconnectPayload, from);
       case MessageType.VoiceMute: return this.handleVoiceMute(payload as VoiceMutePayload);
+      case MessageType.VoiceFrame: {
+        const vp = payload as { data: Uint8Array; timestamp: number; seq: number };
+        if (this.voiceFrameHandler) {
+          try { this.voiceFrameHandler(vp.data); } catch (e) { /* swallow */ }
+        }
+        return;
+      }
       case MessageType.SubtitleInfo: return this.handleSubtitleInfo(payload as SubtitleInfoPayload);
       case MessageType.ControllerChange: return this.handleControllerChange(payload as ControllerChangePayload);
       case MessageType.FileRequest: {

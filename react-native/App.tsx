@@ -54,6 +54,7 @@ import {
   type RoomStateSnapshot,
   type SyncEvent,
 } from './src/syncplay/connectionV2';
+import VoiceChat from './src/syncplay/voiceChat';
 import { parseTimestamp } from './src/syncplay/playback';
 import {
   assetToMediaLibraryItem,
@@ -187,6 +188,7 @@ export default function App() {
   const manualDisconnectRef = useRef(false);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAppliedPlaylistKeyRef = useRef<string | null>(null);
+  const voiceChatRef = useRef<VoiceChat | null>(null);
   const lastAutoFileSwitchRef = useRef<string | null>(null);
   const isApplyingRemoteRef = useRef(false);
   const usernameRef = useRef(form.username);
@@ -219,6 +221,20 @@ export default function App() {
   useEffect(() => {
     usernameRef.current = form.username;
   }, [form.username]);
+
+  // ── VoiceChat ────────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    // Create VoiceChat once connection exists
+    if (!voiceChatRef.current) {
+      voiceChatRef.current = new VoiceChat(connection.stateManager);
+    }
+    return () => {
+      // Destroy on unmount
+      voiceChatRef.current?.destroy();
+      voiceChatRef.current = null;
+    };
+  }, [connection]);
 
   // ── SyncEvent handler ───────────────────────────────────────────────────
 
@@ -565,6 +581,8 @@ export default function App() {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
+    // Stop voice capture
+    voiceChatRef.current?.stopCapture().catch(() => {});
     connection.disconnect();
     setConnectionState('offline');
     setConnectionError(null);
@@ -732,8 +750,21 @@ export default function App() {
   }
 
   function toggleVoiceMute() {
-    const muted = connection.toggleMute();
+    const vc = voiceChatRef.current;
+    if (!vc) {
+      // Fallback if VoiceChat not initialized
+      const muted = connection.toggleMute();
+      setVoiceMuted(muted);
+      return;
+    }
+    const muted = vc.toggleMute();
     setVoiceMuted(muted);
+    // Start/stop capture based on mute state
+    if (muted) {
+      vc.stopCapture().catch(() => {});
+    } else {
+      vc.startCapture().catch(() => {});
+    }
   }
 
   function seekFromInput() {
