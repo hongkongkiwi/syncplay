@@ -104,6 +104,7 @@ export interface IncomingTransfer {
   expectedChunks: number;
   expectedFingerprint: string;
   receivedBytes: number;
+  cancelled?: boolean;
 }
 
 // ── Defaults ──────────────────────────────────────────────────────
@@ -171,6 +172,10 @@ export class P2PStateManager {
 
   /** Voice frame handler — set by VoiceChat to receive incoming audio */
   onVoiceFrame: ((data: Uint8Array, from: string) => void) | null = null;
+
+  /** File transfer warning — set by RN app to warn about large downloads on cellular.
+   *  Return true to proceed with download, false to cancel. */
+  onFileTransferWarning: ((filename: string, sizeBytes: number) => Promise<boolean>) | null = null;
   onReconnectSuccess: (() => void) | null = null;
 
   /**
@@ -830,7 +835,27 @@ export class P2PStateManager {
         receivedBytes: 0,
       };
       this.incomingTransfers.set(p.transferId, transfer);
+
+      // Warn about large files on cellular (mobile clients)
+      if (this.onFileTransferWarning && p.totalSize > 5_000_000 && p.chunkIndex === 0) {
+        const tid = p.transferId;
+        const fn = transfer.filename;
+        const sz = p.totalSize;
+        // Fire-and-forget: if user cancels, mark transfer as cancelled
+        this.onFileTransferWarning(fn, sz).then(proceed => {
+          if (!proceed) {
+            transfer!.cancelled = true;
+            this.incomingTransfers.delete(tid);
+            console.log(`[P2PState] File transfer ${tid} cancelled by user`);
+          }
+        }).catch(() => {
+          // callback failed — proceed with transfer
+        });
+      }
     }
+
+    // Skip chunks for cancelled transfers
+    if ((transfer as any).cancelled) return;
 
     // Store chunk
     transfer.chunks.set(p.chunkIndex, p.data);

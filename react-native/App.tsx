@@ -33,6 +33,7 @@ import {
 } from 'lucide-react-native';
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
+  Alert,
   AppState,
   FlatList,
   KeyboardAvoidingView,
@@ -48,7 +49,7 @@ import {
   TextInput,
   View
 } from 'react-native';
-
+import * as Network from 'expo-network';
 import {
   P2PConnection,
   AVATAR_PRESETS,
@@ -433,6 +434,29 @@ export default function App() {
       voiceChatRef.current?.startCapture().catch(() => {});
     }
   }, [connectionState, voiceMuted]);
+
+  // ── Cellular warning for large file downloads ──────────────────────────
+
+  useEffect(() => {
+    connection.stateManager.onFileTransferWarning = async (filename: string, sizeBytes: number) => {
+      const state = await Network.getNetworkStateAsync();
+      if (state.type !== Network.NetworkStateType.CELLULAR) {
+        return true; // wifi/ethernet — proceed silently
+      }
+      // On cellular: warn and let user decide
+      return new Promise<boolean>(resolve => {
+        Alert.alert(
+          'Download on Cellular?',
+          `${filename}\n${formatBytes(sizeBytes)}\n\nYou are on cellular data. Downloading this file may use significant data.`,
+          [
+            { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+            { text: 'Download', onPress: () => resolve(true) },
+          ],
+          { cancelable: true }
+        );
+      });
+    };
+  }, [connection]);
 
   // ── SyncEvent handler ───────────────────────────────────────────────────
 
