@@ -1148,6 +1148,7 @@ export interface P2PConnectionConfig {
   room: string;
   password?: string;
   sfu?: boolean;
+  turnUrl?: string;
 }
 
 // ── P2PConnection class ─────────────────────────────────────────────────────
@@ -1218,8 +1219,26 @@ export class P2PConnection implements P2PTransport {
       this.stateManager.setConnectionState('handshaking');
 
       // 3. Create RTCPeerConnection
+      const iceServers: Array<{ urls: string; username?: string; credential?: string }> = [
+        { urls: 'stun:stun.l.google.com:19302' },
+      ];
+      if (config.turnUrl) {
+        // Parse turn URL: turn(s):user:pass@host:port or bare URL
+        const turnMatch = config.turnUrl.match(
+          /^(turns?):([^:@]+):([^@]+)@([^:]+)(?::(\d+))?$/,
+        );
+        if (turnMatch) {
+          const server = {
+            urls: `${turnMatch[1]}:${turnMatch[4]}:${turnMatch[5] ?? '3478'}` as string,
+            username: turnMatch[2] as string | undefined,
+            credential: turnMatch[3] as string | undefined,
+          };
+        } else {
+          iceServers.push({ urls: config.turnUrl });
+        }
+      }
       this.pc = new RTCPeerConnectionImpl({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        iceServers,
       });
 
       this.pc.onicecandidate = (e: RTCPeerConnectionIceEvent) => {
@@ -1380,6 +1399,10 @@ export class P2PConnection implements P2PTransport {
 
   requestSetSpeed(speed: number): void {
     this.stateManager.requestSetSpeed(speed);
+  }
+
+  toggleMute(): boolean {
+    return this.stateManager.toggleMute();
   }
 
   // ── Disconnect ────────────────────────────────────────────────────────────

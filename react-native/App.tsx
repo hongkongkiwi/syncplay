@@ -100,6 +100,7 @@ type ConnectionForm = {
   username: string;
   room: string;
   password: string;
+  turnUrl: string;
 };
 type ConnectionTextField = Exclude<keyof ConnectionForm, never>;
 
@@ -115,7 +116,8 @@ const defaultForm: ConnectionForm = {
   host: 'syncplay.pl',
   username: 'Mobile',
   room: 'default',
-  password: ''
+  password: '',
+  turnUrl: ''
 };
 
 let messageIdCounter = 0;
@@ -164,6 +166,7 @@ export default function App() {
   const [playlistUrl, setPlaylistUrl] = useState('');
   const [isReady, setIsReady] = useState(false);
   const [syncPaused, setSyncPaused] = useState(false);
+  const [voiceMuted, setVoiceMuted] = useState(false);
   const [autoReconnect, setAutoReconnect] = useState(true);
   const [autoFileSwitch, setAutoFileSwitch] = useState(true);
   const [keepPlayingInBackground, setKeepPlayingInBackground] = useState(true);
@@ -301,6 +304,7 @@ export default function App() {
             username: preferences.form.username ?? 'Mobile',
             room: preferences.form.room ?? 'default',
             password: preferences.form.password ?? '',
+            turnUrl: '',
           };
           setForm(mappedForm);
           setSavedRooms(preferences.savedRooms.length ? preferences.savedRooms : ['default']);
@@ -513,6 +517,7 @@ export default function App() {
       username: form.username.trim() || 'Mobile',
       room: form.room.trim() || 'default',
       ...(form.password.trim() ? { password: form.password.trim() } : {}),
+      ...(form.turnUrl.trim() ? { turnUrl: form.turnUrl.trim() } : {}),
     };
 
     manualDisconnectRef.current = false;
@@ -722,6 +727,15 @@ export default function App() {
     }
   }
 
+  function handleSetSpeed(speed: number) {
+    connection.requestSetSpeed(speed);
+  }
+
+  function toggleVoiceMute() {
+    const muted = connection.toggleMute();
+    setVoiceMuted(muted);
+  }
+
   function seekFromInput() {
     const nextPosition = parseTimestamp(seekDraft);
     if (nextPosition === null) {
@@ -860,6 +874,12 @@ export default function App() {
           onChangeText={value => updateForm('password', value)}
           secureTextEntry
         />
+        <Field
+          label="TURN server (optional)"
+          value={form.turnUrl}
+          onChangeText={value => updateForm('turnUrl', value)}
+          autoCapitalize="none"
+        />
         <View style={styles.buttonRow}>
           <ActionButton
             label={connected ? 'Disconnect' : 'Connect'}
@@ -945,6 +965,13 @@ export default function App() {
           <Pressable style={styles.secondaryIconButton} onPress={pickMedia}>
             <Film color="#d7e5ef" size={20} />
           </Pressable>
+          <Pressable
+            style={styles.secondaryIconButton}
+            onPress={toggleVoiceMute}
+            disabled={!connected}
+          >
+            <Text style={{ fontSize: 18 }}>{voiceMuted ? '🔇' : '🎤'}</Text>
+          </Pressable>
         </View>
 
         <View style={styles.panel}>
@@ -962,6 +989,12 @@ export default function App() {
               onPress={undoSeek}
               disabled={previousSeekPositionRef.current === null}
             />
+          </View>
+          <View style={styles.inlineRow}>
+            <Text style={styles.smallText}>Speed:</Text>
+            <ActionButton label="0.5x" tone={playstate.speed === 0.5 ? 'primary' : 'ghost'} onPress={() => handleSetSpeed(0.5)} disabled={!connected} />
+            <ActionButton label="1x" tone={playstate.speed === 1 ? 'primary' : 'ghost'} onPress={() => handleSetSpeed(1)} disabled={!connected} />
+            <ActionButton label="2x" tone={playstate.speed === 2 ? 'primary' : 'ghost'} onPress={() => handleSetSpeed(2)} disabled={!connected} />
           </View>
           <View style={styles.inlineRow}>
             <Field label="Stream URL" value={streamUrl} onChangeText={setStreamUrl} autoCapitalize="none" />
@@ -1360,7 +1393,7 @@ function Field(props: FieldProps) {
 
 type ActionButtonProps = {
   label: string;
-  icon: typeof Plug;
+  icon?: typeof Plug;
   tone: 'primary' | 'ghost';
   onPress: () => void;
   disabled?: boolean;
@@ -1377,7 +1410,7 @@ function ActionButton({ label, icon: Icon, tone, onPress, disabled }: ActionButt
       onPress={onPress}
       disabled={disabled}
     >
-      <Icon color={tone === 'primary' ? '#061015' : '#d7e5ef'} size={17} />
+      {Icon ? <Icon color={tone === 'primary' ? '#061015' : '#d7e5ef'} size={17} /> : null}
       <Text style={[styles.actionText, tone === 'primary' && styles.primaryActionText]}>{label}</Text>
     </Pressable>
   );
