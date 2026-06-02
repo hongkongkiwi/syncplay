@@ -381,5 +381,11 @@ export function voiceFramePayload(
   channels?: number,
   from?: string,
 ): VoiceFramePayload {
-  return { data, timestamp: Date.now(), seq, sampleRate, channels, from };
+  const result: VoiceFramePayload & { from?: string } = {
+    data, timestamp: Date.now(), seq,
+  };
+  if (from !== undefined) result.from = from;
+  if (sampleRate !== undefined) result.sampleRate = sampleRate;
+  if (channels !== undefined) result.channels = channels;
+  return result;
 }

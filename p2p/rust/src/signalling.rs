@@ -19,7 +19,8 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_rustls::TlsAcceptor;
+use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 
 // ── Rate limiting for signal messages ─────────────────────────────────
 const MAX_SIGNAL_RATE: u32 = 20; // max signals per window
@@ -234,19 +235,27 @@ impl SignalingServer {
         self
     }
 
-    pub async fn run(&self, addr: SocketAddr) -> Result<()> {
+    pub async fn run(
+        &self,
+        addr: SocketAddr,
+        tls_config: Option<Arc<rustls::ServerConfig>>,
+    ) -> Result<()> {
         let listener = TcpListener::bind(addr).await?;
         info!("[signaling] listening on {addr}");
         let rooms = self.rooms.clone();
         let sfu = self.sfu_server.clone();
+        let tls_acceptor: Option<TlsAcceptor> = tls_config.map(TlsAcceptor::from);
 
         loop {
             match listener.accept().await {
                 Ok((stream, peer_addr)) => {
                     let rooms = rooms.clone();
                     let sfu = sfu.clone();
+                    let tls_acceptor = tls_acceptor.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(rooms, sfu, stream, peer_addr).await {
+                        if let Err(e) =
+                            handle_connection(rooms, sfu, tls_acceptor, stream, peer_addr).await
+                        {
                             error!("Connection error from {peer_addr}: {e}");
                         }
                     });
@@ -264,10 +273,31 @@ impl SignalingServer {
 async fn handle_connection(
     rooms: Arc<DashMap<String, Arc<Mutex<Room>>>>,
     sfu_server: Option<Arc<SfuServer>>,
+    tls_acceptor: Option<TlsAcceptor>,
     stream: TcpStream,
-    _addr: SocketAddr,
+    addr: SocketAddr,
 ) -> Result<()> {
-    let ws = accept_async(stream).await?;
+    if let Some(acceptor) = tls_acceptor {
+        let tls_stream = acceptor.accept(stream).await?;
+        let ws = accept_async(tls_stream).await?;
+        handle_ws(ws, rooms, sfu_server, addr).await
+    } else {
+        let ws = accept_async(stream).await?;
+        handle_ws(ws, rooms, sfu_server, addr).await
+    }
+}
+
+/// Generic inner handler that works with any WebSocket stream type
+/// (plain TCP or TLS-wrapped).
+async fn handle_ws<S>(
+    ws: WebSocketStream<S>,
+    rooms: Arc<DashMap<String, Arc<Mutex<Room>>>>,
+    sfu_server: Option<Arc<SfuServer>>,
+    _addr: SocketAddr,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let (mut write, mut read) = ws.split();
 
     let (tx, mut rx) = mpsc::channel::<String>(1024);

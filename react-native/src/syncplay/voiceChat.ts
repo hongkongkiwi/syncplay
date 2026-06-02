@@ -31,7 +31,7 @@ export class VoiceChat {
   constructor(stateManager: any) {
     this.stateManager = stateManager;
     // Hook into incoming VoiceFrame dispatch on the state manager
-    this.stateManager.voiceFrameHandler = this.handleIncomingFrame.bind(this);
+    this.stateManager.onVoiceFrame = this.handleIncomingFrame.bind(this);
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
@@ -214,7 +214,7 @@ export class VoiceChat {
     }
     // Remove the voice frame handler
     if (this.stateManager) {
-      this.stateManager.voiceFrameHandler = null;
+      this.stateManager.onVoiceFrame = null;
     }
     console.log('[VoiceChat] Destroyed');
   }
@@ -225,7 +225,7 @@ export class VoiceChat {
    * Handle an incoming VoiceFrame from a remote peer.
    * Converts Uint8Array to base64 and queues for playback.
    */
-  handleIncomingFrame(data: Uint8Array): void {
+  handleIncomingFrame(data: Uint8Array, from: string): void {
     // Don't play incoming audio when muted
     if (this._muted) return;
 

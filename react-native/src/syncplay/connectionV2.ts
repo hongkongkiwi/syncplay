@@ -1,1407 +1,172 @@
-// Syncplay P2P v2.0.0 — fully self-contained for React Native
+// Syncplay P2P v2.0.0 — React Native transport layer
 // Wire protocol: [4B type u32 BE][4B len u32 BE][N bytes msgpack]
 //
-// Contains (all inline, no workspace imports):
-//  - 20 message types + payloads
-//  - Wire encode/decode
-//  - P2PStateManager (room state, handlers, host election, latency, controllers, chat, emojis, slash commands, loops, events)
-//  - P2PConnection (WebSocket signaling → RTCPeerConnection + DataChannel → dispatch to stateManager)
+// Uses shared syncplay-p2p-client library for:
+//   - Message types, payloads, builders (messages.ts)
+//   - Wire encode/decode (wire.ts)
+//   - P2PStateManager with all 20 message handlers (state.ts)
+//
+// This file contains ONLY the React Native transport layer:
+//   - P2PConnection (WebSocket signaling → RTCPeerConnection + DataChannel)
+//   - ErrorCode / humanReadableError
+//   - Re-exports for App.tsx compatibility
 
-import { encode as msgpackEncode, decode as msgpackDecode } from "msgpackr";
+import {
+  // Protocol types
+  MessageType,
+  type HelloPayload,
+  type ChatPayload,
+  type PlaystatePayload,
+  type PlaystateAction,
+  type PlaystateRequestPayload,
+  type ReadinessPayload,
+  type FileEntry,
+  type FileMetadata,
+  type FileInfoPayload,
+  type FileTransferPayload,
+  type FileRequestPayload,
+  type FileResponsePayload,
+  type PlaylistAction,
+  type PlaylistChangePayload,
+  type PlaylistRequestPayload,
+  type LatencyPingPayload,
+  type LatencyPongPayload,
+  type HostElectedPayload,
+  type UserInfoPayload,
+  type PeerDisconnectPayload,
+  type VoiceMutePayload,
+  type SubtitleTrack,
+  type SubtitleInfoPayload,
+  type ControllerAction,
+  type ControllerChangePayload,
+  type AvatarPreset,
+  type AvatarSetPayload,
+  type StatusUpdatePayload,
+  type VoiceFramePayload,
 
-// ══════════════════════════════════════════════════════════════════════════════
-// 1. Message types & payloads (20 types, mirrors Rust syncplay-p2p messages.rs)
-// ══════════════════════════════════════════════════════════════════════════════
+  // Payload builders
+  helloPayload,
+  playstatePayload,
+  chatPayload,
+  readinessPayload,
+  playstateRequestSeek,
+  playstateRequestPause,
+  playstateRequestPlay,
+  playstateRequestSetSpeed,
+  peerDisconnectPayload,
+  avatarSetPayload,
+  avatarSetPayloadClear,
+  statusUpdatePayload,
+  voiceFramePayload,
 
-export enum MessageType {
-  Hello = 0x01,
-  Playstate = 0x02,
-  PlaystateRequest = 0x03,
-  Chat = 0x04,
-  Readiness = 0x05,
-  PlaylistChange = 0x06,
-  PlaylistRequest = 0x07,
-  FileInfo = 0x08,
-  FileTransfer = 0x09,
-  FileRequest = 0x0a,
-  FileResponse = 0x0b,
-  LatencyPing = 0x0c,
-  LatencyPong = 0x0d,
-  HostElected = 0x0e,
-  UserInfo = 0x0f,
-  PeerDisconnect = 0x10,
-  VoiceMute = 0x11,
-  SubtitleInfo = 0x12,
-  ControllerChange = 0x13,
-  VoiceFrame = 0x16,
-}
+  // Constants
+  AVATAR_PRESETS,
+  STATUS_PRESETS,
+  PAYLOAD_BY_TYPE,
 
-// ── Payload interfaces ──────────────────────────────────────────────────────
+  // Wire
+  encode,
+  decode,
+  decodeHeader,
 
-export interface HelloPayload {
-  username: string;
-  version: string;
-  room: string;
-  features: string[];
-}
+  // State manager
+  P2PStateManager,
+  type P2PTransport,
+  type PeerState,
+  type RoomStateSnapshot,
+  type ConnectionState,
+  type SyncEventType,
+  type SyncEvent,
+  type IncomingTransfer,
 
-export interface PlaystatePayload {
-  position: number;
-  paused: boolean;
-  doSeek: boolean;
-  setBy: string;
-  seq: number;
-  timestamp: number;
-  speed: number;
-}
-
-export enum PlaystateAction {
-  Seek = "seek",
-  Pause = "pause",
-  Play = "play",
-  SetSpeed = "set_speed",
-}
-
-export interface PlaystateRequestPayload {
-  action: PlaystateAction | { set_speed: number };
-  position: number;
-  requestId: string;
-}
-
-export interface ChatPayload {
-  from: string;
-  message: string;
-  timestamp: number;
-}
-
-export interface ReadinessPayload {
-  username: string;
-  isReady: boolean;
-  manuallyInitiated: boolean;
-  setBy: string;
-}
-
-export interface FileEntry {
-  name: string;
-  duration: number;
-}
-
-export enum PlaylistAction {
-  SetPlaylist = "set_playlist",
-  SetIndex = "set_index",
-}
-
-export interface PlaylistChangePayload {
-  files: FileEntry[];
-  index: number;
-  setBy: string;
-}
-
-export interface PlaylistRequestPayload {
-  action: PlaylistAction;
-  files: FileEntry[];
-  index: number;
-}
-
-export interface FileMetadata {
-  name: string;
-  duration: number;
-  size: number;
-  checksum?: string;
-}
-
-export interface FileInfoPayload {
-  username: string;
-  file?: FileMetadata;
-}
-
-export interface FileTransferPayload {
-  transferId: string;
-  chunkIndex: number;
-  offset: number;
-  totalSize: number;
-  chunkSize: number;
-  data: Uint8Array;
-}
-
-export interface FileRequestPayload {
-  transferId: string;
-  filename: string;
-  offset: number;
-  fingerprint: string;
-}
-
-export interface FileResponsePayload {
-  transferId: string;
-  accepted: boolean;
-  reason: string;
-  fingerprint: string;
-  chunkSize: number;
-}
-
-export interface LatencyPingPayload {
-  sendTime: number;
-}
-
-export interface LatencyPongPayload {
-  sendTime: number;
-  receiveTime: number;
-}
-
-export interface HostElectedPayload {
-  hostId: string;
-  reason: string;
-}
-
-export interface UserInfoPayload {
-  username: string;
-  features: string[];
-}
-
-export interface PeerDisconnectPayload {
-  reason: string;
-}
-
-export interface VoiceMutePayload {
-  muted: boolean;
-}
-
-export interface SubtitleTrack {
-  filename: string;
-  size: number;
-  language?: string;
-}
-
-export interface SubtitleInfoPayload {
-  subtitles: SubtitleTrack[];
-}
-
-export enum ControllerAction {
-  Add = "add",
-  Remove = "remove",
-}
-
-export interface ControllerChangePayload {
-  peer_id: string;
-  action: ControllerAction;
-}
-
-// ── Payload builders ────────────────────────────────────────────────────────
-
-export function helloPayload(
-  username: string,
-  version: string,
-  room: string,
-  features: string[],
-): HelloPayload {
-  return { username, version, room, features };
-}
-
-export function playstatePayload(
-  position: number,
-  paused: boolean,
-  doSeek: boolean,
-  setBy: string,
-  seq: number,
-  speed = 1.0,
-): PlaystatePayload {
-  return {
-    position,
-    paused,
-    doSeek,
-    setBy,
-    seq,
-    timestamp: Date.now(),
-    speed,
-  };
-}
-
-export function chatPayload(from: string, message: string): ChatPayload {
-  return { from, message, timestamp: Date.now() };
-}
-
-export function readinessPayload(
-  username: string,
-  isReady: boolean,
-  manuallyInitiated: boolean,
-  setBy: string,
-): ReadinessPayload {
-  return { username, isReady, manuallyInitiated, setBy };
-}
-
-export function playstateRequestSeek(position: number): PlaystateRequestPayload {
-  return {
-    action: PlaystateAction.Seek,
-    position,
-    requestId: uuidv4(),
-  };
-}
-
-export function playstateRequestPause(): PlaystateRequestPayload {
-  return {
-    action: PlaystateAction.Pause,
-    position: 0,
-    requestId: uuidv4(),
-  };
-}
-
-export function playstateRequestPlay(): PlaystateRequestPayload {
-  return {
-    action: PlaystateAction.Play,
-    position: 0,
-    requestId: uuidv4(),
-  };
-}
-
-export function playstateRequestSetSpeed(speed: number): PlaystateRequestPayload {
-  return {
-    action: { set_speed: speed },
-    position: 0,
-    requestId: uuidv4(),
-  };
-}
-
-export function peerDisconnectPayload(reason: string): PeerDisconnectPayload {
-  return { reason };
-}
-
-// ── UUID v4 helper (avoids crypto.randomUUID availability issues in some RN envs) ──
-
-function uuidv4(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
+  // Discovery
+  PeerDiscovery,
+  type DiscoveredPeer,
+  type DiscoveredRoom,
+  type PeerFoundCallback,
+} from 'syncplay-p2p-client';
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 2. Wire encoding (mirrors packages/p2p-client/src/wire.ts)
+// Re-exports (so App.tsx still compiles)
 // ══════════════════════════════════════════════════════════════════════════════
 
-const HEADER_SIZE = 8;
-const MAX_PAYLOAD = 10 * 1024 * 1024; // 10 MB
+export {
+  // Protocol types
+  MessageType,
+  type HelloPayload,
+  type ChatPayload,
+  type PlaystatePayload,
+  type PlaystateAction,
+  type PlaystateRequestPayload,
+  type ReadinessPayload,
+  type FileEntry,
+  type FileMetadata,
+  type FileInfoPayload,
+  type FileTransferPayload,
+  type FileRequestPayload,
+  type FileResponsePayload,
+  type PlaylistAction,
+  type PlaylistChangePayload,
+  type PlaylistRequestPayload,
+  type LatencyPingPayload,
+  type LatencyPongPayload,
+  type HostElectedPayload,
+  type UserInfoPayload,
+  type PeerDisconnectPayload,
+  type VoiceMutePayload,
+  type SubtitleTrack,
+  type SubtitleInfoPayload,
+  type ControllerAction,
+  type ControllerChangePayload,
+  type AvatarPreset,
+  type AvatarSetPayload,
+  type StatusUpdatePayload,
+  type VoiceFramePayload,
 
-/** Encode a typed payload into a wire frame. */
-export function encode<T>(msgType: MessageType, payload: T): Uint8Array<ArrayBuffer> {
-  const msgpackResult = msgpackEncode(payload);
-  const bodyLen = msgpackResult.byteLength;
-  if (bodyLen > MAX_PAYLOAD) {
-    throw new Error(`Payload too large: ${bodyLen} > ${MAX_PAYLOAD}`);
-  }
-  const totalLen = HEADER_SIZE + bodyLen;
-  const frameBuf = new ArrayBuffer(totalLen);
-  const frame = new Uint8Array(frameBuf);
-  const view = new DataView(frameBuf);
-  view.setUint32(0, msgType, false); // big-endian
-  view.setUint32(4, bodyLen, false);
-  for (let i = 0; i < bodyLen; i++) {
-    frame[HEADER_SIZE + i] = msgpackResult[i]!;
-  }
-  return frame;
-}
+  // Payload builders
+  helloPayload,
+  playstatePayload,
+  chatPayload,
+  readinessPayload,
+  playstateRequestSeek,
+  playstateRequestPause,
+  playstateRequestPlay,
+  playstateRequestSetSpeed,
+  peerDisconnectPayload,
+  avatarSetPayload,
+  avatarSetPayloadClear,
+  statusUpdatePayload,
+  voiceFramePayload,
 
-/** Decode header from incomplete buffer. Returns [type, fullFrameLen]. */
-export function decodeHeader(buf: Uint8Array): [MessageType, number] {
-  if (buf.byteLength < HEADER_SIZE) {
-    throw new Error(`Incomplete header: have ${buf.byteLength} bytes`);
-  }
-  const bufArr = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
-  const view = new DataView(bufArr);
-  const rawType = view.getUint32(0, false);
-  const payloadLen = view.getUint32(4, false);
-  if (payloadLen > MAX_PAYLOAD) {
-    throw new Error(`Oversized payload: ${payloadLen} > ${MAX_PAYLOAD}`);
-  }
-  return [rawType as MessageType, HEADER_SIZE + payloadLen];
-}
+  // Constants
+  AVATAR_PRESETS,
+  STATUS_PRESETS,
+  PAYLOAD_BY_TYPE,
 
-/** Decode a complete frame. Returns [type, payload]. */
-export function decode<T>(buf: Uint8Array): [MessageType, T] {
-  const [msgType, frameLen] = decodeHeader(buf);
-  const body = buf.slice(HEADER_SIZE, frameLen);
-  return [msgType, msgpackDecode(body) as T];
-}
+  // Wire
+  encode,
+  decode,
+  decodeHeader,
 
-// ══════════════════════════════════════════════════════════════════════════════
-// 3. P2PStateManager — full room state, handlers, host election, latency, etc.
-// ══════════════════════════════════════════════════════════════════════════════
+  // State manager
+  P2PStateManager,
+  type P2PTransport,
+  type PeerState,
+  type RoomStateSnapshot,
+  type ConnectionState,
+  type SyncEventType,
+  type SyncEvent,
+  type IncomingTransfer,
 
-// ── State shapes ────────────────────────────────────────────────────────────
-
-export interface PeerState {
-  id: string;
-  username: string;
-  features: string[];
-  isReady: boolean;
-  isController: boolean;
-  isHost: boolean;
-  file?: FileMetadata;
-  rtt: number;
-  muted: boolean;
-  iceState: 'new' | 'checking' | 'connected' | 'disconnected' | 'failed' | 'closed';
-}
-
-export interface RoomStateSnapshot {
-  position: number;
-  paused: boolean;
-  setBy: string;
-  seq: number;
-  speed: number;
-  doSeek: boolean;
-  playlist: FileEntry[];
-  playlistIndex: number;
-  controllers: string[];   // serialisable: username[]
-  readyStates: Record<string, boolean>; // username → ready
-  peers: Record<string, PeerState>;    // peerId → PeerState
-}
-
-export type ConnectionState =
-  'offline' | 'connecting' | 'handshaking' | 'connecting_peers' | 'ready' | 'reconnecting' | 'error';
-
-export type SyncEventType =
-  'chat' | 'playstate' | 'user-join' | 'user-leave' | 'host-change' | 'error' | 'transfer-complete' | 'transfer-progress';
-
-export interface SyncEvent {
-  type: SyncEventType;
-  data?: unknown;
-  timestamp: number;
-}
-
-// ── Transport interface (P2PConnection implements this) ─────────────────────
-
-export interface P2PTransport {
-  send(msgType: MessageType, payload: unknown): void;
-}
-
-type EventHandlerFn = (event: SyncEvent) => void;
-
-// ── Defaults ────────────────────────────────────────────────────────────────
-
-const DEF_SYNC_INTERVAL = 500;   // ms — host broadcasts Playstate
-const DEF_PING_INTERVAL = 2000;  // ms — latency pings
-const MAX_CHAT_HISTORY = 2000;
-const MAX_PLAYLIST = 250;
-const PROTOCOL_VERSION = '2.0.0';
-const LATENCY_WARN_MS = 500;
-
-// ── Emoji shortcodes (39 codes, mirrors Rust TUI) ──────────────────────────
-
-const EMOJIS: Record<string, string> = {
-  ':smile:': '😊', ':joy:': '😂', ':heart:': '❤️', ':thumbsup:': '👍',
-  ':thumbsdown:': '👎', ':clap:': '👏', ':wave:': '👋', ':fire:': '🔥',
-  ':star:': '⭐', ':tada:': '🎉', ':100:': '💯', ':ok_hand:': '👌',
-  ':sob:': '😭', ':cry:': '😢', ':angry:': '😠', ':skull:': '💀',
-  ':rocket:': '🚀', ':check:': '✅', ':x:': '❌', ':warning:': '⚠️',
-  ':popcorn:': '🍿', ':movie_camera:': '🎥', ':beer:': '🍺', ':coffee:': '☕',
-  ':sunglasses:': '😎', ':wink:': '😉', ':pray:': '🙏', ':muscle:': '💪',
-  ':party:': '🥳', ':robot:': '🤖', ':alien:': '👽', ':ghost:': '👻',
-  ':sleepy:': '😴', ':zap:': '⚡', ':bulb:': '💡', ':lock:': '🔒',
-  ':headphones:': '🎧', ':mic:': '🎤', ':mute:': '🔇',
+  // Discovery
+  PeerDiscovery,
+  type DiscoveredPeer,
+  type DiscoveredRoom,
+  type PeerFoundCallback,
 };
 
-// ── P2PStateManager ─────────────────────────────────────────────────────────
-
-export class P2PStateManager {
-  // Internal mutable room state
-  private _room: {
-    position: number;
-    paused: boolean;
-    setBy: string;
-    seq: number;
-    speed: number;
-    playlist: FileEntry[];
-    playlistIndex: number;
-    controllers: Set<string>;
-    readyStates: Map<string, boolean>;
-    peers: Map<string, PeerState>;
-  };
-
-  private hostId = '';
-  private peerId = '';
-  private username = '';
-  private latencyMap = new Map<string, number>();
-  private voiceMutes = new Map<string, boolean>();
-  private eventHandlers: EventHandlerFn[] = [];
-  private syncIntervalId: ReturnType<typeof setInterval> | null = null;
-  private pingIntervalId: ReturnType<typeof setInterval> | null = null;
-  private syncIntervalMs = DEF_SYNC_INTERVAL;
-  private pingIntervalMs = DEF_PING_INTERVAL;
-  private _connectionState: ConnectionState = 'offline';
-  private _transport: P2PTransport | null = null;
-  private _connected = false;
-  private _reconnectAttempts = 0;
-  private _lastConfig: { host: string; username: string; room: string } | null = null;
-
-  /** Detected subtitle tracks for current media file */
-  private _subtitleTracks: SubtitleTrack[] = [];
-
-  /** Called by transport when reconnection succeeds */
-  onReconnectSuccess: (() => void) | null = null;
-
-  constructor(
-    username: string,
-    features: string[] = ['chat', 'readiness', 'playlist'],
-  ) {
-    this.username = username;
-    this._room = {
-      position: 0,
-      paused: true,
-      setBy: '',
-      seq: 0,
-      speed: 1.0,
-      playlist: [],
-      playlistIndex: 0,
-      controllers: new Set<string>(),
-      readyStates: new Map<string, boolean>(),
-      peers: new Map<string, PeerState>(),
-    };
-  }
-
-  // ── Read-only accessors ───────────────────────────────────────────────────
-
-  get connectionState(): ConnectionState { return this._connectionState; }
-  get isConnected(): boolean { return this._connected; }
-  get isHost(): boolean { return this.peerId !== '' && this.peerId === this.hostId; }
-  get myUsername(): string { return this.username; }
-  get myPeerId(): string { return this.peerId; }
-
-  /** Serializable snapshot for UI consumption */
-  getSnapshot(): RoomStateSnapshot {
-    const readyStates: Record<string, boolean> = {};
-    this._room.readyStates.forEach((v, k) => { readyStates[k] = v; });
-    const peers: Record<string, PeerState> = {};
-    this._room.peers.forEach((v, k) => { peers[k] = v; });
-    return {
-      position: this._room.position,
-      paused: this._room.paused,
-      setBy: this._room.setBy,
-      seq: this._room.seq,
-      speed: this._room.speed,
-      doSeek: (this._room as any)._lastDoSeek ?? false,
-      playlist: [...this._room.playlist],
-      playlistIndex: this._room.playlistIndex,
-      controllers: [...this._room.controllers],
-      readyStates,
-      peers,
-    };
-  }
-
-  // ── Connection lifecycle ──────────────────────────────────────────────────
-
-  setConnectionState(s: ConnectionState, error?: string): void {
-    this._connectionState = s;
-    if (s === 'error') {
-      this.emit({ type: 'error', data: error ?? 'Connection error', timestamp: Date.now() });
-    }
-  }
-
-  /** Called by transport once signaling handshake completes */
-  onConnected(peerId: string, hostId: string, transport: P2PTransport): void {
-    this.peerId = peerId;
-    this.hostId = hostId;
-    this._transport = transport;
-    this._connected = true;
-    this.setConnectionState('ready');
-    // Restore voice mute preference from localStorage on reconnect
-    try {
-      const saved = localStorage.getItem('syncplay-voice-mute');
-      if (saved !== null) {
-        const muted = JSON.parse(saved) as boolean;
-        this.voiceMutes.set(this.username, muted);
-        if (muted) {
-          this._transport.send(MessageType.VoiceMute, { muted: true });
-        }
-      }
-    } catch { /* storage unavailable */ }
-    this.startLoop();
-  }
-
-  /** Called by transport on disconnect */
-  onDisconnected(reason: string): void {
-    this.stopLoop();
-    this._connected = false;
-    this.peerId = '';
-    this.hostId = '';
-    this._transport = null;
-    this.setConnectionState('offline');
-  }
-
-  // ── Event system ──────────────────────────────────────────────────────────
-
-  onSyncEvent(handler: EventHandlerFn): void {
-    this.eventHandlers.push(handler);
-  }
-
-  offSyncEvent(handler: EventHandlerFn): void {
-    this.eventHandlers = this.eventHandlers.filter(h => h !== handler);
-  }
-
-  private emit(event: SyncEvent): void {
-    for (const h of this.eventHandlers) {
-      try { h(event); } catch (e) { /* swallow */ }
-    }
-  }
-
-  // ── Background loops ──────────────────────────────────────────────────────
-
-  private startLoop(): void {
-    this.stopLoop();
-    this.syncIntervalId = setInterval(() => this.hostTick(), this.syncIntervalMs);
-    this.pingIntervalId = setInterval(() => this.pingAll(), this.pingIntervalMs);
-  }
-
-  private stopLoop(): void {
-    if (this.syncIntervalId !== null) { clearInterval(this.syncIntervalId); this.syncIntervalId = null; }
-    if (this.pingIntervalId !== null) { clearInterval(this.pingIntervalId); this.pingIntervalId = null; }
-  }
-
-  /** Host broadcasts position every syncIntervalMs */
-  private hostTick(): void {
-    if (!this._connected || !this.isHost || !this._transport) return;
-    this._transport.send(MessageType.Playstate, playstatePayload(
-      this._room.position,
-      this._room.paused,
-      false,          // doSeek=false for periodic sync
-      this.username,
-      ++this._room.seq,
-      this._room.speed,
-    ));
-  }
-
-  /** Ping each peer for latency measurement */
-  private pingAll(): void {
-    if (!this._connected || !this._transport) return;
-    for (const [id] of this._room.peers) {
-      if (id !== this.peerId) {
-        this._transport.send(MessageType.LatencyPing, { sendTime: Date.now() } as LatencyPingPayload);
-      }
-    }
-  }
-
-  // ── Chat ──────────────────────────────────────────────────────────────────
-
-  sendChat(text: string): void {
-    if (!this._connected || !this._transport) return;
-    const expanded = this.expandEmojis(text);
-    this._transport.send(MessageType.Chat, chatPayload(this.username, expanded));
-  }
-
-  /** Process a slash-command. Returns response string, or null if not a command. */
-  sendSlashCommand(cmd: string): string | null {
-    const parts = cmd.slice(1).split(/\s+/);
-    const name = (parts[0] ?? '').toLowerCase();
-    const args = parts.slice(1);
-
-    switch (name) {
-      case 'help': case 'h': return this.helpText();
-      case 'me': return `* ${this.username} ${args.join(' ')}`;
-      case 'nick': return 'Nickname: use the settings to change your username';
-      case 'users': case 'who': return this.formatPeerList();
-      case 'ready': {
-        const cur = this._room.readyStates.get(this.username) ?? false;
-        this.setReady(!cur);
-        return null;
-      }
-      case 'leave': return '/leave sent — disconnect to leave the room';
-      case 'version': return `Syncplay P2P v${PROTOCOL_VERSION}`;
-      case 'shrug': return '¯\\_(ツ)_/¯';
-      case 'tableflip': case 'flip': return '(╯°□°）╯︵ ┻━┻';
-      case 'unflip': return '┬─┬ ノ( ゜-゜ノ)';
-      case 'lenny': return '( ͡° ͜ʖ ͡°)';
-      case 'controller': {
-        if (!this.isHost) return 'Only the host can manage controllers';
-        if (args[0] === 'add' && args[1]) { this.addController(args[1]); return `${args[1]} can now control playback`; }
-        if (args[0] === 'remove' && args[1]) { this.removeController(args[1]); return `${args[1]} can no longer control playback`; }
-        return 'Usage: /controller add|remove <username>';
-      }
-      case 'playlist': {
-        if (args[0] === 'add' && args[1]) {
-          this.addToPlaylist(args.slice(1).join(',').split(',').map(s => s.trim()).filter(Boolean));
-          return 'Added to playlist';
-        }
-        if (args[0] === 'index' && args[1]) {
-          this.setPlaylistIndex(parseInt(args[1]!, 10));
-          return 'Playlist index set';
-        }
-        if (args[0] === 'clear') { this.clearPlaylist(); return 'Playlist cleared'; }
-        return 'Usage: /playlist add|index|clear';
-      }
-      case 'settings': return this.settingsText();
-      case 'cancel': return 'Transfers cannot be cancelled mid-flight';
-      case 'react': {
-        if (args[0] && args[1]) {
-          return `${this.username} reacted to message ${args[0]}: ${this.expandEmojis(args[1]!)}`;
-        }
-        return 'Usage: /react <n> :emoji:';
-      }
-      case 'send': case 'download': case 'dl': case 'file': {
-        if (args[0]) {
-          this.requestFile(this.peerId, args[0]);
-          return `Requesting file: ${args[0]}`;
-        }
-        return 'Usage: /send <filename>';
-      }
-      default: return null;
-    }
-  }
-
-  // ── Playback control ──────────────────────────────────────────────────────
-
-  updatePlaystate(position: number, paused: boolean, speed?: number): void {
-    if (!this._connected) return;
-    if (!this.isHost) {
-      this.requestSeek(position);
-      return;
-    }
-    if (speed !== undefined) this._room.speed = speed;
-    this._room.position = position;
-    this._room.paused = paused;
-    this._room.setBy = this.username;
-    if (this._transport) {
-      this._transport.send(MessageType.Playstate, playstatePayload(
-        position, paused, true, this.username, ++this._room.seq, this._room.speed,
-      ));
-    }
-  }
-
-  requestSeek(position: number): void {
-    if (!this._connected || !this._transport) return;
-    if (this.isHost) {
-      this.updatePlaystate(position, this._room.paused);
-    } else {
-      this._transport.send(MessageType.PlaystateRequest, playstateRequestSeek(position));
-    }
-  }
-
-  requestPause(): void {
-    if (!this._connected || !this._transport) return;
-    if (this.isHost) { this.updatePlaystate(this._room.position, true); } else {
-      this._transport.send(MessageType.PlaystateRequest, playstateRequestPause());
-    }
-  }
-
-  requestPlay(): void {
-    if (!this._connected || !this._transport) return;
-    if (this.isHost) { this.updatePlaystate(this._room.position, false); } else {
-      this._transport.send(MessageType.PlaystateRequest, playstateRequestPlay());
-    }
-  }
-
-  requestSetSpeed(speed: number): void {
-    if (!this._connected || !this._transport) return;
-    if (this.isHost) { this._room.speed = speed; this.updatePlaystate(this._room.position, this._room.paused); } else {
-      this._transport.send(MessageType.PlaystateRequest, playstateRequestSetSpeed(speed));
-    }
-  }
-
-  // ── Readiness ─────────────────────────────────────────────────────────────
-
-  setReady(isReady: boolean): void {
-    if (!this._connected || !this._transport) return;
-    this._room.readyStates.set(this.username, isReady);
-    this._transport.send(MessageType.Readiness, readinessPayload(
-      this.username, isReady, true, this.username,
-    ));
-  }
-
-  // ── Playlist ──────────────────────────────────────────────────────────────
-
-  addToPlaylist(files: string[]): void {
-    if (!this._connected) return;
-    const entries: FileEntry[] = files.map(f => ({ name: f, duration: 0 }));
-    if (!this.isHost && this._transport) {
-      this._transport.send(MessageType.PlaylistRequest, {
-        action: PlaylistAction.SetPlaylist,
-        files: entries,
-        index: this._room.playlistIndex,
-      } as PlaylistRequestPayload);
-      return;
-    }
-    const combined = [...this._room.playlist, ...entries].slice(0, MAX_PLAYLIST);
-    this._room.playlist = combined;
-    this.broadcastPlaylist();
-  }
-
-  /** Replace entire playlist (not append) */
-  setPlaylist(files: string[]): void {
-    if (!this._connected) return;
-    const entries: FileEntry[] = files.filter(f => f).map(f => ({ name: f, duration: 0 }));
-    if (!this.isHost && this._transport) {
-      this._transport.send(MessageType.PlaylistRequest, {
-        action: PlaylistAction.SetPlaylist,
-        files: entries,
-        index: 0,
-      } as PlaylistRequestPayload);
-      return;
-    }
-    this._room.playlist = entries.slice(0, MAX_PLAYLIST);
-    this._room.playlistIndex = 0;
-    this.broadcastPlaylist();
-  }
-
-  setPlaylistIndex(idx: number): void {
-    if (!this._connected) return;
-    if (!this.isHost && this._transport) {
-      this._transport.send(MessageType.PlaylistRequest, {
-        action: PlaylistAction.SetIndex,
-        files: [],
-        index: idx,
-      } as PlaylistRequestPayload);
-      return;
-    }
-    if (idx >= 0 && idx < this._room.playlist.length) {
-      this._room.playlistIndex = idx;
-      this._room.position = 0;
-    }
-    this.broadcastPlaylist();
-  }
-
-  clearPlaylist(): void {
-    this._room.playlist = [];
-    this._room.playlistIndex = 0;
-    this.broadcastPlaylist();
-  }
-
-  private broadcastPlaylist(): void {
-    if (!this._connected || !this.isHost || !this._transport) return;
-    this._transport.send(MessageType.PlaylistChange, {
-      files: this._room.playlist,
-      index: this._room.playlistIndex,
-      setBy: this.username,
-    } as PlaylistChangePayload);
-  }
-
-  // ── File info ─────────────────────────────────────────────────────────────
-
-  sendFileInfo(file?: FileMetadata): void {
-    if (!this._connected || !this.isHost || !this._transport) return;
-    this._transport.send(MessageType.FileInfo, { username: this.username, file } as FileInfoPayload);
-  }
-
-  // ── Controllers ───────────────────────────────────────────────────────────
-
-  addController(uname: string): void {
-    if (!this._connected) return;
-    this._room.controllers.add(uname);
-    if (this.isHost && this._transport) {
-      this._transport.send(MessageType.ControllerChange, {
-        peer_id: uname,
-        action: ControllerAction.Add,
-      } as ControllerChangePayload);
-    }
-  }
-
-  removeController(uname: string): void {
-    if (!this._connected) return;
-    this._room.controllers.delete(uname);
-    if (this.isHost && this._transport) {
-      this._transport.send(MessageType.ControllerChange, {
-        peer_id: uname,
-        action: ControllerAction.Remove,
-      } as ControllerChangePayload);
-    }
-  }
-
-  isController(username_: string): boolean {
-    return username_ === this.username || this._room.controllers.has(username_);
-  }
-
-  // ── Voice ─────────────────────────────────────────────────────────────────
-
-  sendVoiceMute(muted: boolean): void {
-    if (!this._connected || !this._transport) return;
-    this.voiceMutes.set(this.username, muted);
-    // Persist mute preference to localStorage for reconnection
-    try { localStorage.setItem('syncplay-voice-mute', JSON.stringify(muted)); } catch { /* storage unavailable */ }
-    this._transport.send(MessageType.VoiceMute, { muted } as VoiceMutePayload);
-  }
-
-  toggleMute(): boolean {
-    const current = this.voiceMutes.get(this.username) ?? false;
-    this.sendVoiceMute(!current);
-    return !current;
-  }
-
-  /** Callback for incoming VoiceFrame payloads (raw audio data). Set by VoiceChat. */
-  voiceFrameHandler: ((data: Uint8Array) => void) | null = null;
-
-  sendVoiceFrame(data: Uint8Array, seq: number): void {
-    if (!this._connected || !this._transport) return;
-    if (this.voiceMutes.get(this.username) ?? false) return;
-    this._transport.send(MessageType.VoiceFrame, {
-      data,
-      timestamp: Date.now(),
-      seq,
-    });
-  }
-
-  // ── File transfer ─────────────────────────────────────────────────────────
-
-  requestFile(peerId_: string, filename: string, offset = 0): void {
-    if (!this._connected || !this._transport) return;
-    this._transport.send(MessageType.FileRequest, {
-      transferId: uuidv4(),
-      filename,
-      offset,
-      fingerprint: '',
-    } as FileRequestPayload);
-  }
-
-  // ── Message dispatch (called by transport on each incoming message) ───────
-
-  dispatch(msgType: MessageType, payload: unknown, from?: string): void {
-    switch (msgType) {
-      case MessageType.Hello: return this.handleHello(payload as HelloPayload);
-      case MessageType.Playstate: return this.handlePlaystate(payload as PlaystatePayload);
-      case MessageType.PlaystateRequest: return this.handlePlaystateRequest(payload as PlaystateRequestPayload, from);
-      case MessageType.Chat: return this.handleChat(payload as ChatPayload);
-      case MessageType.Readiness: return this.handleReadiness(payload as ReadinessPayload);
-      case MessageType.PlaylistChange: return this.handlePlaylistChange(payload as PlaylistChangePayload);
-      case MessageType.PlaylistRequest: return this.handlePlaylistRequest(payload as PlaylistRequestPayload);
-      case MessageType.FileInfo: return this.handleFileInfo(payload as FileInfoPayload);
-      case MessageType.FileTransfer: return this.handleFileTransfer(payload as FileTransferPayload);
-      case MessageType.FileResponse: return this.handleFileResponse(payload as FileResponsePayload);
-      case MessageType.LatencyPing: return this.handleLatencyPing(payload as LatencyPingPayload);
-      case MessageType.LatencyPong: return this.handleLatencyPong(payload as LatencyPongPayload, from);
-      case MessageType.HostElected: return this.handleHostElected(payload as HostElectedPayload);
-      case MessageType.UserInfo: return this.handleUserInfo(payload as UserInfoPayload);
-      case MessageType.PeerDisconnect: return this.handlePeerDisconnect(payload as PeerDisconnectPayload, from);
-      case MessageType.VoiceMute: return this.handleVoiceMute(payload as VoiceMutePayload);
-      case MessageType.VoiceFrame: {
-        const vp = payload as { data: Uint8Array; timestamp: number; seq: number };
-        if (this.voiceFrameHandler) {
-          try { this.voiceFrameHandler(vp.data); } catch (e) { /* swallow */ }
-        }
-        return;
-      }
-      case MessageType.SubtitleInfo: return this.handleSubtitleInfo(payload as SubtitleInfoPayload);
-      case MessageType.ControllerChange: return this.handleControllerChange(payload as ControllerChangePayload);
-      case MessageType.FileRequest: {
-        // Auto-respond: reject unless UI has set up a file share
-        const req = payload as FileRequestPayload;
-        if (this._transport) {
-          this._transport.send(MessageType.FileResponse, {
-            transferId: req.transferId,
-            accepted: false,
-            reason: 'File sharing not configured',
-            fingerprint: '',
-            chunkSize: 0,
-          } as FileResponsePayload);
-        }
-        break;
-      }
-    }
-  }
-
-  // ── Message handlers ──────────────────────────────────────────────────────
-
-  private handleHello(p: HelloPayload): void {
-    if (p.version !== PROTOCOL_VERSION) {
-      console.warn(`[P2P] Version mismatch: peer=${p.version} us=${PROTOCOL_VERSION}`);
-    }
-    // Add peer to room state if not already present
-    if (!this._room.peers.has(p.username)) {
-      const peer: PeerState = {
-        id: p.username,
-        username: p.username,
-        features: p.features ?? [],
-        isReady: false,
-        isController: false,
-        isHost: false,
-        rtt: 0,
-        muted: false,
-        iceState: 'new',
-      };
-      this._room.peers.set(p.username, peer);
-      this.emit({ type: 'user-join', data: { username: p.username }, timestamp: Date.now() });
-      // Replay current state to the newly joined peer
-      this.sendStateTo(p.username);
-    }
-  }
-
-  private handlePlaystate(p: PlaystatePayload): void {
-    // Seq-based dedup
-    if (p.seq <= this._room.seq && p.setBy === this._room.setBy) return;
-    // Latency compensation
-    const latency = p.setBy ? (this.latencyMap.get(p.setBy) ?? 0) : 0;
-    const speed = p.speed ?? 1.0;
-    this._room.position = p.position + (Date.now() - p.timestamp) * speed / 1000 + latency * speed;
-    this._room.paused = p.paused;
-    this._room.setBy = p.setBy;
-    this._room.seq = p.seq;
-    this._room.speed = speed;
-    // Store doSeek flag so it survives through getSnapshot() to the UI sync correction
-    (this._room as any)._lastDoSeek = p.doSeek;
-    this.emit({ type: 'playstate', data: this.getSnapshot(), timestamp: Date.now() });
-  }
-
-  private handlePlaystateRequest(p: PlaystateRequestPayload, from?: string): void {
-    if (!this.isHost) return;
-    const requester = from ?? p.requestId;
-    if (!this.isController(requester)) {
-      console.warn('[P2P] PlaystateRequest denied — not a controller');
-      return;
-    }
-    if (typeof p.action === 'object' && 'set_speed' in p.action) {
-      this._room.speed = p.action.set_speed;
-      this.updatePlaystate(this._room.position, this._room.paused);
-    } else {
-      switch (p.action) {
-        case PlaystateAction.Seek:
-          this.updatePlaystate(p.position || this._room.position, this._room.paused);
-          break;
-        case PlaystateAction.Pause:
-          this.updatePlaystate(this._room.position, true);
-          break;
-        case PlaystateAction.Play:
-          this.updatePlaystate(this._room.position, false);
-          break;
-      }
-    }
-  }
-
-  private handleChat(p: ChatPayload): void {
-    if (p.from === this.username) return;
-    this.emit({
-      type: 'chat',
-      data: { from: p.from, message: this.expandEmojis(p.message), timestamp: p.timestamp },
-      timestamp: Date.now(),
-    });
-  }
-
-  private handleReadiness(p: ReadinessPayload): void {
-    this._room.readyStates.set(p.username, p.isReady);
-    // Mesh P2P: every peer receives the original message directly via their DataChannel.
-    // No host relay needed — relaying would cause duplicate readiness updates.
-  }
-
-  private handlePlaylistChange(p: PlaylistChangePayload): void {
-    if (p.setBy === this.username) return;
-    this._room.playlist = p.files;
-    this._room.playlistIndex = p.index;
-  }
-
-  private handlePlaylistRequest(p: PlaylistRequestPayload): void {
-    if (!this.isHost) return;
-    if (p.action === PlaylistAction.SetPlaylist) {
-      this._room.playlist = p.files.slice(0, MAX_PLAYLIST);
-      this.broadcastPlaylist();
-    } else if (p.action === PlaylistAction.SetIndex) {
-      this.setPlaylistIndex(p.index);
-    }
-  }
-
-  private handleFileInfo(p: FileInfoPayload): void {
-    const peer = this._room.peers.get(p.username);
-    if (peer) {
-      if (p.file !== undefined) {
-        peer.file = p.file;
-      } else {
-        // exactOptionalPropertyTypes prevents assigning undefined — use delete
-        delete (peer as unknown as Record<string, unknown>).file;
-      }
-    }
-  }
-
-  private handleFileTransfer(p: FileTransferPayload): void {
-    console.log(`[P2P] FileTransfer chunk ${p.chunkIndex}/${Math.ceil(p.totalSize / p.chunkSize)} from transfer ${p.transferId}`);
-  }
-
-  private handleFileResponse(p: FileResponsePayload): void {
-    if (p.accepted) {
-      console.log(`[P2P] File transfer ${p.transferId} accepted, fingerprint: ${p.fingerprint}`);
-    } else {
-      console.log(`[P2P] File transfer ${p.transferId} rejected: ${p.reason}`);
-    }
-  }
-
-  private handleLatencyPing(p: LatencyPingPayload): void {
-    if (!this._connected || !this._transport) return;
-    this._transport.send(MessageType.LatencyPong, {
-      sendTime: p.sendTime,
-      receiveTime: Date.now(),
-    } as LatencyPongPayload);
-  }
-
-  private handleLatencyPong(p: LatencyPongPayload, from?: string): void {
-    const rtt = Date.now() - p.sendTime;
-    const peerKey = from ?? 'peer';
-    this.latencyMap.set(peerKey, rtt);
-    // Update per-peer RTT in the peers map
-    if (from) {
-      const peer = this._room.peers.get(from);
-      if (peer) peer.rtt = rtt;
-    }
-    if (rtt > LATENCY_WARN_MS) {
-      console.warn(`[P2P] High latency to ${peerKey}: ${rtt.toFixed(0)}ms`);
-    }
-  }
-
-  private handleHostElected(p: HostElectedPayload): void {
-    this.hostId = p.hostId;
-    const peer = this._room.peers.get(p.hostId);
-    if (peer) {
-      peer.isHost = true;
-      this._room.controllers.add(peer.username);
-    }
-    this.emit({
-      type: 'host-change',
-      data: { hostId: p.hostId, reason: p.reason },
-      timestamp: Date.now(),
-    });
-  }
-
-  private handleUserInfo(p: UserInfoPayload): void {
-    let peer = this._room.peers.get(p.username);
-    if (!peer) {
-      // Peer not yet tracked — create entry
-      peer = {
-        id: p.username,
-        username: p.username,
-        features: p.features,
-        isReady: false,
-        isController: false,
-        isHost: false,
-        rtt: 0,
-        muted: false,
-        iceState: 'new',
-      };
-      this._room.peers.set(p.username, peer);
-      this.emit({ type: 'user-join', data: { username: p.username }, timestamp: Date.now() });
-    } else {
-      peer.features = p.features;
-    }
-  }
-
-  private handlePeerDisconnect(p: PeerDisconnectPayload, from?: string): void {
-    console.log(`[P2P] Peer left: ${p.reason} (from=${from ?? 'unknown'})`);
-    if (from && this._room.peers.has(from)) {
-      this._room.peers.delete(from);
-      this._room.readyStates.delete(from);
-      this.emit({ type: 'user-leave', data: { username: from, reason: p.reason }, timestamp: Date.now() });
-    }
-  }
-
-  private handleVoiceMute(p: VoiceMutePayload): void {
-    console.log(`[P2P] Voice mute update: ${p.muted}`);
-  }
-
-  private handleSubtitleInfo(p: SubtitleInfoPayload): void {
-    this.emit({
-      type: 'chat',
-      data: {
-        from: 'system',
-        message: `Subtitles available: ${p.subtitles.map(t => t.filename + (t.language ? ` [${t.language}]` : '')).join(', ')}`,
-        timestamp: Date.now(),
-      },
-      timestamp: Date.now(),
-    });
-  }
-
-  private handleControllerChange(p: ControllerChangePayload): void {
-    if (p.action === ControllerAction.Add) {
-      this._room.controllers.add(p.peer_id);
-    } else {
-      this._room.controllers.delete(p.peer_id);
-    }
-  }
-
-  // ── Helpers ───────────────────────────────────────────────────────────────
-
-  private expandEmojis(msg: string): string {
-    return msg.replace(/:\w+:/g, m => EMOJIS[m] ?? m);
-  }
-
-  private formatPeerList(): string {
-    const names: string[] = [];
-    for (const [, p] of this._room.peers) {
-      let line = p.username;
-      if (p.isHost) line += ' (host)';
-      if (p.file) line += ` [${p.file.name}]`;
-      names.push(line);
-    }
-    return names.length ? names.join(', ') : 'No peers connected';
-  }
-
-  private settingsText(): string {
-    return [
-      `Room: ${this.username} → ${this._room.setBy || 'none'}`,
-      `Position: ${this._room.position.toFixed(1)}s ${this._room.paused ? '||' : '▶'}`,
-      `Speed: ${this._room.speed}x`,
-      `Playlist: ${this._room.playlist.length} items, index ${this._room.playlistIndex}`,
-      `Peers: ${this._room.peers.size}`,
-      `Controllers: ${[...this._room.controllers].join(',') || 'none'}`,
-      `Protocol: v${PROTOCOL_VERSION}`,
-    ].join('\n');
-  }
-
-  private helpText(): string {
-    return `Syncplay P2P v${PROTOCOL_VERSION} — Commands:
-  /help — this list
-  /me <action> — send action
-  /users — list peers
-  /ready — toggle ready
-  /leave — disconnect
-  /version — show version
-  /controller add|remove <user> — manage controllers (host)
-  /playlist add|index|clear — manage playlist
-  /settings — show room state
-  /shrug /tableflip /lenny — fun stuff
-  /react <n> :emoji: — react to message`;
-  }
-
-  /** Send full current state to a newly joined peer so they can catch up. */
-  sendStateTo(peerId: string): void {
-    if (!this._connected || !this._transport) return;
-    // Send current playstate
-    this._transport.send(MessageType.Playstate, playstatePayload(
-      this._room.position,
-      this._room.paused,
-      true, // doSeek so the peer applies it immediately
-      this.username,
-      this._room.seq,
-      this._room.speed,
-    ));
-    // Send current playlist
-    this._transport.send(MessageType.PlaylistChange, {
-      files: this._room.playlist,
-      index: this._room.playlistIndex,
-      setBy: this.username,
-    } as PlaylistChangePayload);
-    // Send readiness for all peers
-    for (const [uname, ready] of this._room.readyStates) {
-      this._transport.send(MessageType.Readiness, readinessPayload(
-        uname, ready, false, this.username,
-      ));
-    }
-    // Send controller list
-    for (const ctrl of this._room.controllers) {
-      this._transport.send(MessageType.ControllerChange, {
-        peer_id: ctrl,
-        action: ControllerAction.Add,
-      } as ControllerChangePayload);
-    }
-    // Send subtitle info if available
-    if (this._subtitleTracks.length > 0) {
-      this._transport.send(MessageType.SubtitleInfo, {
-        subtitles: this._subtitleTracks,
-      } satisfies SubtitleInfoPayload);
-    }
-  }
-
-  /** Update ICE connection state for a specific peer */
-  updateIceState(peerId: string, state: PeerState['iceState']): void {
-    const peer = this._room.peers.get(peerId);
-    if (peer) peer.iceState = state;
-  }
-
-  /** Return stats for all known peers */
-  getPeerStats(): PeerState[] {
-    return [...this._room.peers.values()];
-  }
-
-  /** Attempt reconnection with exponential backoff */
-  reconnect(connectFn: () => Promise<void>, reason?: string): void {
-    if (this._reconnectAttempts >= 5) {
-      this.setConnectionState('error', 'Max reconnect attempts reached');
-      return;
-    }
-    this._reconnectAttempts++;
-    this.setConnectionState('reconnecting');
-    const delay = Math.min(2500 * Math.pow(2, this._reconnectAttempts - 1), 30000);
-    console.log(`[P2P] Reconnecting in ${delay}ms (attempt ${this._reconnectAttempts}/5): ${reason ?? 'unknown'}`);
-    setTimeout(async () => {
-      try {
-        await connectFn();
-        this._reconnectAttempts = 0;
-        if (this.onReconnectSuccess) this.onReconnectSuccess();
-      } catch {
-        // connect() will call setConnectionState('error') on failure
-      }
-    }, delay);
-  }
-
-  /** Store last config for reconnect */
-  setLastConfig(host: string, username: string, room: string): void {
-    this._lastConfig = { host, username, room };
-  }
-
-  /** Persist config to storage (in-memory fallback for RN) */
-  saveConfig(key: string): void {
-    this._lastConfig = this._lastConfig ?? { host: '', username: '', room: '' };
-    try {
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(key, JSON.stringify(this._lastConfig));
-      }
-    } catch { /* storage unavailable */ }
-  }
-
-  /** Load persisted config (in-memory fallback for RN) */
-  static loadConfig(key: string): { host: string; username: string; room: string } {
-    try {
-      if (typeof localStorage !== 'undefined') {
-        const raw = localStorage.getItem(key);
-        if (raw) return JSON.parse(raw) as { host: string; username: string; room: string };
-      }
-    } catch { /* storage unavailable */ }
-    return { host: '', username: '', room: '' };
-  }
-
-  // ── Subtitle detection ─────────────────────────────────────────────────
-
-  /** Subtitle file extensions recognized by the matcher */
-  private static readonly SUBTITLE_EXTENSIONS: ReadonlySet<string> = new Set([
-    '.srt', '.ass', '.ssa', '.vtt', '.sub', '.idx', '.txt',
-  ]);
-
-  /** Map common 3-letter language codes to ISO 639-1 2-letter codes */
-  private static readonly LANG_CODE_MAP: Record<string, string> = {
-    eng: 'en', fra: 'fr', fre: 'fr', deu: 'de', ger: 'de',
-    spa: 'es', ita: 'it', por: 'pt', rus: 'ru', jpn: 'ja',
-    kor: 'ko', ara: 'ar', zho: 'zh', chi: 'zh', nld: 'nl',
-    dut: 'nl', swe: 'sv', nor: 'no', dan: 'da', fin: 'fi',
-    pol: 'pl', tur: 'tr', heb: 'he', hin: 'hi', tha: 'th',
-    vie: 'vi', ukr: 'uk', ces: 'cs', cze: 'cs', ron: 'ro',
-    hun: 'hu', ell: 'el', gre: 'el', bul: 'bg', cat: 'ca',
-    eus: 'eu', baq: 'eu', glg: 'gl', slv: 'sl', slo: 'sk',
-    srp: 'sr', hrv: 'hr', msa: 'ms', may: 'ms', fil: 'tl',
-    ind: 'id', fas: 'fa', per: 'fa', lit: 'lt', lav: 'lv',
-    est: 'et', isl: 'is', ice: 'is', mar: 'mr', ben: 'bn',
-    tam: 'ta', tel: 'te', mal: 'ml', kan: 'kn', guj: 'gu',
-  };
-
-  /**
-   * Extract a language code from a subtitle filename stem.
-   *
-   * Common patterns:
-   *   "movie.en"       → "en" (2-letter ISO 639-1)
-   *   "movie.eng"      → "en" (3-letter ISO 639-2 → mapped)
-   *   "movie.en.sdh"   → "en" (2-letter + hearing-impaired suffix)
-   *   "movie.eng.forced" → "en" (3-letter + forced flag)
-   *
-   * Falls back to undefined if no language code is detected.
-   */
-  static detectSubtitleLanguage(filename: string): string | undefined {
-    const stem = filename.replace(/\.[^.]+$/, ''); // drop extension
-    const parts = stem.split(/[._-]/);
-
-    // Walk parts from right to left looking for a language code
-    for (let i = parts.length - 1; i >= 0; i--) {
-      const token = parts[i]!.toLowerCase();
-
-      // Skip known non-language suffixes
-      if (token === 'forced' || token === 'sdh' || token === 'hi' ||
-          token === 'cc' || token === 'commentary' || token === 'stereo' ||
-          token === 'surround' || token === 'dub' || token === 'sub') {
-        continue;
-      }
-
-      // Exact 2-letter code
-      if (/^[a-z]{2}$/.test(token)) {
-        return token;
-      }
-
-      // 3-letter code — map to 2-letter if known
-      if (/^[a-z]{3}$/.test(token)) {
-        return P2PStateManager.LANG_CODE_MAP[token] ?? token;
-      }
-    }
-
-    return undefined;
-  }
-
-  /**
-   * Find subtitle files matching a video file.
-   *
-   * A subtitle file is considered a match when:
-   *   - Its extension is a known subtitle extension.
-   *   - Its stem starts with the video file's stem (case-insensitive).
-   *   - Any suffix after the video stem is a language code or flag.
-   *
-   * @param files   - Array of file-like objects (at minimum {name, size}).
-   * @param videoName - The video filename to match against (e.g., "movie.mkv").
-   * @returns SubtitleTrack[] with filename, size, and detected language.
-   */
-  findSubtitles(
-    files: ReadonlyArray<{ name: string; size?: number }>,
-    videoName: string,
-  ): SubtitleTrack[] {
-    const videoStem = videoName.replace(/\.[^.]+$/, '').toLowerCase();
-    if (!videoStem) return [];
-
-    const tracks: SubtitleTrack[] = [];
-
-    for (const f of files) {
-      const name = f.name;
-      const extDot = name.lastIndexOf('.');
-      if (extDot === -1) continue;
-
-      const ext = name.slice(extDot).toLowerCase();
-      if (!P2PStateManager.SUBTITLE_EXTENSIONS.has(ext)) continue;
-
-      // Check if the stem starts with the video stem (case-insensitive)
-      const stem = name.slice(0, extDot).toLowerCase();
-      if (!stem.startsWith(videoStem)) continue;
-
-      // The suffix after the video stem should be a language code or empty
-      const suffix = stem.slice(videoStem.length);
-
-      // Allow optional separator and language/flag suffix
-      if (suffix.length > 0) {
-        // Must start with a separator (. _ -) followed by a language indicator
-        if (!/^[._-]/.test(suffix)) continue;
-
-        const langCandidate = suffix.slice(1);
-        // Allow flags like "forced", "sdh", "cc", "hi"
-        const isLangOrFlag = /^[a-z]{2,3}([._-](forced|sdh|hi|cc|commentary|stereo|surround|dub|sub))?$/i.test(langCandidate);
-        if (!isLangOrFlag) continue;
-      }
-
-      const lang = P2PStateManager.detectSubtitleLanguage(name);
-      const track: SubtitleTrack = {
-        filename: name,
-        size: f.size ?? 0,
-      };
-      if (lang) track.language = lang;
-      tracks.push(track);
-    }
-
-    return tracks;
-  }
-
-  /**
-   * Send subtitle information to all connected peers.
-   * Called after findSubtitles when the user loads media with bundled subtitles.
-   */
-  sendSubtitleInfo(): void {
-    if (!this._transport || !this._connected) return;
-    if (this._subtitleTracks.length === 0) return;
-
-    this._transport.send(MessageType.SubtitleInfo, {
-      subtitles: this._subtitleTracks,
-    } satisfies SubtitleInfoPayload);
-  }
-
-  /**
-   * Store detected subtitle tracks so they can be replayed
-   * to late-joining peers via sendStateTo().
-   */
-  setSubtitleTracks(tracks: SubtitleTrack[]): void {
-    this._subtitleTracks = tracks;
-  }
-
-  destroy(): void {
-    this.stopLoop();
-    this.eventHandlers = [];
-  }
-}
-
 // ══════════════════════════════════════════════════════════════════════════════
-// 4. Error UX
+// Error UX
 // ══════════════════════════════════════════════════════════════════════════════
 
 /** Machine-readable error codes for connection failures. */
@@ -1453,7 +218,7 @@ export function humanReadableError(raw: string): { code: ErrorCode; message: str
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 5. P2PConnection — WebSocket signaling → RTCPeerConnection + DataChannel
+// P2PConnection — WebSocket signaling → RTCPeerConnection + DataChannel
 // ══════════════════════════════════════════════════════════════════════════════
 
 // Use react-native-webrtc in RN, built-in WebRTC otherwise
@@ -1523,7 +288,7 @@ export class P2PConnection implements P2PTransport {
     this._sfuMode = config.sfu ?? false;
 
     this._connectionState = 'connecting';
-    this.stateManager.setConnectionState('connecting');
+    this.stateManager.transit('connecting');
     this.stateManager.setLastConfig(config.signalingUrl, config.username, config.room);
     this.stateManager.onReconnectSuccess = () => {
       this._intentionalDisconnect = false;
@@ -1576,7 +341,7 @@ export class P2PConnection implements P2PTransport {
       this.ws.onmessage = (e: MessageEvent) => this.handleSignal(JSON.parse(e.data as string));
 
       this._connectionState = 'handshaking';
-      this.stateManager.setConnectionState('handshaking');
+      this.stateManager.transit('handshaking');
 
       // 3. Create RTCPeerConnection
       const iceServers: Array<{ urls: string; username?: string; credential?: string }> = [
@@ -1611,7 +376,7 @@ export class P2PConnection implements P2PTransport {
         const mapped = rawState as PeerState['iceState'];
         // Update all known peers' ICE state
         for (const stat of this.stateManager.getPeerStats()) {
-          this.stateManager.updateIceState(stat.id, mapped);
+          this.stateManager.updateIceState(stat.peerId, mapped);
         }
 
         // ICE connection timeout warning (30s in checking/new)
@@ -1633,7 +398,7 @@ export class P2PConnection implements P2PTransport {
       this._webrtcTimeout = setTimeout(() => {
         if (this.dc?.readyState !== 'open') {
           const msg = 'Connection timed out — could not establish media channel. Check your network or try TURN relay.';
-          this.stateManager.setConnectionState('error', msg);
+          this.stateManager.transit('error', msg);
           this._connectionState = 'error';
         }
       }, 30000);
@@ -1693,7 +458,7 @@ export class P2PConnection implements P2PTransport {
       }
       const { message } = humanReadableError(String(e));
       this._connectionState = 'error';
-      this.stateManager.setConnectionState('error', message);
+      this.stateManager.transit('error', message);
       throw e;
     }
   }
@@ -1787,10 +552,10 @@ export class P2PConnection implements P2PTransport {
   // ── P2PTransport.send implementation ──────────────────────────────────────
 
   send(msgType: MessageType, payload: unknown): void {
-    if (!this.stateManager.isConnected) return;
+    if (!this.stateManager.connected) return;
     if (!this.dc || this.dc.readyState !== 'open') return;
     try {
-      this.dc.send(encode(msgType, payload));
+      this.dc.send(encode(msgType, payload) as unknown as Uint8Array<ArrayBuffer>);
     } catch (err) {
       console.warn('[P2P] send error:', err);
     }
@@ -1813,7 +578,7 @@ export class P2PConnection implements P2PTransport {
   }
 
   sendPlaystate(position: number, paused: boolean, doSeek: boolean, speed = 1.0): void {
-    if (!this.stateManager.isConnected) return;
+    if (!this.stateManager.connected) return;
     if (!this.dc || this.dc.readyState !== 'open') return;
     // doSeek: when true, signals other peers to seek to this position (seeked event).
     // When false, this is a timeupdate-driven sync pulse (gradual correction).
@@ -1851,7 +616,18 @@ export class P2PConnection implements P2PTransport {
   // ── Peer stats ────────────────────────────────────────────────────────
 
   getPeerStats(): PeerState[] {
-    return this.stateManager.getPeerStats();
+    // Adapt: shared lib returns Array<{peerId, username, ...}>, convert to PeerState[]
+    return this.stateManager.getPeerStats().map(stat => ({
+      id: stat.peerId,
+      username: stat.username,
+      features: [],
+      isReady: stat.isReady,
+      isController: false,
+      isHost: false,
+      rtt: stat.rtt,
+      muted: stat.muted,
+      iceState: stat.iceState as PeerState['iceState'],
+    }));
   }
 
   // ── Reconnection ──────────────────────────────────────────────────────
