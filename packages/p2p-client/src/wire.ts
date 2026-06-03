@@ -65,3 +65,32 @@ export function encodeReadiness(username: string, isReady: boolean): Uint8Array 
 export function encodeDisconnect(reason: string): Uint8Array {
   return encode(MessageType.PeerDisconnect, { reason });
 }
+
+/** Encode a MessageReply */
+export function encodeMessageReply(
+  messageId: string,
+  originalMessage: string,
+  originalAuthor: string,
+  replyText: string,
+): Uint8Array {
+  return encode(MessageType.MessageReply, {
+    messageId, originalMessage, originalAuthor, replyText, timestamp: Date.now(),
+  });
+}
+
+/** Encode a MessageReaction */
+export function encodeMessageReaction(
+  messageId: string,
+  emoji: string,
+  from: string,
+): Uint8Array {
+  return encode(MessageType.MessageReaction, { messageId, emoji, from });
+}
+
+/** Encode a MessageRecall */
+export function encodeMessageRecall(
+  messageId: string,
+  from: string,
+): Uint8Array {
+  return encode(MessageType.MessageRecall, { messageId, from, timestamp: Date.now() });
+}

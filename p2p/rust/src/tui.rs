@@ -895,7 +895,7 @@ fn draw_help(f: &mut Frame, area: Rect, state: &UiState) {
             Line::from(vec![Span::styled(" /      ", Style::default().fg(theme::DIM)), Span::raw("speed 1x (reset)    "), Span::styled("        ", Style::default().fg(theme::DIM)), Span::raw("")]),
             Line::from(Span::styled("COMMANDS", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))),
             Line::from(Span::styled(" /send <file>  /playlist add/remove/index/clear/shuffle  /users  /nick <name>  /ready  /controller add/remove <name>  /cancel", Style::default().fg(theme::DIM))),
-            Line::from(Span::styled(" /react <n> :emoji:  /shrug  /tableflip  /lenny  /file <path>  /help  /settings", Style::default().fg(theme::DIM))),
+            Line::from(Span::styled(" /react <n> :emoji:  /reply <n> <text>  /recall <n>  /shrug  /tableflip  /lenny  /file <path>  /help  /settings", Style::default().fg(theme::DIM))),
         ];
         f.render_widget(
             Paragraph::new(h).block(
@@ -1196,15 +1196,89 @@ async fn handle_command(
             else if let Ok(n) = arg1.parse::<usize>() {
                 let emoji = if arg2.is_empty() { "👍" } else { arg2 };
                 let expanded = expand_emojis(emoji);
-                let msg = format!("reaction: {expanded}");
-                let mut s = state.lock();
-                if let Some(original) = s.chat.iter().rev().nth(n) {
-                    let preview = if original.len() > 30 { format!("{}...", &original[..30]) } else { original.clone() };
-                    s.chat.push(format!("{:>12} reacted with {expanded} to \"{preview}\"", "you"));
-                    if s.chat.len() > 500 { s.chat.remove(0); }
-                    drop(s); sync.send_chat(&msg).await; "Reaction sent!".to_string()
-                } else { format!("No message at index {n}") }
+                let msg_id = format!("msg-{}-{}", n, crate::now_ms());
+                let preview_opt = {
+                    let s = state.lock();
+                    s.chat.iter().rev().nth(n).map(|original| {
+                        if original.len() > 30 { format!("{}...", &original[..30]) } else { original.clone() }
+                    })
+                };
+                match preview_opt {
+                    None => format!("No message at index {n}"),
+                    Some(preview) => {
+                        {
+                            let mut s = state.lock();
+                            s.chat.push(format!("{:>12} reacted with {expanded} to \"{preview}\"", "you"));
+                            if s.chat.len() > 500 { s.chat.remove(0); }
+                        }
+                        sync.send_message_reaction(&msg_id, &expanded).await;
+                        "Reaction sent!".to_string()
+                    }
+                }
             } else { "Usage: /react <n> :emoji:".to_string() }
+        }
+        cmd if cmd.starts_with("/reply") => {
+            if arg1.is_empty() || arg2.is_empty() {
+                "Usage: /reply <msg_index> <text>".to_string()
+            } else if let Ok(n) = arg1.parse::<usize>() {
+                let reply_text = arg2.to_string();
+                let msg_id = format!("msg-{}-{}", n, crate::now_ms());
+                let info_opt = {
+                    let s = state.lock();
+                    s.chat.iter().rev().nth(n).map(|original| {
+                        let author = original.split(" <").nth(1)
+                            .and_then(|s| s.split('>').next())
+                            .unwrap_or("unknown").to_string();
+                        let prev_text = original.split("> ").nth(1).unwrap_or(original).to_string();
+                        (author, prev_text)
+                    })
+                };
+                match info_opt {
+                    None => format!("No message at index {n}"),
+                    Some((author, prev_text)) => {
+                        {
+                            let mut s = state.lock();
+                            let display_line = format!("↳ replying to @{author}: {prev_text}");
+                            s.chat.push(display_line);
+                            s.chat.push(format!("    {}", reply_text));
+                            if s.chat.len() > 500 { s.chat.remove(0); if s.chat.len() > 500 { s.chat.remove(0); } }
+                        }
+                        sync.send_message_reply(&msg_id, &prev_text, &author, &reply_text).await;
+                        "Reply sent!".to_string()
+                    }
+                }
+            } else { "Usage: /reply <msg_index> <text>".to_string() }
+        }
+        cmd if cmd.starts_with("/recall") => {
+            if arg1.is_empty() { "Usage: /recall <msg_index>".to_string() }
+            else if let Ok(n) = arg1.parse::<usize>() {
+                let username = sync.get_connection().uname();
+                let msg_id = format!("msg-{}-{}", n, crate::now_ms());
+                let info_opt = {
+                    let s = state.lock();
+                    s.chat.iter().rev().nth(n).map(|original| {
+                        let is_own = original.contains(&format!("<{username}>")) || original.contains("<you>");
+                        let idx = s.chat.len().saturating_sub(1 + n);
+                        let timestamp_part = original.split(']').next().map(|t| format!("{t}]")).unwrap_or_default();
+                        (is_own, idx, timestamp_part)
+                    })
+                };
+                match info_opt {
+                    None => format!("No message at index {n}"),
+                    Some((is_own, idx, timestamp_part)) => {
+                        if !is_own {
+                            "You can only recall your own messages".to_string()
+                        } else {
+                            {
+                                let mut s = state.lock();
+                                s.chat[idx] = format!("{timestamp_part} [message recalled]");
+                            }
+                            sync.send_message_recall(&msg_id).await;
+                            "Message recalled!".to_string()
+                        }
+                    }
+                }
+            } else { "Usage: /recall <msg_index>".to_string() }
         }
         _ => format!("Unknown: {cmd}. Try /help"),
     };

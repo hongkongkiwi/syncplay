@@ -375,6 +375,48 @@ impl SyncManager {
         }
     }
 
+    pub async fn send_message_reply(
+        &self,
+        message_id: &str,
+        original_message: &str,
+        original_author: &str,
+        reply_text: &str,
+    ) {
+        let p = MessageReplyPayload::new(message_id, original_message, original_author, reply_text);
+        if self.conn.is_host() {
+            self.conn.bcast(&p, None).await;
+        } else {
+            match wire::encode(&p) {
+                Ok(frame) => self.send_to_host(&frame).await,
+                Err(e) => error!("encode message reply: {e}"),
+            }
+        }
+    }
+
+    pub async fn send_message_reaction(&self, message_id: &str, emoji: &str) {
+        let p = MessageReactionPayload::new(message_id, emoji, &self.conn.uname());
+        if self.conn.is_host() {
+            self.conn.bcast(&p, None).await;
+        } else {
+            match wire::encode(&p) {
+                Ok(frame) => self.send_to_host(&frame).await,
+                Err(e) => error!("encode message reaction: {e}"),
+            }
+        }
+    }
+
+    pub async fn send_message_recall(&self, message_id: &str) {
+        let p = MessageRecallPayload::new(message_id, &self.conn.uname());
+        if self.conn.is_host() {
+            self.conn.bcast(&p, None).await;
+        } else {
+            match wire::encode(&p) {
+                Ok(frame) => self.send_to_host(&frame).await,
+                Err(e) => error!("encode message recall: {e}"),
+            }
+        }
+    }
+
     pub async fn send_voice_mute(&self, muted: bool) {
         let p = VoiceMutePayload { muted };
         if self.conn.is_host() {
@@ -825,6 +867,72 @@ impl SyncManager {
                         });
                     }
                     Err(e) => warn!("Bad Chat: {e}"),
+                }
+            },
+        );
+
+        // MessageReply — host relays
+        let cr1 = conn.clone();
+        self.conn.on_msg(
+            MessageType::MessageReply,
+            move |_: MessageType, data: &[u8], from: String| {
+                if !cr1.is_host() {
+                    warn!("MessageReply from non-host {from}");
+                    return;
+                }
+                match rmp_serde::from_slice::<MessageReplyPayload>(data) {
+                    Ok(p) => {
+                        debug!("MessageReply: {} → {}", p.original_author, p.reply_text);
+                        let c = cr1.clone();
+                        tokio::spawn(async move {
+                            c.bcast(&p, None).await;
+                        });
+                    }
+                    Err(e) => warn!("Bad MessageReply: {e}"),
+                }
+            },
+        );
+
+        // MessageReaction — host relays
+        let cr2 = conn.clone();
+        self.conn.on_msg(
+            MessageType::MessageReaction,
+            move |_: MessageType, data: &[u8], from: String| {
+                if !cr2.is_host() {
+                    warn!("MessageReaction from non-host {from}");
+                    return;
+                }
+                match rmp_serde::from_slice::<MessageReactionPayload>(data) {
+                    Ok(p) => {
+                        debug!("MessageReaction: {} on {}", p.emoji, p.message_id);
+                        let c = cr2.clone();
+                        tokio::spawn(async move {
+                            c.bcast(&p, None).await;
+                        });
+                    }
+                    Err(e) => warn!("Bad MessageReaction: {e}"),
+                }
+            },
+        );
+
+        // MessageRecall — host relays
+        let cr3 = conn.clone();
+        self.conn.on_msg(
+            MessageType::MessageRecall,
+            move |_: MessageType, data: &[u8], from: String| {
+                if !cr3.is_host() {
+                    warn!("MessageRecall from non-host {from}");
+                    return;
+                }
+                match rmp_serde::from_slice::<MessageRecallPayload>(data) {
+                    Ok(p) => {
+                        debug!("MessageRecall: {} from {}", p.message_id, p.from);
+                        let c = cr3.clone();
+                        tokio::spawn(async move {
+                            c.bcast(&p, None).await;
+                        });
+                    }
+                    Err(e) => warn!("Bad MessageRecall: {e}"),
                 }
             },
         );

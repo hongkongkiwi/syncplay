@@ -24,6 +24,12 @@ export enum MessageType {
   AvatarSet = 0x14,
   StatusUpdate = 0x15,
   VoiceFrame = 0x16,
+  SubtitleTrackChange = 0x17,
+  TransferPause = 0x18,
+  TransferResume = 0x19,
+  MessageReply = 0x1a,
+  MessageReaction = 0x1b,
+  MessageRecall = 0x1c,
 }
 
 // ── Payload types ──────────────────────────────────────────────
@@ -252,6 +258,12 @@ export const PAYLOAD_BY_TYPE: Record<MessageType, string> = {
   [MessageType.AvatarSet]: "AvatarSetPayload",
   [MessageType.StatusUpdate]: "StatusUpdatePayload",
   [MessageType.VoiceFrame]: "VoiceFramePayload",
+  [MessageType.SubtitleTrackChange]: "SubtitleTrackChangePayload",
+  [MessageType.TransferPause]: "TransferPausePayload",
+  [MessageType.TransferResume]: "TransferResumePayload",
+  [MessageType.MessageReply]: "MessageReplyPayload",
+  [MessageType.MessageReaction]: "MessageReactionPayload",
+  [MessageType.MessageRecall]: "MessageRecallPayload",
 };
 
 // ── Builders ───────────────────────────────────────────────────
@@ -388,4 +400,50 @@ export function voiceFramePayload(
   if (sampleRate !== undefined) result.sampleRate = sampleRate;
   if (channels !== undefined) result.channels = channels;
   return result;
+}
+
+// ── Message reply / reaction / recall ──────────────────────────
+
+export interface MessageReplyPayload {
+  messageId: string;
+  originalMessage: string;
+  originalAuthor: string;
+  replyText: string;
+  timestamp: number;
+}
+
+export interface MessageReactionPayload {
+  messageId: string;
+  emoji: string;
+  from: string;
+}
+
+export interface MessageRecallPayload {
+  messageId: string;
+  from: string;
+  timestamp: number;
+}
+
+export function messageReplyPayload(
+  messageId: string,
+  originalMessage: string,
+  originalAuthor: string,
+  replyText: string,
+): MessageReplyPayload {
+  return { messageId, originalMessage, originalAuthor, replyText, timestamp: Date.now() };
+}
+
+export function messageReactionPayload(
+  messageId: string,
+  emoji: string,
+  from: string,
+): MessageReactionPayload {
+  return { messageId, emoji, from };
+}
+
+export function messageRecallPayload(
+  messageId: string,
+  from: string,
+): MessageRecallPayload {
+  return { messageId, from, timestamp: Date.now() };
 }

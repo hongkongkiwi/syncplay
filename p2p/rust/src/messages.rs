@@ -35,6 +35,9 @@ pub enum MessageType {
     SubtitleTrackChange = 0x17, // host → peers: switch subtitle track
     TransferPause = 0x18,       // pause a file transfer
     TransferResume = 0x19,      // resume a paused file transfer
+    MessageReply = 0x1A,        // reply to a chat message
+    MessageReaction = 0x1B,     // react to a chat message
+    MessageRecall = 0x1C,       // recall a chat message
 }
 
 // ── Payload types ────────────────────────────────────────────────────
@@ -297,6 +300,35 @@ pub struct TransferResumePayload {
     pub transfer_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageReplyPayload {
+    #[serde(rename = "messageId")]
+    pub message_id: String,
+    #[serde(rename = "originalMessage")]
+    pub original_message: String,
+    #[serde(rename = "originalAuthor")]
+    pub original_author: String,
+    #[serde(rename = "replyText")]
+    pub reply_text: String,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageReactionPayload {
+    #[serde(rename = "messageId")]
+    pub message_id: String,
+    pub emoji: String,
+    pub from: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageRecallPayload {
+    #[serde(rename = "messageId")]
+    pub message_id: String,
+    pub from: String,
+    pub timestamp: u64,
+}
+
 impl SubtitleInfoPayload {
     pub fn new(subtitles: Vec<SubtitleTrack>) -> Self {
         Self { subtitles }
@@ -384,6 +416,43 @@ impl ChatPayload {
         Self {
             from: from.into(),
             message: message.into(),
+            timestamp: crate::now_ms(),
+        }
+    }
+}
+
+impl MessageReplyPayload {
+    pub fn new(
+        message_id: &str,
+        original_message: &str,
+        original_author: &str,
+        reply_text: &str,
+    ) -> Self {
+        Self {
+            message_id: message_id.into(),
+            original_message: original_message.into(),
+            original_author: original_author.into(),
+            reply_text: reply_text.into(),
+            timestamp: crate::now_ms(),
+        }
+    }
+}
+
+impl MessageReactionPayload {
+    pub fn new(message_id: &str, emoji: &str, from: &str) -> Self {
+        Self {
+            message_id: message_id.into(),
+            emoji: emoji.into(),
+            from: from.into(),
+        }
+    }
+}
+
+impl MessageRecallPayload {
+    pub fn new(message_id: &str, from: &str) -> Self {
+        Self {
+            message_id: message_id.into(),
+            from: from.into(),
             timestamp: crate::now_ms(),
         }
     }
@@ -481,6 +550,9 @@ mod tests {
         assert_eq!(MessageType::SubtitleTrackChange as u8, 0x17);
         assert_eq!(MessageType::TransferPause as u8, 0x18);
         assert_eq!(MessageType::TransferResume as u8, 0x19);
+        assert_eq!(MessageType::MessageReply as u8, 0x1A);
+        assert_eq!(MessageType::MessageReaction as u8, 0x1B);
+        assert_eq!(MessageType::MessageRecall as u8, 0x1C);
     }
 
     #[test]

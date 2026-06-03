@@ -55,6 +55,9 @@ impl_payload!(VoiceFramePayload, VoiceFrame);
 impl_payload!(SubtitleTrackChangePayload, SubtitleTrackChange);
 impl_payload!(TransferPausePayload, TransferPause);
 impl_payload!(TransferResumePayload, TransferResume);
+impl_payload!(MessageReplyPayload, MessageReply);
+impl_payload!(MessageReactionPayload, MessageReaction);
+impl_payload!(MessageRecallPayload, MessageRecall);
 
 /// Encode any payload into a wire frame.
 pub fn encode<T: MessagePayload>(payload: &T) -> Result<Bytes, WireError> {
@@ -115,6 +118,9 @@ pub fn decode_header(buf: &[u8]) -> Result<(MessageType, usize), WireError> {
         0x17 => MessageType::SubtitleTrackChange,
         0x18 => MessageType::TransferPause,
         0x19 => MessageType::TransferResume,
+        0x1A => MessageType::MessageReply,
+        0x1B => MessageType::MessageReaction,
+        0x1C => MessageType::MessageRecall,
         unknown => {
             warn!("Unknown message type: 0x{unknown:02x}");
             return Err(WireError::UnknownType { type_byte: unknown });
@@ -243,6 +249,18 @@ pub fn encode_transfer_pause(p: &TransferPausePayload) -> Result<Bytes, WireErro
 }
 
 pub fn encode_transfer_resume(p: &TransferResumePayload) -> Result<Bytes, WireError> {
+    encode(p)
+}
+
+pub fn encode_message_reply(p: &MessageReplyPayload) -> Result<Bytes, WireError> {
+    encode(p)
+}
+
+pub fn encode_message_reaction(p: &MessageReactionPayload) -> Result<Bytes, WireError> {
+    encode(p)
+}
+
+pub fn encode_message_recall(p: &MessageRecallPayload) -> Result<Bytes, WireError> {
     encode(p)
 }
 
@@ -841,6 +859,24 @@ mod tests {
             },
             MessageType::TransferResume,
         );
+
+        // MessageReply (0x1A)
+        roundtrip(
+            &MessageReplyPayload::new("msg-id-1", "original text", "author", "my reply"),
+            MessageType::MessageReply,
+        );
+
+        // MessageReaction (0x1B)
+        roundtrip(
+            &MessageReactionPayload::new("msg-id-1", "👍", "reactor"),
+            MessageType::MessageReaction,
+        );
+
+        // MessageRecall (0x1C)
+        roundtrip(
+            &MessageRecallPayload::new("msg-id-1", "author"),
+            MessageType::MessageRecall,
+        );
     }
 
     // ── Corrupted / malformed inputs ──────────────────────────────────
@@ -1185,6 +1221,11 @@ mod tests {
             transfer_id: "t".into()
         })
         .is_ok());
+        assert!(
+            encode_message_reply(&MessageReplyPayload::new("mid", "orig", "auth", "reply")).is_ok()
+        );
+        assert!(encode_message_reaction(&MessageReactionPayload::new("mid", "👍", "me")).is_ok());
+        assert!(encode_message_recall(&MessageRecallPayload::new("mid", "me")).is_ok());
     }
 
     // ── PlaystateAction::SetSpeed + with_speed ────────────────────────

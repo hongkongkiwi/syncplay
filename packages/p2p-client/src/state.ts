@@ -24,6 +24,9 @@ import {
   type HostElectedPayload,
   type LatencyPingPayload,
   type LatencyPongPayload,
+  type MessageRecallPayload,
+  type MessageReactionPayload,
+  type MessageReplyPayload,
   type PeerDisconnectPayload,
   type PlaylistChangePayload,
   type PlaylistRequestPayload,
@@ -433,6 +436,30 @@ export class P2PStateManager {
     }
   }
 
+  /** Send a reply to a specific message */
+  sendMessageReply(messageId: string, originalMessage: string, originalAuthor: string, replyText: string): void {
+    if (!this._transport || !this._connected) return;
+    this._transport.send(MessageType.MessageReply, {
+      messageId, originalMessage, originalAuthor, replyText, timestamp: Date.now(),
+    });
+  }
+
+  /** Send a reaction to a specific message */
+  sendMessageReaction(messageId: string, emoji: string): void {
+    if (!this._transport || !this._connected) return;
+    this._transport.send(MessageType.MessageReaction, {
+      messageId, emoji, from: this.username,
+    });
+  }
+
+  /** Recall (delete) a message — only own messages within 2 min */
+  sendMessageRecall(messageId: string): void {
+    if (!this._transport || !this._connected) return;
+    this._transport.send(MessageType.MessageRecall, {
+      messageId, from: this.username, timestamp: Date.now(),
+    });
+  }
+
   // ── Playback control ─────────────────────────────────────────────
 
   updatePlaystate(position: number, paused: boolean, speed?: number): void {
@@ -720,6 +747,9 @@ export class P2PStateManager {
       case MessageType.AvatarSet: return this.handleAvatarSet(payload as AvatarSetPayload);
       case MessageType.StatusUpdate: return this.handleStatusUpdate(payload as StatusUpdatePayload);
       case MessageType.VoiceFrame: return this.handleVoiceFrame(payload as VoiceFramePayload, from);
+      case MessageType.MessageReply: return this.handleMessageReply(payload as MessageReplyPayload);
+      case MessageType.MessageReaction: return this.handleMessageReaction(payload as MessageReactionPayload);
+      case MessageType.MessageRecall: return this.handleMessageRecall(payload as MessageRecallPayload);
       case MessageType.FileRequest:
         this.emit({ type: 'file-request', data: payload, timestamp: Date.now() });
         break;
@@ -1537,6 +1567,45 @@ export class P2PStateManager {
 
   private handleStatusUpdate(p: { username: string; status_text: string; timestamp: number }): void {
     this.statusMap.set(p.username, { statusText: p.status_text, timestamp: p.timestamp });
+  }
+
+  private handleMessageReply(p: MessageReplyPayload): void {
+    this.emit({
+      type: 'chat' as SyncEventType,
+      data: {
+        from: 'system',
+        message: `↳ replying to @${p.originalAuthor}: ${p.originalMessage}`,
+        reply: { messageId: p.messageId, text: p.replyText, originalMessage: p.originalMessage, originalAuthor: p.originalAuthor },
+        timestamp: p.timestamp,
+      },
+      timestamp: Date.now(),
+    });
+  }
+
+  private handleMessageReaction(p: MessageReactionPayload): void {
+    this.emit({
+      type: 'chat' as SyncEventType,
+      data: {
+        from: 'system',
+        message: `${p.emoji} @${p.from}`,
+        reaction: { messageId: p.messageId, emoji: p.emoji, from: p.from },
+        timestamp: Date.now(),
+      },
+      timestamp: Date.now(),
+    });
+  }
+
+  private handleMessageRecall(p: MessageRecallPayload): void {
+    this.emit({
+      type: 'chat' as SyncEventType,
+      data: {
+        from: 'system',
+        message: `@${p.from} recalled a message`,
+        recall: { messageId: p.messageId, from: p.from, timestamp: p.timestamp },
+        timestamp: p.timestamp,
+      },
+      timestamp: Date.now(),
+    });
   }
 
   // ── Helpers ──────────────────────────────────────────────────────
