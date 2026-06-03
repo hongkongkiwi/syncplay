@@ -22,7 +22,13 @@
 //!   <      speed 0.5x      >     speed 2x
 //!   /      speed 1x        ?     toggle help screen
 //!   Enter  send chat       ↑↓PgUp/Dn scroll chat
-//!   j/k    scroll playlist
+//!   ↑↓     input history   j/k    scroll playlist
+//!   Home   cursor start    End    cursor end
+//!   ←→     move cursor     Bksp   delete char
+//!   Tab    chat focus mode ───── in focus: ─────
+//!   r      reply           e      emoji react
+//!   d      delete/recall   ↑↓     select message
+//!   Enter  confirm react   Esc    exit focus
 //!   Commands: /help /send /playlist add/remove/index/clear /react /ready
 //!             /file /users /controller /shrug /tableflip /unflip /lenny
 

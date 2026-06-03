@@ -54,7 +54,7 @@ impl AuthHandler for StaticAuthHandler {
 }
 
 fn print_usage() {
-    eprintln!("Syncplay TURN relay server");
+    eprintln!("Syncplay TURN relay server v{}", env!("CARGO_PKG_VERSION"));
     eprintln!();
     eprintln!("Usage: syncplay-turn [OPTIONS]");
     eprintln!();
@@ -63,6 +63,8 @@ fn print_usage() {
     eprintln!("  --port <PORT>        Listening port [default: 3478]");
     eprintln!("  --users <LIST>       Comma-separated user=pass pairs (required)");
     eprintln!("  --realm <REALM>      Authentication realm [default: syncplay]");
+    eprintln!("  --help, -h           Show this help");
+    eprintln!("  --version, -V        Show version");
     eprintln!();
     eprintln!("Example:");
     eprintln!("  syncplay-turn --public-ip 203.0.113.1 --users alice=secret,bob=secret");
@@ -104,6 +106,10 @@ fn parse_args() -> Result<(String, u16, String, String), String> {
             }
             "--help" | "-h" => {
                 print_usage();
+                std::process::exit(0);
+            }
+            "--version" | "-V" => {
+                println!("syncplay-turn v{}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             other => return Err(format!("Unknown argument: {other}")),

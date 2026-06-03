@@ -27,13 +27,19 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
   render() {
     if (this.state.hasError) {
       return (
-        <View style={styles.container}>
-          <Text style={styles.title}>Something went wrong</Text>
-          <Text style={styles.message}>
+        <View style={styles.container} accessibilityLabel="Error screen" testID="error-boundary">
+          <Text style={styles.title} maxFontSizeMultiplier={1.5}>Something went wrong</Text>
+          <Text style={styles.message} maxFontSizeMultiplier={1.3}>
             {this.state.error?.message ?? 'An unexpected error occurred.'}
           </Text>
-          <Pressable style={styles.retryButton} onPress={this.handleRetry}>
-            <Text style={styles.retryText}>Retry</Text>
+          <Pressable
+            style={styles.retryButton}
+            onPress={this.handleRetry}
+            accessibilityLabel="Retry"
+            accessibilityRole="button"
+            testID="error-retry-button"
+          >
+            <Text style={styles.retryText} maxFontSizeMultiplier={1.3}>Retry</Text>
           </Pressable>
         </View>
       );

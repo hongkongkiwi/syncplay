@@ -33,10 +33,13 @@ import {
 } from 'lucide-react-native';
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   AppState,
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
+  LayoutAnimation,
   Linking,
   Modal,
   Platform,
@@ -393,6 +396,8 @@ export default function App() {
   const [showHelp, setShowHelp] = useState(false);
   const [selectedAvatarId, setSelectedAvatarId] = useState<string | null>(null);
   const [selectedStatusText, setSelectedStatusText] = useState<string | null>(null);
+  // ── Contextual chat UI state ──
+  const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
 
   // Refs
   const lastSentPositionRef = useRef(0);
@@ -1036,6 +1041,8 @@ export default function App() {
     const trimmed = chatDraft.trim();
     if (!trimmed) return;
 
+    Keyboard.dismiss();
+
     const commandResult = parseSlashCommand(trimmed, form.username);
 
     if (commandResult) {
@@ -1075,6 +1082,18 @@ export default function App() {
       } else {
         // Expand emojis before sending
         const expanded = expandEmojis(trimmed);
+        // If replying, add reply context
+        if (replyTo) {
+          const origAuthor = replyTo.username || 'unknown';
+          const origText = replyTo.text;
+          setMessages(prev => [...prev, {
+            id: nextMessageId(),
+            text: `↳ replying to @${origAuthor}: ${origText.length > 40 ? origText.slice(0, 40) + '...' : origText}`,
+            kind: 'system',
+            createdAt: Date.now(),
+          }].slice(-500));
+          setReplyTo(null);
+        }
         // Add locally before sending (so sender sees own message)
         setMessages(prev => [...prev, {
           id: nextMessageId(),
@@ -1088,6 +1107,80 @@ export default function App() {
     }
 
     setChatDraft('');
+  }
+
+  // ── Long-press context menu for messages ──
+
+  const EMOTICON_WEIGHT = [
+    { key: '😊', text: 'Smile' },
+    { key: '❤️', text: 'Heart' },
+    { key: '😂', text: 'Laugh' },
+    { key: '😮', text: 'Wow' },
+    { key: '😢', text: 'Sad' },
+    { key: '🙏', text: 'Pray' },
+    { key: '👏', text: 'Clap' },
+    { key: '🔥', text: 'Fire' },
+    { key: '💀', text: 'Skull' },
+    { key: '🎉', text: 'Party' },
+    { key: '👎', text: 'Thumbs down' },
+    { key: '✅', text: 'Check' },
+    { key: '❌', text: 'X' },
+    { key: '⭐', text: 'Star' },
+  ] as const;
+
+  function handleMessageLongPress(message: ChatMessage) {
+    const options: Array<{text: string; onPress: () => void; style?: 'cancel' | 'destructive'}> = [
+      {
+        text: 'Reply',
+        onPress: () => {
+          setReplyTo(message);
+          setChatDraft('');
+        },
+      },
+      {
+        text: 'React with Emoji',
+        onPress: () => {
+          showEmojiPicker(message);
+        },
+      },
+    ];
+
+    // Only show Recall for own messages
+    if (message.username === form.username) {
+      options.push({
+        text: 'Recall',
+        style: 'destructive',
+        onPress: () => {
+          setMessages(prev => prev.map(m =>
+            m.id === message.id ? { ...m, text: '[message recalled]', kind: 'system' } : m
+          ));
+        },
+      });
+    }
+
+    options.push({ text: 'Cancel', style: 'cancel', onPress: () => {} });
+
+    Alert.alert('Message', undefined, options, { cancelable: true });
+  }
+
+  function showEmojiPicker(message: ChatMessage) {
+    const buttons: Array<{ text: string; onPress: () => void; style?: 'cancel' | 'destructive' }> = EMOTICON_WEIGHT.map(({ key, text }) => ({
+      text: `${key} ${text}`,
+      onPress: () => {
+        const emoji = key;
+        setMessages(prev => [...prev, {
+          id: nextMessageId(),
+          text: `You reacted with ${emoji} to "${message.text.slice(0, 30)}${message.text.length > 30 ? '...' : ''}"`,
+          kind: 'system',
+          createdAt: Date.now(),
+        }].slice(-500));
+        connection.sendChat(`reaction: ${emoji}`);
+      },
+    }));
+
+    buttons.push({ text: 'Cancel', style: 'cancel', onPress: () => {} });
+
+    Alert.alert('React with Emoji', undefined, buttons, { cancelable: true });
   }
 
   function toggleReady() {
@@ -1228,15 +1321,24 @@ export default function App() {
 
   const connected = connectionState === 'ready';
   const mediaDirectoryLabels = buildDirectoryLabels(mediaLibrary);
+  const theme = getThemeColors(darkMode);
+  const isConnecting = connectionState === 'connecting' || connectionState === 'handshaking' || connectionState === 'connecting_peers' || connectionState === 'reconnecting';
+
+  // LayoutAnimation for reply bar
+  useEffect(() => {
+    if (replyTo) {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    }
+  }, [replyTo]);
 
   // ── Render ──────────────────────────────────────────────────────────────
 
   const screenContent =
     activeScreen === 'connect' ? (
-      <View style={styles.panel}>
+      <View style={[styles.panel, { backgroundColor: theme.panel, borderColor: theme.line }]}>
         <View style={styles.panelTitleRow}>
-          <Plug color="#7fd2ff" size={18} />
-          <Text style={styles.panelTitle}>Connection</Text>
+          <Plug color={theme.accent} size={18} />
+          <Text style={[styles.panelTitle, { color: theme.text }]} maxFontSizeMultiplier={1.4}>Connection</Text>
         </View>
         <View style={styles.connectionSummary}>
           <SummaryItem label="Host" value={form.host || 'host'} />
@@ -1298,11 +1400,11 @@ export default function App() {
             onPress={connected ? disconnect : connect}
           />
         </View>
-        {connectionError ? <Text style={styles.errorText}>{connectionError}</Text> : null}
-        <View style={styles.divider} />
+        {connectionError ? <Text style={[styles.errorText, { color: theme.error }]} maxFontSizeMultiplier={1.3}>{connectionError}</Text> : null}
+        <View style={[styles.divider, { backgroundColor: theme.line }]} />
         <View style={styles.panelTitleRow}>
-          <MonitorPlay color="#7fd2ff" size={18} />
-          <Text style={styles.panelTitle}>Media Player</Text>
+          <MonitorPlay color={theme.accent} size={18} />
+          <Text style={[styles.panelTitle, { color: theme.text }]} maxFontSizeMultiplier={1.4}>Media Player</Text>
         </View>
         <View style={styles.serverOptionGrid}>
           <View style={[styles.serverOption, styles.serverOptionSelected]}>
@@ -1312,11 +1414,11 @@ export default function App() {
         <Text style={styles.smallText}>
           External mobile players cannot report reliable position, pause, play, or seek events back to Syncplay.
         </Text>
-        <View style={styles.divider} />
+        <View style={[styles.divider, { backgroundColor: theme.line }]} />
         <View style={styles.panelTitleRow}>
-          <Library color="#7fd2ff" size={18} />
-          <Text style={styles.panelTitle}>Media Search</Text>
-          <Text style={styles.countText}>{mediaLibrary.length}</Text>
+          <Library color={theme.accent} size={18} />
+          <Text style={[styles.panelTitle, { color: theme.text }]} maxFontSizeMultiplier={1.4}>Media Search</Text>
+          <Text style={[styles.countText, { color: theme.muted }]} maxFontSizeMultiplier={1.2}>{mediaLibrary.length}</Text>
         </View>
         {mediaDirectoryLabels.length > 0 ? (
           <View style={styles.serverOptionGrid}>
@@ -1384,10 +1486,10 @@ export default function App() {
           </Pressable>
         </View>
 
-        <View style={styles.panel}>
+        <View style={[styles.panel, { backgroundColor: theme.panel, borderColor: theme.line }]}>
           <View style={styles.panelTitleRow}>
-            <Clock color="#7fd2ff" size={18} />
-            <Text style={styles.panelTitle}>Playback</Text>
+            <Clock color={theme.accent} size={18} />
+            <Text style={[styles.panelTitle, { color: theme.text }]} maxFontSizeMultiplier={1.4}>Playback</Text>
           </View>
           <View style={styles.inlineRow}>
             <Field label="Seek" value={seekDraft} onChangeText={setSeekDraft} />
@@ -1411,10 +1513,10 @@ export default function App() {
             <ActionButton label="Open" icon={Link} tone="ghost" onPress={openStream} />
           </View>
         </View>
-        <View style={styles.panel}>
+        <View style={[styles.panel, { backgroundColor: theme.panel, borderColor: theme.line }]}>
           <View style={styles.panelTitleRow}>
-            <Library color="#7fd2ff" size={18} />
-            <Text style={styles.panelTitle}>Media Search</Text>
+            <Library color={theme.accent} size={18} />
+            <Text style={[styles.panelTitle, { color: theme.text }]} maxFontSizeMultiplier={1.4}>Media Search</Text>
             <Text style={styles.countText}>{mediaLibrary.length}</Text>
           </View>
           {missingMediaName ? <Text style={styles.errorText}>Missing: {missingMediaName}</Text> : null}
@@ -1449,10 +1551,10 @@ export default function App() {
         </View>
       </>
     ) : activeScreen === 'room' ? (
-      <View style={styles.panel}>
+      <View style={[styles.panel, { backgroundColor: theme.panel, borderColor: theme.line }]}>
         <View style={styles.panelTitleRow}>
-          <Users color="#7fd2ff" size={18} />
-          <Text style={styles.panelTitle}>{form.room}</Text>
+          <Users color={theme.accent} size={18} />
+          <Text style={[styles.panelTitle, { color: theme.text }]} maxFontSizeMultiplier={1.4}>{form.room}</Text>
           <Text style={styles.countText}>{roomPeers.length}</Text>
         </View>
         {transferProgress.length > 0 ? (
@@ -1472,7 +1574,9 @@ export default function App() {
           data={roomPeers}
           keyExtractor={item => item.username}
           scrollEnabled={false}
-          ListEmptyComponent={<Text style={styles.mutedText}>No peers connected.</Text>}
+          refreshing={false}
+          onRefresh={undefined}
+          ListEmptyComponent={<Text style={[styles.mutedText, { color: theme.muted }]} maxFontSizeMultiplier={1.3}>No peers connected.</Text>}
           renderItem={({ item }) => {
             const iceColor =
               item.iceState === 'connected' ? '#4ade80' :
@@ -1527,10 +1631,10 @@ export default function App() {
             );
           }}
         />
-        <View style={styles.divider} />
+        <View style={[styles.divider, { backgroundColor: theme.line }]} />
         <View style={styles.panelTitleRow}>
-          <Users color="#7fd2ff" size={18} />
-          <Text style={styles.panelTitle}>Join Room</Text>
+          <Users color={theme.accent} size={18} />
+          <Text style={[styles.panelTitle, { color: theme.text }]} maxFontSizeMultiplier={1.4}>Join Room</Text>
         </View>
         <View style={styles.inlineRow}>
           <Field label="Room" value={form.room} onChangeText={value => updateForm('room', value)} />
@@ -1566,11 +1670,11 @@ export default function App() {
         <View style={styles.buttonRow}>
           <ActionButton label="Save Room List" icon={ListPlus} tone="ghost" onPress={saveRoomListFromDraft} />
         </View>
-        <View style={styles.divider} />
+        <View style={[styles.divider, { backgroundColor: theme.line }]} />
         <View style={styles.panelTitleRow}>
-          <ListPlus color="#7fd2ff" size={18} />
-          <Text style={styles.panelTitle}>Playlist</Text>
-          <Text style={styles.countText}>{playlist.files.length}</Text>
+          <ListPlus color={theme.accent} size={18} />
+          <Text style={[styles.panelTitle, { color: theme.text }]} maxFontSizeMultiplier={1.4}>Playlist</Text>
+          <Text style={[styles.countText, { color: theme.muted }]} maxFontSizeMultiplier={1.2}>{playlist.files.length}</Text>
         </View>
         <FlatList
           data={playlist.files}
@@ -1618,10 +1722,10 @@ export default function App() {
         </View>
       </View>
     ) : activeScreen === 'chat' ? (
-      <View style={styles.panel}>
+      <View style={[styles.panel, { backgroundColor: theme.panel, borderColor: theme.line }]}>
         <View style={styles.panelTitleRow}>
-          <MessageCircle color="#7fd2ff" size={18} />
-          <Text style={styles.panelTitle}>Chat</Text>
+          <MessageCircle color={theme.accent} size={18} />
+          <Text style={[styles.panelTitle, { color: theme.text }]} maxFontSizeMultiplier={1.4}>Chat</Text>
         </View>
         <View style={styles.statusSection}>
           <Text style={styles.label}>Status</Text>
@@ -1655,54 +1759,90 @@ export default function App() {
           data={messages}
           keyExtractor={item => item.id}
           scrollEnabled={false}
-          ListEmptyComponent={<Text style={styles.mutedText}>Messages will appear here.</Text>}
+          ListEmptyComponent={<Text style={[styles.mutedText, { color: theme.muted }]} maxFontSizeMultiplier={1.3}>Messages will appear here.</Text>}
           renderItem={({ item }) => (
-            <View style={styles.messageRow}>
-              <View style={styles.messageHeader}>
-                <Text style={item.kind === 'chat' ? styles.messageUser : styles.messageKind}>
-                  {item.kind === 'chat' ? item.username : item.kind}
-                </Text>
-                <Text style={styles.messageTime}>
-                  {formatClockTime(item.createdAt)}
-                </Text>
+            <Pressable
+              onLongPress={() => handleMessageLongPress(item)}
+              delayLongPress={500}
+            >
+              <View style={styles.messageRow}>
+                <View style={styles.messageHeader}>
+                  <Text style={item.kind === 'chat' ? styles.messageUser : styles.messageKind}>
+                    {item.kind === 'chat' ? item.username : item.kind}
+                  </Text>
+                  <Text style={styles.messageTime}>
+                    {formatClockTime(item.createdAt)}
+                  </Text>
+                </View>
+                <Text style={styles.messageText}>{item.text}</Text>
               </View>
-              <Text style={styles.messageText}>{item.text}</Text>
-            </View>
+            </Pressable>
           )}
         />
+        {/* Reply bar */}
+        {replyTo ? (
+          <View style={[styles.replyBar, { backgroundColor: darkMode ? 'rgba(127, 210, 255, 0.1)' : 'rgba(37, 99, 235, 0.08)', borderColor: theme.accent }]}>
+            <Text style={[styles.replyBarText, { color: theme.text }]} numberOfLines={1} maxFontSizeMultiplier={1.2}>
+              ↳ @{replyTo.username || 'unknown'}: {replyTo.text}
+            </Text>
+            <Pressable
+              style={styles.replyCancel}
+              onPress={() => {
+                LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                setReplyTo(null);
+              }}
+              accessibilityLabel="Cancel reply"
+              testID="cancel-reply"
+            >
+              <Text style={[styles.replyCancelText, { color: theme.muted }]} maxFontSizeMultiplier={1.2}>✕</Text>
+            </Pressable>
+          </View>
+        ) : null}
         <View style={styles.chatInputRow}>
           <TextInput
-            style={styles.chatInput}
+            style={[styles.chatInput, { color: theme.text, backgroundColor: theme.bg, borderColor: theme.line }]}
             value={chatDraft}
             onChangeText={setChatDraft}
-            placeholder="Message"
-            placeholderTextColor="#64788b"
+            placeholder={replyTo ? `Reply...` : 'Message'}
+            placeholderTextColor={theme.faint}
             editable={connected}
+            accessibilityLabel={replyTo ? 'Reply message' : 'Chat message'}
+            testID="chat-input"
+            returnKeyType="send"
+            onSubmitEditing={sendChat}
           />
-          <Pressable style={styles.sendButton} onPress={sendChat} disabled={!connected || !chatDraft.trim()}>
-            <Send color="#061015" size={18} />
+          <Pressable
+            style={[styles.sendButton, (!connected || !chatDraft.trim()) && styles.disabledButton]}
+            onPress={sendChat}
+            disabled={!connected || !chatDraft.trim()}
+            accessibilityLabel="Send message"
+            accessibilityRole="button"
+            testID="send-button"
+          >
+            <Send color={theme.ink} size={18} />
           </Pressable>
         </View>
       </View>
     ) : activeScreen === 'transfers' ? (
-      <View style={styles.panel}>
+      <View style={[styles.panel, { backgroundColor: theme.panel, borderColor: theme.line }]}>
         <View style={styles.panelTitleRow}>
-          <Download color="#7fd2ff" size={18} />
-          <Text style={styles.panelTitle}>Transfers</Text>
+          <Download color={theme.accent} size={18} />
+          <Text style={[styles.panelTitle, { color: theme.text }]} maxFontSizeMultiplier={1.4}>Transfers</Text>
         </View>
         <TransfersScreen
           transfers={transferProgress}
           stateManager={connected ? connection.stateManager : null}
+          darkMode={darkMode}
           onCancelTransfer={(transferId) => {
             setTransferProgress(prev => prev.filter(t => t.transferId !== transferId));
           }}
         />
       </View>
     ) : (
-      <View style={styles.panel}>
+      <View style={[styles.panel, { backgroundColor: theme.panel, borderColor: theme.line }]}>
         <View style={styles.panelTitleRow}>
-          <SettingsIcon color="#7fd2ff" size={18} />
-          <Text style={styles.panelTitle}>Client Options</Text>
+          <SettingsIcon color={theme.accent} size={18} />
+          <Text style={[styles.panelTitle, { color: theme.text }]} maxFontSizeMultiplier={1.4}>Client Options</Text>
         </View>
         <View style={styles.settingRow}>
           <View style={styles.settingText}>
@@ -1831,27 +1971,47 @@ export default function App() {
         behavior={Platform.select({ ios: 'padding', android: undefined })}
       >
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-          <View style={styles.header}>
+          <View style={[styles.header, { borderBottomColor: theme.line }]}>
             <View>
-              <Text style={styles.brand}>Syncplay P2P</Text>
-              <Text style={styles.screenTitle}>{getScreenTitle(activeScreen)}</Text>
-              <Text style={styles.statusText}>
-                {statusLabel(connectionState)}
-                {connected ? ` · ${roomPeers.length} peer${roomPeers.length !== 1 ? 's' : ''}` : ''}
-              </Text>
+              <Text style={styles.brand} maxFontSizeMultiplier={1.5}>Syncplay P2P</Text>
+              <Text style={[styles.screenTitle, { color: theme.accent }]} maxFontSizeMultiplier={1.5}>{getScreenTitle(activeScreen)}</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                {isConnecting ? (
+                  <ActivityIndicator size="small" color={theme.accent} style={{ marginRight: 4 }} />
+                ) : null}
+                <Text style={[styles.statusText, { color: theme.muted }]} maxFontSizeMultiplier={1.3}>
+                  {statusLabel(connectionState)}
+                  {connected ? ` · ${roomPeers.length} peer${roomPeers.length !== 1 ? 's' : ''}` : ''}
+                </Text>
+              </View>
+              {connectionError ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                  <Text style={[styles.errorText, { color: theme.error }]} maxFontSizeMultiplier={1.3}>{connectionError}</Text>
+                  <Pressable
+                    onPress={connect}
+                    style={[styles.retryButton, { backgroundColor: theme.accent }]}
+                    accessibilityLabel="Retry connection"
+                    testID="retry-button"
+                  >
+                    <Text style={[styles.retryButtonText, { color: theme.ink }]} maxFontSizeMultiplier={1.3}>Retry</Text>
+                  </Pressable>
+                </View>
+              ) : null}
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
               <Pressable
-                style={styles.darkModeToggle}
+                style={[styles.darkModeToggle, { backgroundColor: theme.panelSoft, borderColor: theme.line }]}
                 onPress={() => setShowHelp(true)}
                 accessibilityLabel="Open help"
+                testID="help-button"
               >
                 <HelpCircle color={darkMode ? '#8ea4c0' : '#4a6fa5'} size={20} />
               </Pressable>
               <Pressable
-                style={styles.darkModeToggle}
+                style={[styles.darkModeToggle, { backgroundColor: theme.panelSoft, borderColor: theme.line }]}
                 onPress={() => setDarkMode(d => !d)}
                 accessibilityLabel={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+                testID="theme-toggle-button"
               >
                 {darkMode ? (
                   <Sun color="#f5c542" size={20} />
@@ -1865,7 +2025,7 @@ export default function App() {
 
           {screenContent}
         </ScrollView>
-        <BottomTabs activeScreen={activeScreen} onSelect={setActiveScreen} connected={connected} />
+        <BottomTabs activeScreen={activeScreen} onSelect={setActiveScreen} connected={connected} theme={theme} />
       </KeyboardAvoidingView>
     </SafeAreaView>
       <Modal
@@ -1982,28 +2142,43 @@ function SummaryItem({ label, value }: { label: string; value: string }) {
 function BottomTabs({
   activeScreen,
   connected,
-  onSelect
+  onSelect,
+  theme
 }: {
   activeScreen: AppScreenId;
   connected: boolean;
   onSelect: (screen: AppScreenId) => void;
+  theme: typeof colors;
 }) {
   // Transfers tab is now active — see TransfersScreen
   const screens = APP_SCREENS;
   return (
-    <View style={styles.bottomTabs}>
+    <View style={[styles.bottomTabs, { backgroundColor: theme.bg, borderTopColor: theme.line }]}>
       {screens.map(screen => {
         const active = activeScreen === screen.id;
         const disabled = !connected && screen.id !== 'connect';
         return (
           <Pressable
             key={screen.id}
-            style={[styles.tabButton, active && styles.tabButtonActive, disabled && styles.disabledButton]}
+            style={[
+              styles.tabButton,
+              { backgroundColor: active ? theme.accent : theme.panel, borderColor: active ? theme.accent : theme.line },
+              disabled && styles.disabledButton
+            ]}
             onPress={() => onSelect(screen.id)}
             disabled={disabled}
+            accessibilityLabel={`${screen.title} tab${active ? ', active' : ''}${disabled ? ', disabled' : ''}`}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: active, disabled }}
+            testID={`tab-${screen.id}`}
           >
-            {renderTabIcon(screen.id, active ? colors.ink : colors.muted)}
-            <Text style={[styles.tabText, active && styles.tabTextActive]}>{screen.title}</Text>
+            {renderTabIcon(screen.id, active ? theme.ink : theme.muted)}
+            <Text
+              style={[styles.tabText, { color: active ? theme.ink : theme.muted }]}
+              maxFontSizeMultiplier={1.3}
+            >
+              {screen.title}
+            </Text>
           </Pressable>
         );
       })}
@@ -2038,6 +2213,24 @@ const colors = {
   ink: '#061015',
   error: '#ff8a80'
 };
+
+const lightColors: typeof colors = {
+  bg: '#f0f2f5',
+  panel: '#ffffff',
+  panelSoft: '#e8ecf0',
+  line: '#d0d5dd',
+  text: '#1a1a2e',
+  muted: '#5a6070',
+  faint: '#8890a0',
+  accent: '#2563eb',
+  green: '#16a34a',
+  ink: '#ffffff',
+  error: '#dc2626'
+};
+
+function getThemeColors(darkMode: boolean) {
+  return darkMode ? colors : lightColors;
+}
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.bg },
@@ -2211,6 +2404,18 @@ const styles = StyleSheet.create({
   messageTime: { color: colors.faint, fontSize: 11 },
   messageText: { color: colors.text, fontSize: 14, marginTop: 2 },
   chatInputRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  replyBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(127, 210, 255, 0.1)',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginBottom: 4,
+  },
+  replyBarText: { flex: 1, color: colors.text, fontSize: 12 },
+  replyCancel: { padding: 4 },
+  replyCancelText: { color: colors.muted, fontSize: 14, fontWeight: 'bold' },
   chatInput: {
     flex: 1, minHeight: 44, borderRadius: 8, paddingHorizontal: 12,
     color: colors.text, backgroundColor: colors.bg,
@@ -2224,6 +2429,17 @@ const styles = StyleSheet.create({
   smallText: { color: colors.muted, fontSize: 12, marginTop: 3 },
   mutedText: { color: colors.muted, fontSize: 13, paddingVertical: 8 },
   errorText: { color: colors.error, fontSize: 13 },
+  retryButton: {
+    minHeight: 32,
+    borderRadius: 6,
+    paddingHorizontal: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  retryButtonText: {
+    fontSize: 13,
+    fontWeight: '800',
+  },
   // Help modal
   helpOverlay: {
     flex: 1,

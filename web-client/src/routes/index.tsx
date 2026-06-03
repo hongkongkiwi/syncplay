@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router';
 import {
+  AlertTriangle,
   Check,
   Circle,
   Crown,
@@ -25,9 +26,11 @@ import {
   Unplug,
   Upload,
   UsersRound,
+  Wifi,
+  WifiOff,
   X,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, Component } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, Component } from 'react';
 import { SyncplayP2PConnection } from '~/syncplay/connectionV2';
 import type { SyncEvent } from 'syncplay-p2p-client';
 import type { ConnectionConfig } from '~/syncplay/connectionV2';
@@ -166,12 +169,18 @@ function WebClient() {
 
   // Dark mode
   const [darkMode, setDarkMode] = useState(() => {
-    // Default dark; check localStorage override
+    // Check localStorage first, then OS preference, default to dark
     const saved = localStorage.getItem('syncplay-web-theme');
-    return saved !== null ? saved !== 'light' : true;
+    if (saved === 'dark') return true;
+    if (saved === 'light') return false;
+    // Check OS preference
+    if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: light)').matches) return false;
+    return true; // default dark
   });
 
   useEffect(() => {
+    // Always set override to prevent CSS media query from conflicting with JS state
+    document.documentElement.classList.add('light-mode-override');
     if (darkMode) {
       document.documentElement.classList.remove('light-mode');
     } else {
@@ -179,6 +188,17 @@ function WebClient() {
     }
     localStorage.setItem('syncplay-web-theme', darkMode ? 'dark' : 'light');
   }, [darkMode]);
+
+  // Listen for OS color scheme changes when user hasn't set manual override
+  useEffect(() => {
+    const saved = localStorage.getItem('syncplay-web-theme');
+    if (saved !== null) return; // User has manual preference, don't auto-switch
+
+    const mq = window.matchMedia('(prefers-color-scheme: light)');
+    const handler = (e: MediaQueryListEvent) => setDarkMode(!e.matches);
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
 
   // Form & UI
   const [form, setForm] = useState(loadForm);
@@ -191,8 +211,17 @@ function WebClient() {
   const [showPlaylistPanel, setShowPlaylistPanel] = useState(false);
   const [unreadChat, setUnreadChat] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
-  const [showHelp, setShowHelp] = useState(false);
+  // Voice
   const [voiceMuted, setVoiceMuted] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  // ── Contextual chat UI state ──
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; messageId: string; message: ChatMessage } | null>(null);
+  const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
+  const [emojiPicker, setEmojiPicker] = useState<{ messageId: string; rect: DOMRect } | null>(null);
+  const chatLogRef = useRef<HTMLDivElement | null>(null);
 
   // Refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -528,14 +557,18 @@ function WebClient() {
 
   useEffect(() => {
     if (connectionStatus !== 'error' && connectionStatus !== 'disconnected') {
+      setIsReconnecting(false);
       return;
     }
     if (!lastConnectionConfigRef.current || manualDisconnectRef.current) {
+      setIsReconnecting(false);
       return;
     }
     if (reconnectTimerRef.current) {
       return;
     }
+
+    setIsReconnecting(true);
 
     reconnectTimerRef.current = window.setTimeout(() => {
       reconnectTimerRef.current = null;
@@ -553,6 +586,13 @@ function WebClient() {
     };
   }, [connection, connectionStatus]);
 
+  const retryConnect = () => {
+    const config = lastConnectionConfigRef.current;
+    if (!config) return;
+    manualDisconnectRef.current = false;
+    connection.connect(config);
+  };
+
   // ── VoiceChat ────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -569,9 +609,18 @@ function WebClient() {
   // Auto-start voice capture when connected and not muted
   useEffect(() => {
     if (connectionStatus === 'connected' && !voiceMuted) {
-      voiceChatRef.current?.startCapture().catch(() => {});
+      voiceChatRef.current?.startCapture().catch((err: Error) => {
+        setVoiceError(err?.message || 'Microphone access denied. Please allow microphone permissions.');
+      });
     }
   }, [connectionStatus, voiceMuted]);
+
+  // Set isLoading to false after initial mount
+  useEffect(() => {
+    // Small delay to ensure DOM is ready and CSS transitions complete
+    const timer = setTimeout(() => setIsLoading(false), 300);
+    return () => clearTimeout(timer);
+  }, []);
 
   // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -671,11 +720,98 @@ function WebClient() {
     // Expand emojis before sending
     const expanded = expandEmojis(text);
 
-    // Add message locally BEFORE sending (so sender sees their own message)
-    addChatMessage(currentUsername, expanded);
-    connection.sendChat(expanded);
+    // If replying, send as reply
+    if (replyTo) {
+      addChatMessage(currentUsername, expanded);
+      const msgId = replyTo.id;
+      const origAuthor = replyTo.username || 'unknown';
+      const origText = replyTo.text;
+      // Optimistic local reply display
+      addSystemMessage(`↳ replying to @${origAuthor}: ${origText.length > 40 ? origText.slice(0, 40) + '...' : origText}`);
+      connection.manager.sendChat(expanded); // Fallback: send as chat since protocol uses host relay
+      setReplyTo(null);
+    } else {
+      // Add message locally BEFORE sending (so sender sees their own message)
+      addChatMessage(currentUsername, expanded);
+      connection.sendChat(expanded);
+    }
     setChatDraft('');
   };
+
+  // ── Context menu / contextual chat actions ──
+
+  function handleMessageContextMenu(e: React.MouseEvent, message: ChatMessage) {
+    e.preventDefault();
+    setContextMenu(null); // close any existing
+    // wait a tick for coordinates with viewport edge detection
+    setTimeout(() => {
+      const menuW = 160; // approximate context menu width
+      const menuH = 80; // approximate context menu height
+      const x = Math.min(e.clientX, window.innerWidth - menuW - 8);
+      const y = Math.min(e.clientY, window.innerHeight - menuH - 8);
+      setContextMenu({ x: Math.max(8, x), y: Math.max(8, y), messageId: message.id, message });
+    }, 0);
+  }
+
+  function closeContextMenu() {
+    setContextMenu(null);
+    setEmojiPicker(null);
+  }
+
+  // Keyboard handler for context menu
+  useEffect(() => {
+    if (!contextMenu && !emojiPicker) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        closeContextMenu();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [contextMenu, emojiPicker]);
+
+  function handleContextReply() {
+    if (!contextMenu) return;
+    setReplyTo(contextMenu.message);
+    setContextMenu(null);
+    setChatDraft(''); // clear draft
+    // Focus input
+    setTimeout(() => chatInputRef.current?.focus(), 50);
+  }
+
+  function handleContextReact(message: ChatMessage, emoji: string) {
+    const expanded = expandEmojis(emoji);
+    addSystemMessage(`You reacted with ${expanded} to "${message.text.slice(0, 30)}${message.text.length > 30 ? '...' : ''}"`);
+    connection.sendChat(`reaction: ${expanded}`);
+    setContextMenu(null);
+    setEmojiPicker(null);
+  }
+
+  function handleContextRecall(message: ChatMessage) {
+    // Can only recall own messages
+    if (message.username !== currentUsername) {
+      addSystemMessage('You can only recall your own messages.');
+      setContextMenu(null);
+      return;
+    }
+    // Recall: replace message locally
+    setMessages(prev => prev.map(m => 
+      m.id === message.id ? { ...m, text: '[message recalled]', kind: 'system' } : m
+    ));
+    connection.manager.sendChat('/recall ' + message.id); // Send recall through relay
+    setContextMenu(null);
+  }
+
+  function showEmojiPicker(e: React.MouseEvent, message: ChatMessage) {
+    e.stopPropagation();
+    const rect = (e.target as HTMLElement).getBoundingClientRect();
+    const pickerTop = Math.max(rect.top - 48, 8);
+    const pickerLeft = Math.min(rect.left, window.innerWidth - 200);
+    setEmojiPicker({ messageId: message.id, rect: new DOMRect(Math.max(pickerLeft, 8), pickerTop, rect.width, rect.height) });
+    setContextMenu(null);
+  }
+
+  const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
   function addChatMessage(from: string, text: string) {
     const msg: ChatMessage = {
@@ -968,6 +1104,17 @@ function WebClient() {
 
   // ── Render ───────────────────────────────────────────────────────────
 
+  if (isLoading) {
+    return (
+      <div className="loading-skeleton" role="status" aria-label="Loading Syncplay Web">
+        <div className="skeleton-spinner">
+          <LoaderCircle className="spin" size={40} />
+          <p>Loading Syncplay Web…</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <ErrorFallback>
     <main className="client-shell">
@@ -992,6 +1139,23 @@ function WebClient() {
             </div>
           </div>
         </div>
+
+        {isReconnecting ? (
+          <div className="reconnecting-banner" role="alert" aria-live="polite">
+            <Wifi size={14} />
+            <span>Reconnecting…</span>
+          </div>
+        ) : null}
+
+        {voiceError ? (
+          <div className="reconnecting-banner" role="alert" aria-live="polite" style={{ borderColor: 'rgba(255,112,102,0.3)', background: 'rgba(255,112,102,0.12)', color: '#ffaaa4' }}>
+            <AlertTriangle size={14} />
+            <span>{voiceError}</span>
+            <button type="button" className="retry-btn" onClick={() => { setVoiceError(null); voiceChatRef.current?.startCapture().catch(() => {}); }} aria-label="Retry microphone">
+              Retry
+            </button>
+          </div>
+        ) : null}
 
         <div className="video-frame">
           {mediaUrl ? (
@@ -1023,7 +1187,7 @@ function WebClient() {
               }}
             />
           ) : (
-            <label className="empty-video">
+            <label className="empty-video" aria-label="Choose a video file to play">
               <Upload size={34} />
               <span>Choose a video file</span>
               <input
@@ -1033,6 +1197,8 @@ function WebClient() {
                 onChange={event => {
                   selectMedia(event.target.files ? Array.from(event.target.files) : null);
                 }}
+                aria-hidden="true"
+                tabIndex={-1}
               />
             </label>
           )}
@@ -1054,6 +1220,7 @@ function WebClient() {
                   type="button"
                   className="transfer-cancel-btn"
                   title="Cancel transfer"
+                  aria-label={`Cancel transfer of ${t.filename}`}
                   onClick={() => {
                     connection.manager.cancelTransfer(t.transferId);
                     setTransferProgress(prev => prev.filter(x => x.transferId !== t.transferId));
@@ -1067,7 +1234,7 @@ function WebClient() {
         ) : null}
 
         <div className="media-actions">
-          <label className="file-button">
+          <label className="file-button" aria-label="Select media file">
             <Upload size={18} />
             <span>Media</span>
             <input
@@ -1077,9 +1244,11 @@ function WebClient() {
               onChange={event => {
                 selectMedia(event.target.files ? Array.from(event.target.files) : null);
               }}
+              aria-hidden="true"
+              tabIndex={-1}
             />
           </label>
-          <button type="button" onClick={() => sendPlayback(true)} disabled={!connected || !mediaUrl}>
+          <button type="button" onClick={() => sendPlayback(true)} disabled={!connected || !mediaUrl} aria-label="Force sync playback now">
             <Radio size={18} />
             Sync now
           </button>
@@ -1087,18 +1256,19 @@ function WebClient() {
             type="button"
             onClick={() => setSyncPaused(value => !value)}
             className={syncPaused ? 'active' : ''}
+            aria-label={syncPaused ? 'Resume syncing' : 'Pause syncing'}
           >
             {syncPaused ? <Pause size={18} /> : <Play size={18} />}
             {syncPaused ? 'Syncing paused' : 'Syncing'}
           </button>
-          <span className="speed-display" title="Current playback speed">
+          <span className="speed-display" title="Current playback speed" aria-label={`Playback speed: ${playbackSpeed}x`}>
             {playbackSpeed}x
           </span>
-          <button type="button" onClick={toggleReady} disabled={!connected} className={isReady ? 'ready' : ''}>
+          <button type="button" onClick={toggleReady} disabled={!connected} className={isReady ? 'ready' : ''} aria-label={isReady ? 'Ready to play' : 'Not ready'}>
             <Check size={18} />
             {isReady ? 'Ready' : 'Not ready'}
           </button>
-          <button type="button" onClick={toggleVoiceMute} disabled={!connected} className={voiceMuted ? 'active' : ''}>
+          <button type="button" onClick={toggleVoiceMute} disabled={!connected} className={voiceMuted ? 'active' : ''} aria-label={voiceMuted ? 'Unmute microphone' : 'Mute microphone'}>
             {voiceMuted ? <MicOff size={18} /> : <Mic size={18} />}
             {voiceMuted ? 'Muted' : 'Voice'}
           </button>
@@ -1107,6 +1277,7 @@ function WebClient() {
             onClick={() => setShowPlaylistPanel(v => !v)}
             className={showPlaylistPanel ? 'active' : ''}
             disabled={!connected}
+            aria-label={showPlaylistPanel ? 'Hide playlist' : 'Show playlist'}
           >
             <PlaySquare size={18} />
             Playlist
@@ -1167,16 +1338,23 @@ function WebClient() {
             <span title="Server Forwarding Unit — routes all traffic through the server. Use for large rooms (5+ peers).">SFU Mode (large rooms)</span>
           </label>
           <div className="button-row">
-            <button type="submit" disabled={connecting}>
+            <button type="submit" disabled={connecting} aria-label="Connect to room">
               {connecting ? <LoaderCircle className="spin" size={18} /> : <Link2 size={18} />}
               Connect
             </button>
-            <button type="button" onClick={disconnect} disabled={!connected && !connecting}>
+            <button type="button" onClick={disconnect} disabled={!connected && !connecting} aria-label="Disconnect from room">
               <Unplug size={18} />
               Disconnect
             </button>
           </div>
-          {connectionError ? <p className="error-line">{connectionError}</p> : null}
+          {connectionError ? (
+            <div className="connection-error-row">
+              <p className="error-line">{connectionError}</p>
+              <button type="button" className="retry-btn" onClick={retryConnect} aria-label="Retry connection">
+                <Wifi size={14} /> Retry
+              </button>
+            </div>
+          ) : null}
         </form>
 
         {latencyWarningsRef.current.length > 0 ? (
@@ -1239,6 +1417,7 @@ function WebClient() {
                       type="button"
                       className="inline-action-btn"
                       title={user.isController ? 'Remove controller' : 'Make controller'}
+                      aria-label={user.isController ? `Remove ${user.username} as controller` : `Make ${user.username} a controller`}
                       onClick={() => user.isController ? connection.removeController(user.username) : connection.addController(user.username)}
                     >
                       {user.isController ? <X size={14} /> : <Crown size={14} />}
@@ -1272,7 +1451,16 @@ function WebClient() {
                   <div
                     key={`${file}-${index}`}
                     className={`playlist-item ${index === playlist.index ? 'active' : ''}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Playlist item ${index + 1}: ${file}${index === playlist.index ? ' (now playing)' : ''}`}
                     onClick={() => playlistPlay(index)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        playlistPlay(index);
+                      }
+                    }}
                   >
                     <span className="playlist-index">{index + 1}</span>
                     <span className="playlist-name">{file}</span>
@@ -1286,6 +1474,7 @@ function WebClient() {
                 onClick={playlistAddCurrent}
                 disabled={!selectedFile}
                 title="Add current media"
+                aria-label="Add current media to playlist"
               >
                 <Plus size={14} /> Current
               </button>
@@ -1293,6 +1482,7 @@ function WebClient() {
                 <input
                   value={newPlaylistUrl}
                   placeholder="Media URL or name..."
+                  aria-label="Add media URL to playlist"
                   onChange={e => setNewPlaylistUrl(e.target.value)}
                   onKeyDown={e => {
                     if (e.key === 'Enter') {
@@ -1306,6 +1496,7 @@ function WebClient() {
                   onClick={playlistAddUrl}
                   disabled={!newPlaylistUrl.trim()}
                   title="Add URL"
+                  aria-label="Add URL to playlist"
                 >
                   <Plus size={14} />
                 </button>
@@ -1314,6 +1505,7 @@ function WebClient() {
                 type="button"
                 onClick={playlistShuffle}
                 title="Shuffle"
+                aria-label="Shuffle playlist"
                 disabled={playlist.files.length === 0}
               >
                 <Shuffle size={14} />
@@ -1322,6 +1514,7 @@ function WebClient() {
                 type="button"
                 onClick={playlistClear}
                 title="Clear"
+                aria-label="Clear playlist"
                 disabled={playlist.files.length === 0}
               >
                 <Trash2 size={14} />
@@ -1330,16 +1523,20 @@ function WebClient() {
           </section>
         ) : null}
 
-        <section className="chat-card">
+        <section className="chat-card" aria-label="Chat">
           <div className="card-title">
             <MessageSquare size={20} />
             <h2>Chat</h2>
-            {unreadChat ? <span className="unread-dot" /> : null}
+            {unreadChat ? <span className="unread-dot" aria-label="Unread messages" /> : null}
           </div>
           <div
             className="chat-log"
+            role="log"
+            aria-live="polite"
+            aria-label="Chat messages"
             ref={el => {
               if (el) {
+                chatLogRef.current = el;
                 el.scrollTop = el.scrollHeight;
               }
             }}
@@ -1348,7 +1545,20 @@ function WebClient() {
               <p className="muted">Server messages and room chat will show here.</p>
             ) : (
               messages.map(message => (
-                <p key={message.id} className={`message ${message.kind}`}>
+                <p
+                  key={message.id}
+                  className={`message ${message.kind}`}
+                  tabIndex={0}
+                  role="article"
+                  aria-label={`${message.username ? `From ${message.username}: ` : ''}${message.text} at ${formatTime(message.createdAt)}`}
+                  onContextMenu={(e) => handleMessageContextMenu(e, message)}
+                  onKeyDown={(e) => {
+                    if ((e.key === 'Enter' || e.key === ' ') && e.shiftKey) {
+                      e.preventDefault();
+                      handleMessageContextMenu(e as unknown as React.MouseEvent, message);
+                    }
+                  }}
+                >
                   <span className="msg-time">{formatTime(message.createdAt)}</span>
                   {message.username ? <strong>{message.username}</strong> : null}
                   <span>{message.text}</span>
@@ -1356,19 +1566,32 @@ function WebClient() {
               ))
             )}
           </div>
+          {/* Reply bar */}
+          {replyTo ? (
+            <div className="reply-bar" role="status" aria-label="Replying to a message">
+              <span className="reply-quote">
+                ↳ @{replyTo.username || 'unknown'}: {replyTo.text.length > 50 ? replyTo.text.slice(0, 50) + '...' : replyTo.text}
+              </span>
+              <button type="button" className="reply-cancel" onClick={() => setReplyTo(null)} title="Cancel reply" aria-label="Cancel reply">
+                <X size={14} />
+              </button>
+            </div>
+          ) : null}
           <form className="chat-form" onSubmit={sendChat}>
-            <div className="emoji-bar">
+            <div className="emoji-bar" role="toolbar" aria-label="Quick emoji insert">
               {['😊','😂','❤️','👍','🔥','👏','🎉','💀','🚀','🍿'].map(emoji => (
                 <button key={emoji} type="button" className="emoji-btn"
                   onClick={() => setChatDraft(d => d + emoji)}
-                  title={`Insert ${emoji}`}>{emoji}</button>
+                  title={`Insert ${emoji}`}
+                  aria-label={`Insert emoji ${emoji}`}>{emoji}</button>
               ))}
             </div>
             <div className="chat-input-row">
             <input
               ref={chatInputRef}
               value={chatDraft}
-              placeholder={connected ? 'Message the room' : 'Use /help for commands'}
+              aria-label={replyTo ? `Reply to ${replyTo.username || 'unknown'}` : 'Chat message input'}
+              placeholder={replyTo ? `Reply to @${replyTo.username || 'unknown'}...` : connected ? 'Message the room' : 'Use /help for commands'}
               onFocus={() => {
                 chatFocusedRef.current = true;
                 setUnreadChat(false);
@@ -1383,16 +1606,73 @@ function WebClient() {
             </button>
             </div>
           </form>
+          {/* Emoji picker popover */}
+          {emojiPicker ? (
+            <>
+              <div className="emoji-picker-backdrop" onClick={() => setEmojiPicker(null)} />
+              <div
+                className="emoji-picker"
+                style={{
+                  position: 'fixed',
+                  left: emojiPicker.rect.left,
+                  top: emojiPicker.rect.top - 44,
+                }}
+              >
+                {REACTION_EMOJIS.map(emoji => (
+                  <button
+                    key={emoji}
+                    type="button"
+                    className="emoji-picker-btn"
+                    onClick={() => {
+                      const msg = messages.find(m => m.id === emojiPicker?.messageId);
+                      if (msg) handleContextReact(msg, emoji);
+                    }}
+                    title={emoji}
+                    aria-label={`React with ${emoji}`}
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : null}
         </section>
+
+        {/* Right-click context menu */}
+        {contextMenu ? (
+          <>
+            <div className="context-menu-backdrop" onClick={closeContextMenu} aria-hidden="true" />
+            <div
+              className="context-menu"
+              role="menu"
+              aria-label="Message actions"
+              style={{ position: 'fixed', left: contextMenu.x, top: contextMenu.y }}
+            >
+              <button type="button" role="menuitem" onClick={handleContextReply} aria-label="Reply to message">
+                <Send size={14} className="rotate-180" /> Reply
+              </button>
+              <button type="button" role="menuitem" onClick={(e) => {
+                showEmojiPicker(e, contextMenu.message);
+              }} aria-label="React to message">
+                <Smile size={14} /> React
+              </button>
+              {contextMenu.message.username === currentUsername ? (
+                <button type="button" role="menuitem" onClick={() => handleContextRecall(contextMenu.message)} aria-label="Recall message">
+                  <Trash2 size={14} /> Recall
+                </button>
+              ) : null}
+            </div>
+          </>
+        ) : null}
       </aside>
 
       {/* Help overlay */}
       {showHelp ? (
-        <div className="help-overlay" onClick={() => setShowHelp(false)}>
-          <div className="help-panel" onClick={e => e.stopPropagation()}>
+        <div className="help-overlay" onClick={() => setShowHelp(false)} role="dialog" aria-label="Keyboard shortcuts help" aria-modal="true">
+          <div className="help-panel" onClick={e => e.stopPropagation()} role="document">
             <div className="card-title">
               <h2>Keyboard Shortcuts</h2>
-              <button type="button" onClick={() => setShowHelp(false)} className="help-close">
+              <button type="button" onClick={() => setShowHelp(false)} className="help-close" aria-label="Close help">
                 &times;
               </button>
             </div>
@@ -1442,11 +1722,11 @@ function WebClient() {
 
 // ── StatusPill ─────────────────────────────────────────────────────────
 
-function StatusPill({ status }: { status: string }) {
+const StatusPill = memo(function StatusPill({ status }: { status: string }) {
   return (
-    <div className={`status-pill ${status}`}>
+    <div className={`status-pill ${status}`} aria-live="polite" role="status">
       <span />
       {status}
     </div>
   );
-}
+});

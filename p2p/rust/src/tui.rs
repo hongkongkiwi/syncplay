@@ -112,6 +112,12 @@ pub struct UiState {
     pub latency_warnings: Vec<String>,
     pub help_expanded: bool,
     pub has_turn: bool,
+    // ── Message focus mode ──
+    pub chat_focused: bool,
+    pub selected_message: usize, // index from bottom (0 = last message)
+    pub reacting: bool,
+    pub reaction_emoji: usize,        // cycle index through emoji list
+    pub reply_quoted: Option<String>, // stores "author: text" for reply input
 }
 
 impl Default for UiState {
@@ -144,6 +150,11 @@ impl Default for UiState {
             latency_warnings: vec![],
             help_expanded: false,
             has_turn: false,
+            chat_focused: false,
+            selected_message: 0,
+            reacting: false,
+            reaction_emoji: 0,
+            reply_quoted: None,
         }
     }
 }
@@ -287,19 +298,210 @@ async fn handle_input(
     mic_muted: &Option<Arc<AtomicBool>>,
     ft: &FileTransfer,
 ) -> bool {
+    const REACTION_EMOJIS: &[&str] = &["👍", "❤️", "😂", "😮", "😢", "🙏"];
+
     match ev {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
             let mut s = state.lock();
+
+            // ── Escape / quit handling ──
+            if key.code == KeyCode::Esc {
+                if s.reacting {
+                    s.reacting = false;
+                    return false;
+                }
+                if s.chat_focused {
+                    s.chat_focused = false;
+                    s.selected_message = 0;
+                    return false;
+                }
+                // Esc with empty input → quit
+                if s.input.is_empty() {
+                    drop(s);
+                    sync.get_connection().disconnect().await;
+                    return true;
+                }
+                s.input.clear();
+                s.input_cursor = 0;
+                s.reply_quoted = None;
+                return false;
+            }
+
+            // ── Tab: toggle chat focus mode ──
+            if key.code == KeyCode::Tab {
+                if !s.chat_focused && !s.chat.is_empty() {
+                    s.chat_focused = true;
+                    s.selected_message = 0; // last message
+                } else if s.chat_focused {
+                    s.chat_focused = false;
+                    s.selected_message = 0;
+                }
+                return false;
+            }
+
+            // ── Chat-focused mode keys ──
+            if s.chat_focused {
+                match key.code {
+                    KeyCode::Up => {
+                        let max_idx = s.chat.len().saturating_sub(1);
+                        s.selected_message = (s.selected_message + 1).min(max_idx);
+                        // Adjust scroll to keep selected visible
+                        s.chat_scroll = 0; // reset scroll, always show bottom
+                    }
+                    KeyCode::Down => {
+                        s.selected_message = s.selected_message.saturating_sub(1);
+                        s.chat_scroll = 0;
+                    }
+                    KeyCode::Char('r') => {
+                        // Reply to selected message
+                        let idx = s.chat.len().saturating_sub(1 + s.selected_message);
+                        let reply_data = s.chat.get(idx).map(|msg| {
+                            let author = msg
+                                .split(" <")
+                                .nth(1)
+                                .and_then(|part| part.split('>').next())
+                                .unwrap_or("unknown")
+                                .to_string();
+                            let text = msg.split("> ").nth(1).unwrap_or(msg).to_string();
+                            let preview = if text.len() > 60 {
+                                format!("{}...", &text[..60])
+                            } else {
+                                text
+                            };
+                            (author, preview)
+                        });
+                        if let Some((author, preview)) = reply_data {
+                            s.input.clear();
+                            s.input_cursor = 0;
+                            s.reply_quoted = Some(format!("@{author}: {preview}"));
+                            s.chat_focused = false;
+                        }
+                    }
+                    KeyCode::Char('e') => {
+                        // Start emoji react cycle mode
+                        let idx = s.chat.len().saturating_sub(1 + s.selected_message);
+                        if s.chat.get(idx).is_some() {
+                            if !s.reacting {
+                                s.reacting = true;
+                                s.reaction_emoji = 0;
+                                // Show preview in chat
+                                let preview_line = format!(
+                                    "--- React: {} (↑↓ to pick, Enter to confirm, Esc to cancel)",
+                                    REACTION_EMOJIS[0]
+                                );
+                                s.chat.push(preview_line);
+                                if s.chat.len() > 500 {
+                                    s.chat.remove(0);
+                                }
+                            } else {
+                                // Cycle emoji
+                                s.reaction_emoji = (s.reaction_emoji + 1) % REACTION_EMOJIS.len();
+                                // Update preview
+                                let preview_line = format!(
+                                    "--- React: {} (↑↓ to pick, Enter to confirm, Esc to cancel)",
+                                    REACTION_EMOJIS[s.reaction_emoji]
+                                );
+                                if let Some(last) = s.chat.last_mut() {
+                                    if last.starts_with("--- React:") {
+                                        *last = preview_line;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('d') => {
+                        // Delete/recall own message
+                        let idx = s.chat.len().saturating_sub(1 + s.selected_message);
+                        let username = sync.get_connection().uname();
+                        let can_recall = s
+                            .chat
+                            .get(idx)
+                            .map(|msg| {
+                                msg.contains(&format!("<{username}>")) || msg.contains("<you>")
+                            })
+                            .unwrap_or(false);
+                        if can_recall {
+                            let msg_id = format!("msg-{}-{}", s.selected_message, crate::now_ms());
+                            if let Some(msg) = s.chat.get_mut(idx) {
+                                let ts_part = msg
+                                    .split(']')
+                                    .next()
+                                    .map(|t| format!("{t}]"))
+                                    .unwrap_or_default();
+                                *msg = format!("{ts_part} [message recalled]");
+                            }
+                            drop(s);
+                            sync.send_message_recall(&msg_id).await;
+                        } else {
+                            let note =
+                                "--- Can only recall your own messages (< 2 min old)".to_string();
+                            s.chat.push(note);
+                            if s.chat.len() > 500 {
+                                s.chat.remove(0);
+                            }
+                        }
+                    }
+                    KeyCode::Enter if s.reacting => {
+                        // Confirm reaction
+                        let emoji = REACTION_EMOJIS[s.reaction_emoji];
+                        let idx = s.chat.len().saturating_sub(1 + s.selected_message);
+                        if let Some(msg) = s.chat.get(idx) {
+                            let preview = if msg.len() > 30 {
+                                format!("{}...", &msg[..30])
+                            } else {
+                                msg.clone()
+                            };
+                            let msg_id = format!("msg-{}-{}", s.selected_message, crate::now_ms());
+                            s.chat.push(format!(
+                                "{:>12} reacted with {emoji} to \"{preview}\"",
+                                "you"
+                            ));
+                            if s.chat.len() > 500 {
+                                s.chat.remove(0);
+                            }
+                            // Remove the React: preview line
+                            s.chat.retain(|line| !line.starts_with("--- React:"));
+                            s.reacting = false;
+                            s.chat_focused = false;
+                            drop(s);
+                            sync.send_message_reaction(&msg_id, emoji).await;
+                        }
+                    }
+                    // ── Allow quit / help / chat toggle while focused ──
+                    KeyCode::Char('q') => {
+                        // Quit from focus mode
+                        s.chat_focused = false;
+                        s.selected_message = 0;
+                        s.reacting = false;
+                        s.chat.retain(|line| !line.starts_with("--- React:"));
+                        if s.input.is_empty() {
+                            drop(s);
+                            sync.get_connection().disconnect().await;
+                            return true;
+                        }
+                        s.input.clear();
+                        s.input_cursor = 0;
+                        s.reply_quoted = None;
+                    }
+                    KeyCode::Char('?') => {
+                        s.help_expanded = !s.help_expanded;
+                    }
+                    _ => {}
+                }
+                return false;
+            }
+
+            // ── Normal mode keys ──
             match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => {
+                KeyCode::Char('q') => {
                     if s.input.is_empty() {
                         drop(s);
-                        // Graceful quit: notify peers before disconnecting
                         sync.get_connection().disconnect().await;
                         return true;
                     }
                     s.input.clear();
                     s.input_cursor = 0;
+                    s.reply_quoted = None;
                 }
                 KeyCode::Char('?') => {
                     s.help_expanded = !s.help_expanded;
@@ -399,12 +601,36 @@ async fn handle_input(
                     if !msg.is_empty() && s.connected {
                         s.input_history.push(msg.clone());
                         s.input_history_idx = s.input_history.len();
+                        let reply_quoted = s.reply_quoted.take();
                         s.input.clear();
                         s.input_cursor = 0;
                         let is_cmd = msg.starts_with('/');
                         drop(s);
                         if is_cmd {
                             handle_command(&msg, state, sync, ft).await;
+                        } else if let Some(ref quoted) = reply_quoted {
+                            // Send as a reply
+                            let expanded = expand_emojis(&msg);
+                            let (author, prev_text) = quoted
+                                .strip_prefix('@')
+                                .and_then(|q| q.split_once(": "))
+                                .map(|(a, t)| (a.to_string(), t.to_string()))
+                                .unwrap_or_else(|| ("unknown".to_string(), quoted.clone()));
+                            let msg_id = format!("msg-{}-{}", 0, crate::now_ms());
+                            {
+                                let mut s2 = state.lock();
+                                s2.chat
+                                    .push(format!("↳ replying to @{author}: {prev_text}"));
+                                s2.chat.push(format!("    {expanded}"));
+                                if s2.chat.len() > 500 {
+                                    s2.chat.remove(0);
+                                    if s2.chat.len() > 500 {
+                                        s2.chat.remove(0);
+                                    }
+                                }
+                            }
+                            sync.send_message_reply(&msg_id, &prev_text, &author, &expanded)
+                                .await;
                         } else {
                             let expanded = expand_emojis(&msg);
                             sync.send_chat(&expanded).await;
@@ -454,13 +680,6 @@ async fn handle_input(
                         s.input_cursor = pos + 1;
                     }
                 }
-                KeyCode::Tab => {
-                    s.chat
-                        .push("--- Voice requires --voice flag at startup".to_string());
-                    if s.chat.len() > 500 {
-                        s.chat.remove(0);
-                    }
-                }
                 _ => {}
             }
         }
@@ -477,7 +696,7 @@ fn draw(f: &mut Frame, state: &UiState) {
         f.area(),
     );
     let area = f.area();
-    let help_h = if state.help_expanded { 9 } else { 1 };
+    let help_h = if state.help_expanded { 17 } else { 1 };
 
     // Adaptive: if terminal is very narrow (< 100 cols), stack instead of side-by-side
     let use_wide = area.width >= 100;
@@ -549,12 +768,20 @@ fn draw_status(f: &mut Frame, area: Rect, state: &UiState) {
                 " ◐ CONNECTING...",
                 Style::default().fg(theme::WARN),
             ));
+            if state.has_turn {
+                spans.push(Span::styled("  ", Style::default().fg(theme::DIM)));
+                spans.push(Span::styled("⟳ TURN", Style::default().fg(theme::SEEK)));
+            }
         }
         ConnectionState::ConnectingPeers { peer_count } => {
             spans.push(Span::styled(
                 format!(" ◐ JOINING ({peer_count})..."),
                 Style::default().fg(theme::WARN),
             ));
+            if state.has_turn {
+                spans.push(Span::styled("  ", Style::default().fg(theme::DIM)));
+                spans.push(Span::styled("⟳ TURN", Style::default().fg(theme::SEEK)));
+            }
         }
         ConnectionState::Ready { peer_count } => {
             spans.push(Span::styled(
@@ -787,7 +1014,12 @@ fn draw_playlist(f: &mut Frame, area: Rect, state: &UiState) {
 }
 
 fn draw_chat(f: &mut Frame, area: Rect, state: &UiState) {
-    let block = theme::border("Chat");
+    let title = if state.chat_focused {
+        "Chat [FOCUSED]"
+    } else {
+        "Chat"
+    };
+    let block = theme::border(title);
     let inner = block.inner(area);
     let total = state.chat.len();
     let visible = CHAT_VISIBLE.min(inner.height as usize);
@@ -796,26 +1028,33 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState) {
     } else {
         total.saturating_sub(visible)
     };
+    // Compute which line in the visible range is selected
+    let selected_idx = total.saturating_sub(1 + state.selected_message);
     let messages: Vec<Line> = state
         .chat
         .iter()
+        .enumerate()
         .skip(start)
         .take(visible)
-        .map(|msg| {
-            if msg.starts_with("<you>") {
-                Line::from(Span::styled(
-                    msg,
-                    Style::default()
-                        .fg(theme::ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                ))
+        .map(|(i, msg)| {
+            let is_selected = state.chat_focused && i == selected_idx;
+            let base_style = if is_selected {
+                Style::default()
+                    .fg(theme::BG)
+                    .bg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD)
+            } else if msg.starts_with("<you>") {
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD)
             } else if msg.starts_with("---") || msg.starts_with("===") {
-                Line::from(Span::styled(msg, Style::default().fg(theme::DIM)))
+                Style::default().fg(theme::DIM)
             } else if msg.contains("latency") {
-                Line::from(Span::styled(msg, Style::default().fg(theme::WARN)))
+                Style::default().fg(theme::WARN)
             } else {
-                Line::from(Span::styled(msg, Style::default().fg(theme::TEXT)))
-            }
+                Style::default().fg(theme::TEXT)
+            };
+            Line::from(Span::styled(msg, base_style))
         })
         .collect();
     f.render_widget(
@@ -888,11 +1127,16 @@ fn draw_help(f: &mut Frame, area: Rect, state: &UiState) {
             Line::from(""),
             Line::from(vec![Span::styled(" q/Esc  ", Style::default().fg(theme::DIM)), Span::raw("quit                 "), Span::styled(" ?      ", Style::default().fg(theme::DIM)), Span::raw("toggle help")]),
             Line::from(vec![Span::styled(" space  ", Style::default().fg(theme::DIM)), Span::raw("toggle ready         "), Span::styled(" p      ", Style::default().fg(theme::DIM)), Span::raw("pause/play")]),
-            Line::from(vec![Span::styled(" s/a    ", Style::default().fg(theme::DIM)), Span::raw("seek ±10s           "), Span::styled(" m      ", Style::default().fg(theme::DIM)), Span::raw("mute mic")]),
+            Line::from(vec![Span::styled(" s/a    ", Style::default().fg(theme::DIM)), Span::raw("seek ±10s           "), Span::styled(" m      ", Style::default().fg(theme::DIM)), Span::raw("toggle voice mute")]),
             Line::from(vec![Span::styled(" ↑↓PgUp ", Style::default().fg(theme::DIM)), Span::raw("scroll chat         "), Span::styled(" j/k    ", Style::default().fg(theme::DIM)), Span::raw("scroll playlist")]),
-            Line::from(vec![Span::styled(" Enter  ", Style::default().fg(theme::DIM)), Span::raw("send chat           "), Span::styled(" Tab    ", Style::default().fg(theme::DIM)), Span::raw("voice info")]),
+            Line::from(vec![Span::styled(" Enter  ", Style::default().fg(theme::DIM)), Span::raw("send chat           "), Span::styled(" Tab    ", Style::default().fg(theme::DIM)), Span::raw("focus chat messages")]),
             Line::from(vec![Span::styled(" <      ", Style::default().fg(theme::DIM)), Span::raw("speed 0.5x          "), Span::styled(" >      ", Style::default().fg(theme::DIM)), Span::raw("speed 2x")]),
-            Line::from(vec![Span::styled(" /      ", Style::default().fg(theme::DIM)), Span::raw("speed 1x (reset)    "), Span::styled("        ", Style::default().fg(theme::DIM)), Span::raw("")]),
+            Line::from(vec![Span::styled(" /      ", Style::default().fg(theme::DIM)), Span::raw("speed 1x (reset)    "), Span::styled(" Home   ", Style::default().fg(theme::DIM)), Span::raw("cursor to start")]),
+            Line::from(vec![Span::styled(" End    ", Style::default().fg(theme::DIM)), Span::raw("cursor to end       "), Span::styled(" Bksp   ", Style::default().fg(theme::DIM)), Span::raw("delete char before")]),
+            Line::from(vec![Span::styled(" Del    ", Style::default().fg(theme::DIM)), Span::raw("delete char after   "), Span::styled(" ←→    ", Style::default().fg(theme::DIM)), Span::raw("move cursor")]),
+            Line::from(Span::styled("CHAT FOCUS MODE (Tab to enter/exit)", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))),
+            Line::from(vec![Span::styled(" r/e/d  ", Style::default().fg(theme::DIM)), Span::raw("reply/emoji/recall  "), Span::styled(" ↑↓    ", Style::default().fg(theme::DIM)), Span::raw("select message")]),
+            Line::from(vec![Span::styled(" Enter  ", Style::default().fg(theme::DIM)), Span::raw("confirm reaction    "), Span::styled(" Esc    ", Style::default().fg(theme::DIM)), Span::raw("back to chat")]),
             Line::from(Span::styled("COMMANDS", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))),
             Line::from(Span::styled(" /send <file>  /playlist add/remove/index/clear/shuffle  /users  /nick <name>  /ready  /controller add/remove <name>  /cancel", Style::default().fg(theme::DIM))),
             Line::from(Span::styled(" /react <n> :emoji:  /reply <n> <text>  /recall <n>  /shrug  /tableflip  /lenny  /file <path>  /help  /settings", Style::default().fg(theme::DIM))),
@@ -906,8 +1150,17 @@ fn draw_help(f: &mut Frame, area: Rect, state: &UiState) {
             ),
             area,
         );
+    } else if state.chat_focused {
+        let help = Span::styled(
+            "[Tab] focus chat  [r]eply  [e]moji react  [d]elete  [↑↓] scroll  [Esc] back",
+            Style::default().fg(theme::ACCENT),
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(help)).style(Style::default().bg(theme::SURFACE)),
+            area,
+        );
     } else {
-        let help = Span::styled(" q:quit ?:help space:ready p:pause s:+10s a:-10s <:0.5x >:2x /:1x m:mute enter:chat  /help for commands", Style::default().fg(theme::DIM));
+        let help = Span::styled(" q:quit ?:help space:ready p:pause s:+10s a:-10s <:0.5x >:2x /:1x m:mute enter:chat tab:focus chat  /help for commands", Style::default().fg(theme::DIM));
         f.render_widget(
             Paragraph::new(Line::from(help)).style(Style::default().bg(theme::SURFACE)),
             area,
