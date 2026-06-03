@@ -1,0 +1,35 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicegui-dev/tauri-v2-schema/refs/heads/main/tauri.conf.schema.json",
+  "productName": "Syncplay",
+  "version": "2.0.0",
+  "identifier": "com.syncplay.app",
+  "build": {
+    "frontendDist": "../web-client/dist",
+    "devUrl": "http://localhost:3000",
+    "beforeDevCommand": "cd ../web-client && npm run dev",
+    "beforeBuildCommand": "cd ../web-client && npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Syncplay",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 720,
+        "minHeight": 500,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ws://127.0.0.1:8998 ws://localhost:8998; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Entertainment",
+    "shortDescription": "P2P media sync",
+    "longDescription": "Syncplay — Watch videos together with WebRTC peer-to-peer sync."
+  }
+}
