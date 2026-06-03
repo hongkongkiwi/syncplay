@@ -4,10 +4,10 @@
   "version": "2.0.0",
   "identifier": "com.syncplay.app",
   "build": {
-    "frontendDist": "../web-client/dist",
+    "frontendDist": "/Users/andy/Development/hongkongkiwi/syncplay/web-client/dist",
     "devUrl": "http://localhost:3000",
-    "beforeDevCommand": "cd ../web-client && npx vite --port 3000",
-    "beforeBuildCommand": "cd ../web-client && npx vite build"
+    "beforeDevCommand": "true",
+    "beforeBuildCommand": "cd /Users/andy/Development/hongkongkiwi/syncplay/web-client && npx vite build"
   },
   "app": {
     "windows": [
