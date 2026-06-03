@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -596,6 +596,12 @@ async fn handle_input(
                         s.input_cursor = s.input.len();
                     }
                 }
+                KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    // Shift+Enter: insert newline at cursor
+                    let pos = s.input_cursor;
+                    s.input.insert(pos, '\n');
+                    s.input_cursor = pos + 1;
+                }
                 KeyCode::Enter => {
                     let msg = s.input.clone();
                     if !msg.is_empty() && s.connected {
@@ -1084,40 +1090,78 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState) {
 }
 
 fn draw_input(f: &mut Frame, area: Rect, state: &UiState) {
-    let mut spans = vec![Span::styled(" chat> ", Style::default().fg(theme::DIM))];
-    if state.input.is_empty() {
-        spans.push(Span::styled(
-            "type a message, Enter to send",
-            Style::default().fg(theme::DIM),
-        ));
-    } else {
-        let cur = state.input_cursor.min(state.input.chars().count());
-        let byte_cur = char_to_byte(&state.input, cur);
-        let pre = &state.input[..byte_cur];
-        let at_char = state
-            .input
-            .chars()
-            .nth(cur)
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| " ".to_string());
-        let post = if cur < state.input.chars().count() {
-            let byte_next = char_to_byte(&state.input, cur + 1);
-            &state.input[byte_next..]
-        } else {
-            ""
-        };
-        spans.push(Span::styled(pre, Style::default().fg(theme::TEXT)));
-        spans.push(Span::styled(
-            at_char,
-            Style::default().fg(theme::BG).bg(theme::ACCENT),
-        ));
-        spans.push(Span::styled(post, Style::default().fg(theme::TEXT)));
-    }
     let block = Block::default()
         .borders(Borders::TOP)
         .border_style(Style::default().fg(theme::BORDER))
         .style(Style::default().bg(theme::SURFACE));
-    f.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
+
+    if state.input.is_empty() {
+        let hint = Span::styled(
+            "type a message, Enter to send, Shift+Enter for newline",
+            Style::default().fg(theme::DIM),
+        );
+        let para = Paragraph::new(Line::from(vec![
+            Span::styled(" chat> ", Style::default().fg(theme::DIM)),
+            hint,
+        ]))
+        .block(block);
+        f.render_widget(para, area);
+        return;
+    }
+
+    // Split input into lines, track cursor position across lines
+    let lines: Vec<&str> = state.input.split('\n').collect();
+    let mut cursor_line = 0usize;
+    let mut cursor_col = 0usize;
+    let mut char_count = 0usize;
+    for (i, line) in lines.iter().enumerate() {
+        let line_len = line.chars().count();
+        if char_count + line_len > state.input_cursor {
+            cursor_line = i;
+            cursor_col = state.input_cursor - char_count;
+            break;
+        }
+        char_count += line_len + 1; // +1 for the newline char
+    }
+    if cursor_line >= lines.len() {
+        cursor_line = lines.len().saturating_sub(1);
+        cursor_col = lines.last().map(|l| l.chars().count()).unwrap_or(0);
+    }
+
+    let mut para_lines: Vec<Line> = Vec::with_capacity(lines.len());
+    for (i, line) in lines.iter().enumerate() {
+        let prefix = if i == 0 { " chat> " } else { "       " };
+        if i == cursor_line {
+            // Render with cursor highlight on this line
+            let cur = cursor_col.min(line.chars().count());
+            let byte_cur = char_to_byte(line, cur);
+            let pre = &line[..byte_cur];
+            let at_char = line
+                .chars()
+                .nth(cur)
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| " ".to_string());
+            let post = if cur < line.chars().count() {
+                let byte_next = char_to_byte(line, cur + 1);
+                &line[byte_next..]
+            } else {
+                ""
+            };
+            para_lines.push(Line::from(vec![
+                Span::styled(prefix, Style::default().fg(theme::DIM)),
+                Span::styled(pre, Style::default().fg(theme::TEXT)),
+                Span::styled(at_char, Style::default().fg(theme::BG).bg(theme::ACCENT)),
+                Span::styled(post, Style::default().fg(theme::TEXT)),
+            ]));
+        } else {
+            para_lines.push(Line::from(vec![
+                Span::styled(prefix, Style::default().fg(theme::DIM)),
+                Span::styled(*line, Style::default().fg(theme::TEXT)),
+            ]));
+        }
+    }
+
+    f.render_widget(Paragraph::new(para_lines).block(block), area);
 }
 
 fn draw_help(f: &mut Frame, area: Rect, state: &UiState) {
