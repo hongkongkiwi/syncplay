@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../web-client/dist",
     "devUrl": "http://localhost:3000",
-    "beforeDevCommand": "cd ../web-client && npm run dev",
-    "beforeBuildCommand": "cd ../web-client && npm run build"
+    "beforeDevCommand": "cd ../web-client && npx vite --port 3000",
+    "beforeBuildCommand": "cd ../web-client && npx vite build"
   },
   "app": {
     "windows": [
